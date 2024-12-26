@@ -152,18 +152,20 @@ class ModelRunner:
 
         # Init componnets
         if self.device != "cpu":
+            # TODO (chunyuan): this is needed to set self.model_runner.tp_group
             min_per_gpu_memory = self.init_torch_distributed()
+        else:
+            min_per_gpu_memory = None
         self.sampler = Sampler()
         self.load_model()
         if server_args.lora_paths is not None:
             self.init_lora_manager()
-        if self.device != "cpu":
-            # TODO: this is needed to set self.model_runner.max_total_num_tokens
-            self.init_memory_pool(
-                min_per_gpu_memory,
-                server_args.max_running_requests,
-                server_args.max_total_tokens,
-            )
+        # if self.device != "cpu":
+        self.init_memory_pool(
+            min_per_gpu_memory,
+            server_args.max_running_requests,
+            server_args.max_total_tokens,
+        )
         if self.device == "cuda":
             self.init_cublas()
             self.init_attention_backend()
@@ -428,7 +430,8 @@ class ModelRunner:
                 f"Unsupported kv_cache_dtype: {self.server_args.kv_cache_dtype}."
             )
 
-        self.max_total_num_tokens = self.profile_max_num_token(total_gpu_memory)
+        # self.max_total_num_tokens = self.profile_max_num_token(total_gpu_memory)
+        self.max_total_num_tokens = max_total_tokens
         if max_total_tokens is not None:
             if max_total_tokens > self.max_total_num_tokens:
                 logging.warning(
@@ -493,7 +496,7 @@ class ModelRunner:
             )
         logger.info(
             f"Memory pool end. "
-            f"avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
+            # f"avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
         )
 
     def init_cublas(self):
