@@ -103,7 +103,8 @@ class ModelRunner:
             and not self.server_args.disable_mla
         ):
             logger.info("MLA optimization is turned on. Use triton backend.")
-            self.server_args.attention_backend = "triton"
+            if self.server_args.device != "cpu":
+                self.server_args.attention_backend = "triton"
 
         if self.server_args.enable_double_sparsity:
             logger.info(
@@ -150,16 +151,19 @@ class ModelRunner:
         )
 
         # Init componnets
-        min_per_gpu_memory = self.init_torch_distributed()
+        if self.device != "cpu":
+            min_per_gpu_memory = self.init_torch_distributed()
         self.sampler = Sampler()
         self.load_model()
         if server_args.lora_paths is not None:
             self.init_lora_manager()
-        self.init_memory_pool(
-            min_per_gpu_memory,
-            server_args.max_running_requests,
-            server_args.max_total_tokens,
-        )
+        if self.device != "cpu":
+            # TODO: this is needed to set self.model_runner.max_total_num_tokens
+            self.init_memory_pool(
+                min_per_gpu_memory,
+                server_args.max_running_requests,
+                server_args.max_total_tokens,
+            )
         if self.device == "cuda":
             self.init_cublas()
             self.init_attention_backend()
@@ -221,9 +225,10 @@ class ModelRunner:
         return min_per_gpu_memory
 
     def load_model(self):
-        logger.info(
-            f"Load weight begin. avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
-        )
+        if self.device != "cpu":
+            logger.info(
+                f"Load weight begin. avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
+            )
 
         # This can reduce thread conflicts and speed up weight loading.
         torch.set_num_threads(1)
@@ -278,7 +283,7 @@ class ModelRunner:
             f"Load weight end. "
             f"type={type(self.model).__name__}, "
             f"dtype={self.dtype}, "
-            f"avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
+            # f"avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
         )
 
     def update_weights(self, model_path: str, load_format: str):

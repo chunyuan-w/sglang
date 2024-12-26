@@ -112,7 +112,10 @@ def top_k_top_p_min_p_sampling_from_probs_torch(
         torch.arange(0, probs.shape[-1], device=probs.device).view(1, -1)
         >= top_ks.view(-1, 1)
     ] = 0.0
+    
+    # Apply this only when sampling_info.need_min_p_sampling is True
     probs_sort[probs_sort < min_p_thresholds.view(-1, 1)] = 0.0
+    
     probs_sort.div_(probs_sort.max(dim=-1, keepdim=True)[0])
     sampled_index = torch.multinomial(probs_sort, num_samples=1)
     batch_next_token_ids = torch.gather(probs_idx, dim=1, index=sampled_index).view(-1)
