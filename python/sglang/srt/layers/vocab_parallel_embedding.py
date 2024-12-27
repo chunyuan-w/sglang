@@ -523,6 +523,7 @@ class ParallelLMHead(VocabParallelEmbedding):
             padding_size,
             quant_config,
             prefix,
+            enable_tp=False,
         )
         self.quant_config = quant_config
         if bias:

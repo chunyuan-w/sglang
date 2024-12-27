@@ -103,7 +103,8 @@ class LlamaAttention(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
-        tp_size = get_tensor_model_parallel_world_size()
+        # tp_size = get_tensor_model_parallel_world_size()
+        tp_size = 1
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
@@ -258,6 +259,7 @@ class LlamaModel(nn.Module):
             config.vocab_size,
             config.hidden_size,
             quant_config=quant_config,
+            enable_tp=False,
         )
         self.layers = make_layers(
             config.num_hidden_layers,
@@ -333,7 +335,7 @@ class LlamaForCausalLM(nn.Module):
             self.lm_head = ParallelLMHead(
                 config.vocab_size, config.hidden_size, quant_config=quant_config
             )
-        self.logits_processor = LogitsProcessor(config)
+        self.logits_processor = LogitsProcessor(config, skip_all_gather=True)
         self.pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
         self.stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
