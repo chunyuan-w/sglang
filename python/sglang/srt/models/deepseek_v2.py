@@ -17,6 +17,7 @@
 """Inference-only DeepseekV2 model."""
 
 from typing import Any, Dict, Iterable, Optional, Tuple
+import math
 
 import torch
 import torch.nn.functional as F
@@ -98,6 +99,90 @@ class DeepseekV2MLP(nn.Module):
 class MoEGate(nn.Module):
     def __init__(self, config):
         super().__init__()
+        self.config = config
+        self.top_k = config.num_experts_per_tok
+        self.n_routed_experts = config.n_routed_experts
+        self.routed_scaling_factor = config.routed_scaling_factor
+        self.scoring_func = config.scoring_func
+        self.alpha = config.aux_loss_alpha
+        self.seq_aux = config.seq_aux
+        self.topk_method = config.topk_method
+        print("my topk_method:", self.topk_method)
+        self.n_group = config.n_group
+        self.topk_group = config.topk_group
+
+        # topk selection algorithm
+        self.norm_topk_prob = config.norm_topk_prob
+        self.gating_dim = config.hidden_size
+        self.weight = nn.Parameter(
+            torch.empty((self.n_routed_experts, self.gating_dim))
+        )
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        import torch.nn.init as init
+
+        init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+
+    def forward(self, hidden_states):
+        num_tokens, h = hidden_states.shape
+        ### compute gating score
+        hidden_states = hidden_states.view(-1, h)
+        logits = F.linear(
+            hidden_states.type(torch.float32), self.weight.type(torch.float32), None
+        )
+        if self.scoring_func == "softmax":
+            scores = logits.softmax(dim=-1, dtype=torch.float32)
+        else:
+            raise NotImplementedError(
+                f"insupportable scoring function for MoE gating: {self.scoring_func}"
+            )
+
+        ### select top-k experts
+        print("my topk_method:", self.topk_method)
+        if self.topk_method == "greedy":
+            print("my set gready")
+            topk_weight, topk_idx = torch.topk(
+                scores, k=self.top_k, dim=-1, sorted=False
+            )
+        elif self.topk_method == "group_limited_greedy":
+            print("my set group_limited_greedy")
+            
+            group_scores = (
+                scores.view(num_tokens, self.n_group, -1).max(dim=-1).values
+            )  # [n, n_group]
+            group_idx = torch.topk(
+                group_scores, k=self.topk_group, dim=-1, sorted=False
+            )[
+                1
+            ]  # [n, top_k_group]
+            group_mask = torch.zeros_like(group_scores)  # [n, n_group]
+            group_mask.scatter_(1, group_idx, 1)  # [n, n_group]
+            score_mask = (
+                group_mask.unsqueeze(-1)
+                .expand(
+                    num_tokens, self.n_group, self.n_routed_experts // self.n_group
+                )
+                .reshape(num_tokens, -1)
+            )  # [n, e]
+            tmp_scores = scores.masked_fill(~score_mask.bool(), 0.0)  # [n, e]
+            topk_weight, topk_idx = torch.topk(
+                tmp_scores, k=self.top_k, dim=-1, sorted=False
+            )
+
+        ### norm gate to sum 1
+        if self.top_k > 1 and self.norm_topk_prob:
+            denominator = topk_weight.sum(dim=-1, keepdim=True) + 1e-20
+            topk_weight = topk_weight / denominator
+        else:
+            topk_weight = topk_weight * self.routed_scaling_factor
+        aux_loss = None
+        return topk_idx, topk_weight, aux_loss
+
+
+class MoEGateOld(nn.Module):
+    def __init__(self, config):
+        super().__init__()
         self.weight = nn.Parameter(
             torch.empty((config.n_routed_experts, config.hidden_size))
         )
@@ -113,7 +198,7 @@ class MoEGate(nn.Module):
         return logits
 
 
-class DeepseekV2MoE(nn.Module):
+class DeepseekV2MoEOld(nn.Module):
 
     def __init__(
         self,
@@ -205,7 +290,7 @@ class AddAuxiliaryLoss(torch.autograd.Function):
 
 
 
-class DeepseekV2MoENew(nn.Module):
+class DeepseekV2MoE(nn.Module):
     """
     A mixed expert module containing shared experts.
     """
@@ -219,34 +304,15 @@ class DeepseekV2MoENew(nn.Module):
         self.config = config
         self.num_experts_per_tok = config.num_experts_per_tok
 
-        if hasattr(config, "ep_size") and config.ep_size > 1:
-            # assert config.ep_size == dist.get_world_size()
-            self.ep_size = config.ep_size
-            self.experts_per_rank = config.n_routed_experts // config.ep_size
-            self.ep_rank = dist.get_rank()
-            self.experts = nn.ModuleList(
-                [
-                    (
-                        DeepseekV2MLP(
-                            config, intermediate_size=config.moe_intermediate_size, hidden_act=config.hidden_act,
-                        )
-                        if i >= self.ep_rank * self.experts_per_rank
-                        and i < (self.ep_rank + 1) * self.experts_per_rank
-                        else None
-                    )
-                    for i in range(config.n_routed_experts)
-                ]
-            )
-        else:
-            self.ep_size = 1
-            self.experts_per_rank = config.n_routed_experts
-            self.ep_rank = 0
-            self.experts = nn.ModuleList(
-                [
-                    DeepseekV2MLP(hidden_size=config.hidden_size, intermediate_size=config.moe_intermediate_size, hidden_act=config.hidden_act,)
-                    for i in range(config.n_routed_experts)
-                ]
-            )
+        self.ep_size = 1
+        self.experts_per_rank = config.n_routed_experts
+        self.ep_rank = 0
+        self.experts = nn.ModuleList(
+            [
+                DeepseekV2MLP(hidden_size=config.hidden_size, intermediate_size=config.moe_intermediate_size, hidden_act=config.hidden_act,)
+                for i in range(config.n_routed_experts)
+            ]
+        )
         self.gate = MoEGate(config)
         if config.n_shared_experts is not None:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
@@ -259,19 +325,7 @@ class DeepseekV2MoENew(nn.Module):
         orig_shape = hidden_states.shape
         topk_idx, topk_weight, aux_loss = self.gate(hidden_states)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-        flat_topk_idx = topk_idx.view(-1)
-        if self.training:
-            hidden_states = hidden_states.repeat_interleave(
-                self.num_experts_per_tok, dim=0
-            )
-            y = torch.empty_like(hidden_states)
-            for i, expert in enumerate(self.experts):
-                y[flat_topk_idx == i] = expert(hidden_states[flat_topk_idx == i])
-            y = (y.view(*topk_weight.shape, -1) * topk_weight.unsqueeze(-1)).sum(dim=1)
-            y = y.view(*orig_shape)
-            y = AddAuxiliaryLoss.apply(y, aux_loss)
-        else:
-            y = self.moe_infer(hidden_states, topk_idx, topk_weight).view(*orig_shape)
+        y = self.moe_infer(hidden_states, topk_idx, topk_weight).view(*orig_shape)
         if self.config.n_shared_experts is not None:
             y = y + self.shared_experts(identity)
         return y
@@ -284,38 +338,6 @@ class DeepseekV2MoENew(nn.Module):
         idxs = topk_ids.view(-1).argsort()
         sorted_tokens = x[idxs // topk_ids.shape[1]]
         sorted_tokens_shape = sorted_tokens.shape
-        if self.ep_size > 1:
-            tokens_per_ep_rank = tokens_per_expert.view(self.ep_size, -1).sum(dim=1)
-            tokens_per_expert_group = tokens_per_expert.new_empty(
-                tokens_per_expert.shape[0]
-            )
-            dist.all_to_all_single(tokens_per_expert_group, tokens_per_expert)
-            output_splits = (
-                tokens_per_expert_group.view(self.ep_size, -1)
-                .sum(1)
-                .cpu()
-                .numpy()
-                .tolist()
-            )
-            gathered_tokens = sorted_tokens.new_empty(
-                tokens_per_expert_group.sum(dim=0).cpu().item(), sorted_tokens.shape[1]
-            )
-            input_split_sizes = tokens_per_ep_rank.cpu().numpy().tolist()
-            dist.all_to_all(
-                list(gathered_tokens.split(output_splits)),
-                list(sorted_tokens.split(input_split_sizes)),
-            )
-            tokens_per_expert_post_gather = tokens_per_expert_group.view(
-                self.ep_size, self.experts_per_rank
-            ).sum(dim=0)
-            gatherd_idxs = np.zeros(shape=(gathered_tokens.shape[0],), dtype=np.int32)
-            s = 0
-            for i, k in enumerate(tokens_per_expert_group.cpu().numpy()):
-                gatherd_idxs[s : s + k] = i % self.experts_per_rank
-                s += k
-            gatherd_idxs = gatherd_idxs.argsort()
-            sorted_tokens = gathered_tokens[gatherd_idxs]
-            tokens_per_expert = tokens_per_expert_post_gather
         tokens_per_expert = tokens_per_expert.cpu().numpy()
 
         outputs = []
@@ -331,15 +353,6 @@ class DeepseekV2MoENew(nn.Module):
             start_idx = end_idx
 
         outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
-        if self.ep_size > 1:
-            new_x = torch.empty_like(outs)
-            new_x[gatherd_idxs] = outs
-            gathered_tokens = new_x.new_empty(*sorted_tokens_shape)
-            dist.all_to_all(
-                list(gathered_tokens.split(input_split_sizes)),
-                list(new_x.split(output_splits)),
-            )
-            outs = gathered_tokens
 
         new_x = torch.empty_like(outs)
         new_x[idxs] = outs
@@ -1067,9 +1080,12 @@ class DeepseekV2ForCausalLM(nn.Module):
                 # name will be updated to mlp.experts[0].gate_up_proj, which
                 # will then be updated below in expert_params_mapping
                 # for mlp.experts[0].gate_gate_up_proj, which breaks load.
-                if ("mlp.experts." in name) and name not in params_dict:
-                    continue
+                # if ("mlp.experts." in name) and name not in params_dict:
+                #     continue
+                # print("stacked name before:", name)
                 name = name.replace(weight_name, param_name)
+                # print("stacked name after:", name)
+                
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
@@ -1085,18 +1101,27 @@ class DeepseekV2ForCausalLM(nn.Module):
                     # print("weight_name:",weight_name)
                     # print("param_name:",param_name)
                     # print("name before:", name)
-                    name = name.replace(weight_name, param_name)
+                    # name = name.replace(weight_name, param_name)
                     # print("name after:", name)
                     # print(params_dict.keys())
                     param = params_dict[name]
                     weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                    )
+                    if "down_proj" in name:
+                        weight_loader(
+                            param,
+                            loaded_weight,
+                            # name,
+                            # shard_id=shard_id,
+                            # expert_id=expert_id,
+                        )
+                    else:
+                        weight_loader(
+                            param,
+                            loaded_weight,
+                            name,
+                            shard_id=shard_id,
+                            expert_id=expert_id,
+                        )                        
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.
