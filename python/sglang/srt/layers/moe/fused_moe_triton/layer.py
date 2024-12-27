@@ -158,6 +158,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         )
 
     def forward_cpu(self, *args, **kwargs):
+        # TODO: add MoE naive version
         raise NotImplementedError("The CPU backend currently does not support MoE.")
 
     def forward_tpu(self, *args, **kwargs) -> torch.Tensor:
@@ -210,9 +211,10 @@ class FusedMoE(torch.nn.Module):
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
 
-        self.tp_size = (
-            tp_size if tp_size is not None else get_tensor_model_parallel_world_size()
-        )
+        # self.tp_size = (
+        #     tp_size if tp_size is not None else get_tensor_model_parallel_world_size()
+        # )
+        self.tp_size = 1
         self.top_k = top_k
         self.num_experts = num_experts
         assert intermediate_size % self.tp_size == 0
@@ -415,7 +417,8 @@ class FusedMoE(torch.nn.Module):
         SHARD_ID_TO_SHARDED_DIM = {"w1": 0, "w2": 1, "w3": 0}
 
         expert_data = param.data[expert_id]
-        tp_rank = get_tensor_model_parallel_rank()
+        # tp_rank = get_tensor_model_parallel_rank()
+        tp_rank = 0
 
         # is_transposed: if the dim to shard the weight
         # should be flipped. Required by GPTQ, compressed-tensors

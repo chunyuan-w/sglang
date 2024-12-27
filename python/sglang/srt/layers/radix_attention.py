@@ -62,6 +62,16 @@ class RadixAttention(nn.Module):
             k = k.view(-1, self.tp_k_head_num, self.qk_head_dim)
             v = v.view(-1, self.tp_v_head_num, self.v_head_dim)
 
+        print("my radix q:", q.shape)
+        print("my radix k:", k.shape)
+        print("my radix v:", v.shape)
+        
+        print(self.tp_k_head_num)        
+        print(self.qk_head_dim)        
+        print(self.tp_v_head_num)        
+        print(self.v_head_dim)    
+        print("##################")    
+        
         return forward_batch.attn_backend.forward(
             q, k, v, self, forward_batch, save_kv_cache
         )

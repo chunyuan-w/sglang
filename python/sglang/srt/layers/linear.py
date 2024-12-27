@@ -336,7 +336,8 @@ class ColumnParallelLinear(LinearBase):
             self.register_parameter("bias", None)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        tp_rank = get_tensor_model_parallel_rank()
+        # tp_rank = get_tensor_model_parallel_rank()
+        tp_rank = 0
         output_dim = getattr(param, "output_dim", None)
 
         # Special case for GGUF

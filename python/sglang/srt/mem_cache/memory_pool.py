@@ -275,6 +275,9 @@ class MLATokenToKVPool(BaseTokenToKVPool):
             )
             for _ in range(layer_num)
         ]
+        print("my kv_buffer: ", (size + 1, 1, kv_lora_rank + qk_rope_head_dim))
+        print("kv_lora_rank:",kv_lora_rank)
+        print("qk_rope_head_dim:",qk_rope_head_dim)
 
     def get_key_buffer(self, layer_id: int):
         if self.store_dtype != self.dtype:
@@ -297,6 +300,7 @@ class MLATokenToKVPool(BaseTokenToKVPool):
         cache_v: torch.Tensor,
     ):
         layer_id = layer.layer_id
+        print("layer_id:", layer_id)
         if cache_k.dtype != self.dtype:
             cache_k = cache_k.to(self.dtype)
         if self.store_dtype != self.dtype:

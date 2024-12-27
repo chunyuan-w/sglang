@@ -94,7 +94,8 @@ class ModelRunner:
             and not self.server_args.disable_mla
         ):
             logger.info("MLA optimization is turned on. Use triton backend.")
-            self.server_args.attention_backend = "triton"
+            if self.server_args.device != "cpu":
+                self.server_args.attention_backend = "triton"
             # FIXME(HandH1998)
             if (
                 "DeepseekV3ForCausalLM" in self.model_config.hf_config.architectures
@@ -468,6 +469,7 @@ class ModelRunner:
         logger.info("LoRA manager ready.")
 
     def profile_max_num_token(self, total_gpu_memory: int):
+        
         available_gpu_memory = get_available_gpu_memory(
             self.device, self.gpu_id, distributed=self.tp_size > 1
         )

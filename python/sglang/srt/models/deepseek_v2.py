@@ -121,7 +121,8 @@ class DeepseekV2MoE(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
-        self.tp_size = get_tensor_model_parallel_world_size()
+        # self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_size = 1
         self.routed_scaling_factor = config.routed_scaling_factor
         self.n_shared_experts = config.n_shared_experts
         self.routed_scaling_factor = config.routed_scaling_factor
@@ -182,6 +183,176 @@ class DeepseekV2MoE(nn.Module):
         return final_hidden_states.view(num_tokens, hidden_dim)
 
 
+class AddAuxiliaryLoss(torch.autograd.Function):
+    """
+    The trick function of adding auxiliary (aux) loss,
+    which includes the gradient of the aux loss during backpropagation.
+    """
+
+    @staticmethod
+    def forward(ctx, x, loss):
+        assert loss.numel() == 1
+        ctx.dtype = loss.dtype
+        ctx.required_aux_loss = loss.requires_grad
+        return x
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        grad_loss = None
+        if ctx.required_aux_loss:
+            grad_loss = torch.ones(1, dtype=ctx.dtype, device=grad_output.device)
+        return grad_output, grad_loss
+
+
+
+class DeepseekV2MoENew(nn.Module):
+    """
+    A mixed expert module containing shared experts.
+    """
+
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+    ):
+        super().__init__()
+        self.config = config
+        self.num_experts_per_tok = config.num_experts_per_tok
+
+        if hasattr(config, "ep_size") and config.ep_size > 1:
+            # assert config.ep_size == dist.get_world_size()
+            self.ep_size = config.ep_size
+            self.experts_per_rank = config.n_routed_experts // config.ep_size
+            self.ep_rank = dist.get_rank()
+            self.experts = nn.ModuleList(
+                [
+                    (
+                        DeepseekV2MLP(
+                            config, intermediate_size=config.moe_intermediate_size, hidden_act=config.hidden_act,
+                        )
+                        if i >= self.ep_rank * self.experts_per_rank
+                        and i < (self.ep_rank + 1) * self.experts_per_rank
+                        else None
+                    )
+                    for i in range(config.n_routed_experts)
+                ]
+            )
+        else:
+            self.ep_size = 1
+            self.experts_per_rank = config.n_routed_experts
+            self.ep_rank = 0
+            self.experts = nn.ModuleList(
+                [
+                    DeepseekV2MLP(hidden_size=config.hidden_size, intermediate_size=config.moe_intermediate_size, hidden_act=config.hidden_act,)
+                    for i in range(config.n_routed_experts)
+                ]
+            )
+        self.gate = MoEGate(config)
+        if config.n_shared_experts is not None:
+            intermediate_size = config.moe_intermediate_size * config.n_shared_experts
+            self.shared_experts = DeepseekV2MLP(
+                hidden_size=config.hidden_size, intermediate_size=intermediate_size, hidden_act=config.hidden_act,
+            )
+
+    def forward(self, hidden_states):
+        identity = hidden_states
+        orig_shape = hidden_states.shape
+        topk_idx, topk_weight, aux_loss = self.gate(hidden_states)
+        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+        flat_topk_idx = topk_idx.view(-1)
+        if self.training:
+            hidden_states = hidden_states.repeat_interleave(
+                self.num_experts_per_tok, dim=0
+            )
+            y = torch.empty_like(hidden_states)
+            for i, expert in enumerate(self.experts):
+                y[flat_topk_idx == i] = expert(hidden_states[flat_topk_idx == i])
+            y = (y.view(*topk_weight.shape, -1) * topk_weight.unsqueeze(-1)).sum(dim=1)
+            y = y.view(*orig_shape)
+            y = AddAuxiliaryLoss.apply(y, aux_loss)
+        else:
+            y = self.moe_infer(hidden_states, topk_idx, topk_weight).view(*orig_shape)
+        if self.config.n_shared_experts is not None:
+            y = y + self.shared_experts(identity)
+        return y
+
+    @torch.no_grad()
+    def moe_infer(self, x, topk_ids, topk_weight):
+        cnts = topk_ids.new_zeros((topk_ids.shape[0], len(self.experts)))
+        cnts.scatter_(1, topk_ids, 1)
+        tokens_per_expert = cnts.sum(dim=0)
+        idxs = topk_ids.view(-1).argsort()
+        sorted_tokens = x[idxs // topk_ids.shape[1]]
+        sorted_tokens_shape = sorted_tokens.shape
+        if self.ep_size > 1:
+            tokens_per_ep_rank = tokens_per_expert.view(self.ep_size, -1).sum(dim=1)
+            tokens_per_expert_group = tokens_per_expert.new_empty(
+                tokens_per_expert.shape[0]
+            )
+            dist.all_to_all_single(tokens_per_expert_group, tokens_per_expert)
+            output_splits = (
+                tokens_per_expert_group.view(self.ep_size, -1)
+                .sum(1)
+                .cpu()
+                .numpy()
+                .tolist()
+            )
+            gathered_tokens = sorted_tokens.new_empty(
+                tokens_per_expert_group.sum(dim=0).cpu().item(), sorted_tokens.shape[1]
+            )
+            input_split_sizes = tokens_per_ep_rank.cpu().numpy().tolist()
+            dist.all_to_all(
+                list(gathered_tokens.split(output_splits)),
+                list(sorted_tokens.split(input_split_sizes)),
+            )
+            tokens_per_expert_post_gather = tokens_per_expert_group.view(
+                self.ep_size, self.experts_per_rank
+            ).sum(dim=0)
+            gatherd_idxs = np.zeros(shape=(gathered_tokens.shape[0],), dtype=np.int32)
+            s = 0
+            for i, k in enumerate(tokens_per_expert_group.cpu().numpy()):
+                gatherd_idxs[s : s + k] = i % self.experts_per_rank
+                s += k
+            gatherd_idxs = gatherd_idxs.argsort()
+            sorted_tokens = gathered_tokens[gatherd_idxs]
+            tokens_per_expert = tokens_per_expert_post_gather
+        tokens_per_expert = tokens_per_expert.cpu().numpy()
+
+        outputs = []
+        start_idx = 0
+        for i, num_tokens in enumerate(tokens_per_expert):
+            end_idx = start_idx + num_tokens
+            if num_tokens == 0:
+                continue
+            expert = self.experts[i + self.ep_rank * self.experts_per_rank]
+            tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
+            expert_out = expert(tokens_for_this_expert)
+            outputs.append(expert_out)
+            start_idx = end_idx
+
+        outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
+        if self.ep_size > 1:
+            new_x = torch.empty_like(outs)
+            new_x[gatherd_idxs] = outs
+            gathered_tokens = new_x.new_empty(*sorted_tokens_shape)
+            dist.all_to_all(
+                list(gathered_tokens.split(input_split_sizes)),
+                list(new_x.split(output_splits)),
+            )
+            outs = gathered_tokens
+
+        new_x = torch.empty_like(outs)
+        new_x[idxs] = outs
+        final_out = (
+            new_x.view(*topk_ids.shape, -1)
+            .type(topk_weight.dtype)
+            .mul_(topk_weight.unsqueeze(dim=-1))
+            .sum(dim=1)
+            .type(new_x.dtype)
+        )
+        return final_out
+
+
 def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
     import math
 
@@ -218,7 +389,8 @@ class DeepseekV2Attention(nn.Module):
         self.q_lora_rank = q_lora_rank
         self.kv_lora_rank = kv_lora_rank
         self.num_heads = num_heads
-        tp_size = get_tensor_model_parallel_world_size()
+        # tp_size = get_tensor_model_parallel_world_size()
+        tp_size = 1
         assert num_heads % tp_size == 0
         self.num_local_heads = num_heads // tp_size
         self.scaling = self.qk_head_dim**-0.5
@@ -366,7 +538,8 @@ class DeepseekV2AttentionMLA(nn.Module):
         self.q_lora_rank = q_lora_rank
         self.kv_lora_rank = kv_lora_rank
         self.num_heads = num_heads
-        tp_size = get_tensor_model_parallel_world_size()
+        # tp_size = get_tensor_model_parallel_world_size()
+        tp_size = 1
         assert num_heads % tp_size == 0
         self.num_local_heads = num_heads if use_dp else num_heads // tp_size
         self.scaling = self.qk_head_dim**-0.5
@@ -548,6 +721,12 @@ class DeepseekV2AttentionMLA(nn.Module):
         forward_batch.token_to_kv_pool.set_kv_buffer(
             self.attn_mha, forward_batch.out_cache_loc, latent_cache, None
         )
+        print("latent_cache:", latent_cache.shape)
+        
+        print("after set latent")
+        print("my q:", q.shape)
+        print("my k:", k.shape)
+        print("my v:", v.shape)
         attn_output = self.attn_mha(q, k, v, forward_batch, save_kv_cache=False)
         attn_output = attn_output.reshape(-1, self.num_local_heads * self.v_head_dim)
         output, _ = self.o_proj(attn_output)
@@ -776,7 +955,8 @@ class DeepseekV2Model(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
-            enable_tp=not global_server_args_dict["enable_dp_attention"],
+            # enable_tp=not global_server_args_dict["enable_dp_attention"],
+            enable_tp=False,
         )
         self.layers = nn.ModuleList(
             [
@@ -830,7 +1010,7 @@ class DeepseekV2ForCausalLM(nn.Module):
             self.lm_head = ParallelLMHead(
                 config.vocab_size, config.hidden_size, quant_config=quant_config
             )
-            self.logits_processor = LogitsProcessor(config)
+            self.logits_processor = LogitsProcessor(config, skip_all_gather=True)
 
     @torch.no_grad()
     def forward(
@@ -846,6 +1026,7 @@ class DeepseekV2ForCausalLM(nn.Module):
             )
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
@@ -901,7 +1082,12 @@ class DeepseekV2ForCausalLM(nn.Module):
                     param_name, weight_name, expert_id, shard_id = mapping
                     if weight_name not in name:
                         continue
+                    # print("weight_name:",weight_name)
+                    # print("param_name:",param_name)
+                    # print("name before:", name)
                     name = name.replace(weight_name, param_name)
+                    # print("name after:", name)
+                    # print(params_dict.keys())
                     param = params_dict[name]
                     weight_loader = param.weight_loader
                     weight_loader(

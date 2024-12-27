@@ -129,6 +129,14 @@ class TorchNativeAttnBackend(AttentionBackend):
             per_req_key = k_cache[per_req_tokens].movedim(0, query.dim() - 2)
             per_req_value = v_cache[per_req_tokens].movedim(0, query.dim() - 2)
 
+            print("sdpa q:", per_req_query_redudant.unsqueeze(0).shape)
+            print("sdpa k:", per_req_key.unsqueeze(0).shape)
+            print("sdpa v:", per_req_value.unsqueeze(0).shape)
+            
+            print("per_req_tokens:", per_req_tokens.shape)
+            print("query.dim():", query.dim())
+            print("query:", query.shape)
+            
             per_req_out_redudant = (
                 scaled_dot_product_attention(
                     per_req_query_redudant.unsqueeze(0),
@@ -229,21 +237,36 @@ class TorchNativeAttnBackend(AttentionBackend):
         else:
             o = torch.empty_like(q)
 
+        print("save_kv_cache:", save_kv_cache)
         if save_kv_cache:
             forward_batch.token_to_kv_pool.set_kv_buffer(
                 layer, forward_batch.out_cache_loc, k, v
             )
+
+        # forward_batch.token_to_kv_pool.set_kv_buffer(
+        #     layer, forward_batch.out_cache_loc, k, v
+        # )
+        print("my get shape k:", forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id).shape)
+        print("my get shape v:", forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id).shape)
+        print("k:", k.shape)
+        print("v:", v.shape)
 
         use_gqa = layer.tp_q_head_num != layer.tp_k_head_num
 
         q_ = q.view(-1, layer.tp_q_head_num, layer.qk_head_dim)
         o_ = o.view(-1, layer.tp_q_head_num, layer.v_head_dim)
 
+        print("layer.layer_id:", layer.layer_id)
+        print(forward_batch.token_to_kv_pool.__class__)
         self._run_sdpa_forward_extend(
             q_,
             o_,
             forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id),
             forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id),
+            
+            # forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id) if save_kv_cache else k,
+            # forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id) if save_kv_cache else v,            
+            
             forward_batch.req_to_token_pool.req_to_token,
             forward_batch.req_pool_indices,
             forward_batch.seq_lens,
