@@ -107,7 +107,6 @@ class MoEGate(nn.Module):
         self.alpha = config.aux_loss_alpha
         self.seq_aux = config.seq_aux
         self.topk_method = config.topk_method
-        print("my topk_method:", self.topk_method)
         self.n_group = config.n_group
         self.topk_group = config.topk_group
 
@@ -139,14 +138,11 @@ class MoEGate(nn.Module):
             )
 
         ### select top-k experts
-        print("my topk_method:", self.topk_method)
         if self.topk_method == "greedy":
-            print("my set gready")
             topk_weight, topk_idx = torch.topk(
                 scores, k=self.top_k, dim=-1, sorted=False
             )
         elif self.topk_method == "group_limited_greedy":
-            print("my set group_limited_greedy")
             
             group_scores = (
                 scores.view(num_tokens, self.n_group, -1).max(dim=-1).values
@@ -624,6 +620,7 @@ class DeepseekV2AttentionMLA(nn.Module):
                 bias=False,
                 quant_config=quant_config,
             )
+            # print("self.kv_b_proj:", self.kv_lora_rank, self.num_heads * (self.qk_nope_head_dim + self.v_head_dim))
             # O projection.
             self.o_proj = RowParallelLinear(
                 self.num_heads * self.v_head_dim,
@@ -711,13 +708,21 @@ class DeepseekV2AttentionMLA(nn.Module):
             q = self.q_proj(hidden_states)[0].view(
                 -1, self.num_local_heads, self.qk_head_dim
             )
+        # print("in forward_normal:")
+        # print("qk_nope_head_dim:", self.qk_nope_head_dim)
+        # print("qk_rope_head_dim:", self.qk_rope_head_dim)
+        # print("hidden_states:", hidden_states.shape)
+        
         _, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
+        # print("latent_cache:", latent_cache.shape)
+        
         kv_a, _ = latent_cache.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         latent_cache = latent_cache.unsqueeze(1)
         kv_a = self.kv_a_layernorm(kv_a.contiguous())
         kv = self.kv_b_proj(kv_a)[0]
         kv = kv.view(-1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim)
+        # print("kv:", kv.shape)
         k_nope = kv[..., : self.qk_nope_head_dim]
         v = kv[..., self.qk_nope_head_dim :]
         k_pe = latent_cache[:, :, self.kv_lora_rank :]

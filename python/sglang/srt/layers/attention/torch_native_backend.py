@@ -74,6 +74,7 @@ class TorchNativeAttnBackend(AttentionBackend):
         scaling=None,
         enable_gqa=False,
         causal=False,
+        save_kv_cache=True,
     ):
         """Run the extend forward by using torch native sdpa op.
 
@@ -102,7 +103,9 @@ class TorchNativeAttnBackend(AttentionBackend):
         query = query.movedim(0, query.dim() - 2)
 
         start_q, start_kv = 0, 0
+        # print("seq_lens.shape:", seq_lens.shape)
         for seq_idx in range(seq_lens.shape[0]):
+            # print("seq_idx:", seq_idx)
             # TODO: this loop process a sequence per iter, this is inefficient.
             # Need optimize the performance later.
 
@@ -113,6 +116,10 @@ class TorchNativeAttnBackend(AttentionBackend):
             end_q = start_q + extend_seq_len_q
             end_kv = start_kv + seq_len_kv
 
+            # print("query shape:", query.shape)
+            # print("start_q:", start_q)
+            # print("end_q:", end_q)
+            
             per_req_query = query[:, start_q:end_q, :]
             per_req_query_redudant = torch.empty(
                 (per_req_query.shape[0], seq_len_kv, per_req_query.shape[2]),
@@ -126,16 +133,23 @@ class TorchNativeAttnBackend(AttentionBackend):
             # index for each token in the sequence.
             req_pool_idx = req_pool_indices[seq_idx]
             per_req_tokens = req_to_token[req_pool_idx, :seq_len_kv]
-            per_req_key = k_cache[per_req_tokens].movedim(0, query.dim() - 2)
-            per_req_value = v_cache[per_req_tokens].movedim(0, query.dim() - 2)
 
-            print("sdpa q:", per_req_query_redudant.unsqueeze(0).shape)
-            print("sdpa k:", per_req_key.unsqueeze(0).shape)
-            print("sdpa v:", per_req_value.unsqueeze(0).shape)
+
+            # print("k_cache:", k_cache.shape)
+            # print("v_cache:", v_cache.shape)
+            # print("per_req_tokens:", per_req_tokens)
+            # print("per_req_query_redudant:", per_req_query_redudant.shape)
+            # print("done access")
             
-            print("per_req_tokens:", per_req_tokens.shape)
-            print("query.dim():", query.dim())
-            print("query:", query.shape)
+            # TODO (Chunyuan): check if the accuracy is still correct
+            per_req_key = (k_cache[per_req_tokens] if save_kv_cache else k_cache).movedim(0, query.dim() - 2)
+            per_req_value = (v_cache[per_req_tokens] if save_kv_cache else v_cache).movedim(0, query.dim() - 2)
+
+            # print("sdpa v:", per_req_value.unsqueeze(0).shape)
+            
+            # print("per_req_tokens:", per_req_tokens.shape)
+            # print("query.dim():", query.dim())
+            # print("query:", query.shape)
             
             per_req_out_redudant = (
                 scaled_dot_product_attention(
@@ -237,7 +251,6 @@ class TorchNativeAttnBackend(AttentionBackend):
         else:
             o = torch.empty_like(q)
 
-        print("save_kv_cache:", save_kv_cache)
         if save_kv_cache:
             forward_batch.token_to_kv_pool.set_kv_buffer(
                 layer, forward_batch.out_cache_loc, k, v
@@ -246,26 +259,28 @@ class TorchNativeAttnBackend(AttentionBackend):
         # forward_batch.token_to_kv_pool.set_kv_buffer(
         #     layer, forward_batch.out_cache_loc, k, v
         # )
-        print("my get shape k:", forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id).shape)
-        print("my get shape v:", forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id).shape)
-        print("k:", k.shape)
-        print("v:", v.shape)
 
         use_gqa = layer.tp_q_head_num != layer.tp_k_head_num
 
         q_ = q.view(-1, layer.tp_q_head_num, layer.qk_head_dim)
         o_ = o.view(-1, layer.tp_q_head_num, layer.v_head_dim)
 
-        print("layer.layer_id:", layer.layer_id)
-        print(forward_batch.token_to_kv_pool.__class__)
+        # print("q_:", q_.shape)
+        # print("k buffer:", forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id).shape)
+        # print("v buffer:", forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id).shape)
+        # print("k:",k.shape)
+        # print("v:",v.shape)
+
+
         self._run_sdpa_forward_extend(
             q_,
             o_,
-            forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id),
-            forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id),
+            # forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id),
+            # forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id),
             
-            # forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id) if save_kv_cache else k,
-            # forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id) if save_kv_cache else v,            
+            # TODO (Chunyuan): check if the accuracy is still correct
+            forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id) if save_kv_cache else k,
+            forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id) if save_kv_cache else v,            
             
             forward_batch.req_to_token_pool.req_to_token,
             forward_batch.req_pool_indices,
@@ -275,6 +290,7 @@ class TorchNativeAttnBackend(AttentionBackend):
             scaling=layer.scaling,
             enable_gqa=use_gqa,
             causal=not layer.is_cross_attention,
+            save_kv_cache=save_kv_cache,
         )
         return o
 
