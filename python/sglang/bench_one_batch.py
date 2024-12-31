@@ -307,9 +307,14 @@ def latency_test_run_once(
     tot_latency = 0
 
     # Prefill
+    # TODO: profile first token
     synchronize(device)
     tic = time.time()
-    next_token_ids, _, batch = extend(reqs, model_runner)
+    enabled = True
+    record_shapes = False
+    with torch.autograd.profiler.profile(enabled=enabled, record_shapes=record_shapes) as prof:
+        next_token_ids, _, batch = extend(reqs, model_runner)
+    print(prof.key_averages().table(sort_by="self_cpu_time_total"))
     synchronize(device)
     prefill_latency = time.time() - tic
     tot_latency += prefill_latency
@@ -321,11 +326,14 @@ def latency_test_run_once(
     measurement_results["prefill_throughput"] = throughput
 
     # Decode
+    # TODO: profile next token
     decode_latencies = []
     for i in range(output_len - 1):
         synchronize(device)
         tic = time.time()
-        next_token_ids, _ = decode(next_token_ids, batch, model_runner)
+        with torch.autograd.profiler.profile(enabled=enabled, record_shapes=record_shapes) as prof:
+            next_token_ids, _ = decode(next_token_ids, batch, model_runner)
+        print(prof.key_averages().table(sort_by="self_cpu_time_total"))
         synchronize(device)
         latency = time.time() - tic
         tot_latency += latency
@@ -394,6 +402,7 @@ def latency_test(
         bench_args.batch_size, bench_args.input_len, bench_args.output_len
     ):
         reqs = prepare_synthetic_inputs_for_latency_test(bs, il)
+        # TODO: profile here
         ret = latency_test_run_once(
             bench_args.run_name,
             model_runner,

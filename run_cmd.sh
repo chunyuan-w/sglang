@@ -1,0 +1,2 @@
+# Profiling for one batch
+python3 -m sglang.bench_one_batch --batch-size 1 --input 1024 --output 2 --model deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct --trust-remote-code  --device cpu --attention-backend torch_native --max-total-tokens 2048  --disable-mla
