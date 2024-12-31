@@ -311,10 +311,10 @@ def latency_test_run_once(
     synchronize(device)
     tic = time.time()
     enabled = True
-    record_shapes = False
+    record_shapes = True
     with torch.autograd.profiler.profile(enabled=enabled, record_shapes=record_shapes) as prof:
         next_token_ids, _, batch = extend(reqs, model_runner)
-    print(prof.key_averages().table(sort_by="self_cpu_time_total"))
+    print(prof.key_averages(group_by_input_shape=record_shapes).table(sort_by="self_cpu_time_total"))
     synchronize(device)
     prefill_latency = time.time() - tic
     tot_latency += prefill_latency
@@ -333,7 +333,7 @@ def latency_test_run_once(
         tic = time.time()
         with torch.autograd.profiler.profile(enabled=enabled, record_shapes=record_shapes) as prof:
             next_token_ids, _ = decode(next_token_ids, batch, model_runner)
-        print(prof.key_averages().table(sort_by="self_cpu_time_total"))
+        print(prof.key_averages(group_by_input_shape=record_shapes).table(sort_by="self_cpu_time_total"))
         synchronize(device)
         latency = time.time() - tic
         tot_latency += latency
