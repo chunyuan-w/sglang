@@ -74,6 +74,7 @@ class TorchNativeAttnBackend(AttentionBackend):
         scaling=None,
         enable_gqa=False,
         causal=False,
+        save_kv_cache=True,
     ):
         """Run the extend forward by using torch native sdpa op.
 
@@ -126,8 +127,8 @@ class TorchNativeAttnBackend(AttentionBackend):
             # index for each token in the sequence.
             req_pool_idx = req_pool_indices[seq_idx]
             per_req_tokens = req_to_token[req_pool_idx, :seq_len_kv]
-            per_req_key = k_cache[per_req_tokens].movedim(0, query.dim() - 2)
-            per_req_value = v_cache[per_req_tokens].movedim(0, query.dim() - 2)
+            per_req_key = (k_cache[per_req_tokens] if save_kv_cache else k_cache).movedim(0, query.dim() - 2)
+            per_req_value = (v_cache[per_req_tokens] if save_kv_cache else v_cache).movedim(0, query.dim() - 2)
 
             per_req_out_redudant = (
                 scaled_dot_product_attention(
@@ -242,8 +243,8 @@ class TorchNativeAttnBackend(AttentionBackend):
         self._run_sdpa_forward_extend(
             q_,
             o_,
-            forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id),
-            forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id),
+            forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id) if save_kv_cache else k,
+            forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id) if save_kv_cache else v,
             forward_batch.req_to_token_pool.req_to_token,
             forward_batch.req_pool_indices,
             forward_batch.seq_lens,
@@ -252,6 +253,7 @@ class TorchNativeAttnBackend(AttentionBackend):
             scaling=layer.scaling,
             enable_gqa=use_gqa,
             causal=not layer.is_cross_attention,
+            save_kv_cache=save_kv_cache,
         )
         return o
 
