@@ -311,10 +311,14 @@ def latency_test_run_once(
     synchronize(device)
     tic = time.time()
     enabled = True
-    record_shapes = True
+    # enabled = False
+    # record_shapes = True
+    record_shapes = False
     with torch.autograd.profiler.profile(enabled=enabled, record_shapes=record_shapes) as prof:
         next_token_ids, _, batch = extend(reqs, model_runner)
-    print(prof.key_averages(group_by_input_shape=record_shapes).table(sort_by="self_cpu_time_total"))
+    if enabled:
+        print(prof.key_averages(group_by_input_shape=record_shapes).table(sort_by="self_cpu_time_total"))
+        prof.export_chrome_trace("/home/chunyuan/sglang-dev/sglang/first_token_trace.json")
     synchronize(device)
     prefill_latency = time.time() - tic
     tot_latency += prefill_latency
@@ -333,7 +337,9 @@ def latency_test_run_once(
         tic = time.time()
         with torch.autograd.profiler.profile(enabled=enabled, record_shapes=record_shapes) as prof:
             next_token_ids, _ = decode(next_token_ids, batch, model_runner)
-        print(prof.key_averages(group_by_input_shape=record_shapes).table(sort_by="self_cpu_time_total"))
+        if enabled:
+            print(prof.key_averages(group_by_input_shape=record_shapes).table(sort_by="self_cpu_time_total"))
+            prof.export_chrome_trace("/home/chunyuan/sglang-dev/sglang/next_token_trace.json")
         synchronize(device)
         latency = time.time() - tic
         tot_latency += latency
