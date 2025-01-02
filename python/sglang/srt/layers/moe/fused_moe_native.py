@@ -11,6 +11,7 @@ from torch.nn import functional as F
 from sglang.srt.layers.moe.topk import select_experts
 
 
+# TODO: using this func is very slow
 def fused_moe_forward_native(
     layer: torch.nn.Module,
     x: torch.Tensor,

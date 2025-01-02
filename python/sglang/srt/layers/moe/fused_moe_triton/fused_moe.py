@@ -19,6 +19,8 @@ from sglang.srt.layers.moe.topk import select_experts
 from sglang.srt.layers.quantization.fp8_kernel import per_token_group_quant_fp8
 from sglang.srt.utils import direct_register_custom_op, get_device_name
 
+from flashinfer.activation import silu_and_mul
+
 logger = logging.getLogger(__name__)
 padding_size = 128 if bool(int(os.getenv("MOE_PADDING", "0"))) else 0
 
@@ -677,6 +679,59 @@ def fused_experts(
             a2_scale,
             block_shape,
         )
+
+
+def fused_experts_cpu(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    inplace: bool = False,
+    use_fp8_w8a8: bool = False,
+    use_int8_w8a16: bool = False,
+    w1_scale: Optional[torch.Tensor] = None,
+    w2_scale: Optional[torch.Tensor] = None,
+    a1_scale: Optional[torch.Tensor] = None,
+    a2_scale: Optional[torch.Tensor] = None,
+    block_shape: Optional[List[int]] = None,
+):
+    # Check constraints
+    assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
+    assert topk_weights.shape == topk_ids.shape, "Top-k shape mismatch"
+
+    final_out = torch.zeros_like(hidden_states, dtype=hidden_states.dtype)
+    topk_weight = topk_weight.to(dtype=hidden_states.dtype)
+    expert_mask = torch.nn.functional.one_hot(
+        topk_ids, num_classes=len(self.experts)
+    ).permute(2, 1, 0)    
+    
+    
+    
+    # Linear transformation using w1
+    intermediate1 = torch.matmul(hidden_states, w1.transpose(1, 2))
+
+    # Apply top-k weights
+    intermediate1 = intermediate1 * topk_weights.unsqueeze(-1)
+
+    # Apply activation (SiLU)
+    d = intermediate1.shape[-1] // 2
+    output_shape = intermediate1.shape[:-1] + (d,)
+    intermediate2 = torch.empty(output_shape, dtype=intermediate1.dtype, device=intermediate1.device)
+    silu_and_mul(intermediate1, intermediate2)
+
+    # Linear transformation using w2
+    intermediate3 = torch.matmul(intermediate2, w2.transpose(1, 2))
+
+    # Sum results across the expert dimension
+    output = intermediate3.sum(dim=1)
+
+    # Inplace assignment if requested
+    if inplace:
+        hidden_states.copy_(output)
+        return hidden_states
+
+    return output
 
 
 def fused_experts_impl(

@@ -25,6 +25,8 @@ if torch.cuda.is_available():
 else:
     fused_experts = None  # type: ignore
 
+from sglang.srt.layers.moe.fused_moe_native import fused_moe_forward_native
+
 import logging
 
 logger = logging.getLogger(__name__)
@@ -157,9 +159,33 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             inplace=True,
         )
 
-    def forward_cpu(self, *args, **kwargs):
+    def forward_cpu(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        use_grouped_topk: bool,
+        top_k: int,
+        router_logits: torch.Tensor,
+        renormalize: bool,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        custom_routing_function: Optional[Callable] = None,
+        correction_bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:        
         # TODO: add MoE naive version
-        raise NotImplementedError("The CPU backend currently does not support MoE.")
+        # raise NotImplementedError("The CPU backend currently does not support MoE.")
+        return fused_moe_forward_native(
+            layer,
+            x,
+            use_grouped_topk,
+            top_k,
+            router_logits,
+            renormalize,
+            topk_group,
+            num_expert_group,
+            custom_routing_function,
+            correction_bias,
+        )
 
     def forward_tpu(self, *args, **kwargs) -> torch.Tensor:
         raise NotImplementedError("The TPU backend currently does not support MoE.")

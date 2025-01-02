@@ -96,7 +96,7 @@ class DeepseekV2MLP(nn.Module):
         return x
 
 
-class MoEGate(nn.Module):
+class MoEGateNew(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
@@ -176,7 +176,7 @@ class MoEGate(nn.Module):
         return topk_idx, topk_weight, aux_loss
 
 
-class MoEGateOld(nn.Module):
+class MoEGate(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.weight = nn.Parameter(
@@ -194,7 +194,7 @@ class MoEGateOld(nn.Module):
         return logits
 
 
-class DeepseekV2MoEOld(nn.Module):
+class DeepseekV2MoE(nn.Module):
 
     def __init__(
         self,
@@ -286,7 +286,7 @@ class AddAuxiliaryLoss(torch.autograd.Function):
 
 
 
-class DeepseekV2MoE(nn.Module):
+class DeepseekV2MoENew(nn.Module):
     """
     A mixed expert module containing shared experts.
     """
@@ -739,12 +739,12 @@ class DeepseekV2AttentionMLA(nn.Module):
         forward_batch.token_to_kv_pool.set_kv_buffer(
             self.attn_mha, forward_batch.out_cache_loc, latent_cache, None
         )
-        print("latent_cache:", latent_cache.shape)
+        # print("latent_cache:", latent_cache.shape)
         
-        print("after set latent")
-        print("my q:", q.shape)
-        print("my k:", k.shape)
-        print("my v:", v.shape)
+        # print("after set latent")
+        # print("my q:", q.shape)
+        # print("my k:", k.shape)
+        # print("my v:", v.shape)
         attn_output = self.attn_mha(q, k, v, forward_batch, save_kv_cache=False)
         attn_output = attn_output.reshape(-1, self.num_local_heads * self.v_head_dim)
         output, _ = self.o_proj(attn_output)
@@ -1085,8 +1085,8 @@ class DeepseekV2ForCausalLM(nn.Module):
                 # name will be updated to mlp.experts[0].gate_up_proj, which
                 # will then be updated below in expert_params_mapping
                 # for mlp.experts[0].gate_gate_up_proj, which breaks load.
-                # if ("mlp.experts." in name) and name not in params_dict:
-                #     continue
+                if ("mlp.experts." in name) and name not in params_dict:
+                    continue
                 # print("stacked name before:", name)
                 name = name.replace(weight_name, param_name)
                 # print("stacked name after:", name)
@@ -1106,27 +1106,34 @@ class DeepseekV2ForCausalLM(nn.Module):
                     # print("weight_name:",weight_name)
                     # print("param_name:",param_name)
                     # print("name before:", name)
-                    # name = name.replace(weight_name, param_name)
+                    name = name.replace(weight_name, param_name)
                     # print("name after:", name)
                     # print(params_dict.keys())
                     param = params_dict[name]
                     weight_loader = param.weight_loader
-                    if "down_proj" in name:
-                        weight_loader(
-                            param,
-                            loaded_weight,
-                            # name,
-                            # shard_id=shard_id,
-                            # expert_id=expert_id,
-                        )
-                    else:
-                        weight_loader(
-                            param,
-                            loaded_weight,
-                            name,
-                            shard_id=shard_id,
-                            expert_id=expert_id,
-                        )                        
+                    # if "down_proj" in name:
+                    #     weight_loader(
+                    #         param,
+                    #         loaded_weight,
+                    #         # name,
+                    #         # shard_id=shard_id,
+                    #         # expert_id=expert_id,
+                    #     )
+                    # else:
+                    #     weight_loader(
+                    #         param,
+                    #         loaded_weight,
+                    #         name,
+                    #         shard_id=shard_id,
+                    #         expert_id=expert_id,
+                    #     )    
+                    weight_loader(
+                        param,
+                        loaded_weight,
+                        name,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                    )
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.
