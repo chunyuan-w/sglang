@@ -44,6 +44,7 @@ class MoERef(nn.Module):
         )
 
     def forward(self, x, topk_ids, topk_weight):
+        # cnts: same as one-hot?
         cnts = topk_ids.new_zeros((topk_ids.shape[0], len(self.experts)))
         cnts.scatter_(1, topk_ids, 1)
         tokens_per_expert = cnts.sum(dim=0)
@@ -77,8 +78,8 @@ class MoERef(nn.Module):
         final_out = (
             new_x.view(*topk_ids.shape, -1)
             .type(topk_weight.dtype)
-            .mul_(topk_weight.unsqueeze(dim=-1))
-            .sum(dim=1)
+            .mul_(topk_weight.unsqueeze(dim=-1)) # scales the reshaped new_x by topk_weight
+            .sum(dim=1) # collapses the contributions from all experts into a single output for each token.
             .type(new_x.dtype)
         )
         return final_out
@@ -121,7 +122,58 @@ class FusedMoE(nn.Module):
         expert_outs = torch.einsum("tao, taio -> tai", (x1 * x3), w2_weights)
         return torch.einsum("tai,ta -> ti", expert_outs, topk_weight.to(expert_outs.dtype))
 
-class AddLayerNormTester(TestCase):
+
+class IPEXMoE(nn.Module):
+    def __init__(
+        self,
+        experts,
+    ):
+        super().__init__()
+        self.experts = experts
+
+    def moe_kernel(self, hidden_states, top_x, idx, gate_wei, up_wei, down_wei, routing_weights, output):
+        curr_state = hidden_states.index_select(0, top_x).unsqueeze(0)
+        curr_state = torch.nn.functional.linear(
+            torch.nn.functional.silu(torch.nn.functional.linear(curr_state, gate_wei)) *
+            torch.nn.functional.linear(curr_state, up_wei),
+            down_wei
+        )
+
+        routing_w = routing_weights.index_select(0, top_x).index_select(1, idx).unsqueeze(-1)
+        curr_state = curr_state * routing_w
+        output.index_add_(
+            0, top_x, curr_state.squeeze(0).to(hidden_states.dtype)
+        )
+        return output
+
+    def forward(self, x, topk_ids, topk_weight):
+        output = torch.zeros_like(x, dtype=x.dtype)
+        expert_mask = torch.nn.functional.one_hot(
+            topk_ids, num_classes=len(self.experts)
+        ).permute(2, 1, 0)
+            
+        for i in range(len(self.experts)):
+            non_zero = expert_mask[i].nonzero()
+            if non_zero.size(0) == 0:
+                continue
+
+            idx = non_zero.select(1, 0)
+            top_x = non_zero.select(1, 1)
+            output = self.moe_kernel(
+                x,
+                top_x,
+                idx,
+                self.experts[i].gate_proj.weight,
+                self.experts[i].up_proj.weight,
+                self.experts[i].down_proj.weight,
+                topk_weight,
+                output,
+            )
+
+        return output        
+        
+
+class MoETester(TestCase):
     def test_moe(self):
         # num_expert_per_token: top_k
 
@@ -144,11 +196,13 @@ class AddLayerNormTester(TestCase):
             x_clone = x.clone()
             topk_ids_clone = topk_ids.clone()
             topk_weight_clone = topk_weight.clone()
-            model_fused = FusedMoE(
-                model_ref.experts,
-            ).eval()
+            model_fused = FusedMoE(model_ref.experts).eval()
             output_fused = model_fused(x_clone, topk_ids_clone, topk_weight_clone)
             self.assertEqual(output_ref, output_fused)
+            
+            ipex_model = IPEXMoE(model_ref.experts).eval()
+            output_ipex = ipex_model(x_clone, topk_ids_clone, topk_weight_clone)
+            self.assertEqual(output_ref, output_ipex)
 
 if __name__ == "__main__":
     test = unittest.main()
