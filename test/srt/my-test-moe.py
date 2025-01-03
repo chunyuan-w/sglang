@@ -1,3 +1,4 @@
+import time
 import unittest
 
 import torch
@@ -181,27 +182,37 @@ class MoETester(TestCase):
         hidden_size = 64
         intermediate_size = 1024
         num_experts = 8
-        selected_experts = 2
+        topk = 2
         x = torch.rand(tokens, hidden_size)
         
         gating_output = torch.randn(tokens, num_experts)
-        topk_weight, topk_ids = torch.topk(gating_output, k=selected_experts, dim=-1, sorted=False)
-        # topk_weight = torch.rand(tokens, selected_experts)
-        # topk_ids = torch.randint(0, num_experts, (tokens, selected_experts))
+        topk_weight, topk_ids = torch.topk(gating_output, k=topk, dim=-1, sorted=False)
+        # topk_weight = torch.rand(tokens, topk)
+        # topk_ids = torch.randint(0, num_experts, (tokens, topk))
         print("topk_ids:", topk_ids)
         with torch.no_grad():
             model_ref = MoERef(num_experts, hidden_size, intermediate_size).eval()
+            t0 = time.time()
             output_ref = model_ref(x.clone(), topk_ids.clone(), topk_weight.clone())
+            print("default model:", time.time() - t0)
 
             x_clone = x.clone()
             topk_ids_clone = topk_ids.clone()
             topk_weight_clone = topk_weight.clone()
             model_fused = FusedMoE(model_ref.experts).eval()
+            
+            t1 = time.time()
             output_fused = model_fused(x_clone, topk_ids_clone, topk_weight_clone)
+            print("sglang fused:", time.time() - t1)
+            
             self.assertEqual(output_ref, output_fused)
             
             ipex_model = IPEXMoE(model_ref.experts).eval()
+
+            t2 = time.time()
             output_ipex = ipex_model(x_clone, topk_ids_clone, topk_weight_clone)
+            print("ipex optimized: ", time.time() - t2)
+
             self.assertEqual(output_ref, output_ipex)
 
 if __name__ == "__main__":
