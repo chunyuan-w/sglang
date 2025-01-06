@@ -42,8 +42,14 @@ logger = logging.getLogger(__name__)
 @register_custom_op("sglang_silu_and_mul")
 class SiluAndMul(CustomOp):
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        # d = x.shape[-1] // 2
+        # return F.silu(x[..., :d]) * x[..., d:]
+        print("calling flashinfer")
         d = x.shape[-1] // 2
-        return F.silu(x[..., :d]) * x[..., d:]
+        output_shape = x.shape[:-1] + (d,)
+        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+        silu_and_mul(x, out)
+        return out
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
