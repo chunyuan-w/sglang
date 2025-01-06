@@ -107,7 +107,7 @@ class TpModelWorker:
         ), "Memory pool size is too small"
 
         # Sync random seed across TP workers
-        self.random_seed = broadcast_pyobj(
+        self.random_seed = server_args.random_seed if server_args.device == "cpu" else broadcast_pyobj(
             [server_args.random_seed],
             self.tp_rank,
             self.model_runner.tp_group.cpu_group,
