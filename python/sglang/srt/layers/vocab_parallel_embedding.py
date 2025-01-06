@@ -407,7 +407,7 @@ class VocabParallelEmbedding(torch.nn.Module):
         assert len(ret) == self.num_embeddings_padded
         return ret
 
-    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor, target_device: Optional[torch.device] = None):
         output_dim = getattr(param, "output_dim", None)
         packed_dim = getattr(param, "packed_dim", None)
 
@@ -514,6 +514,7 @@ class ParallelLMHead(VocabParallelEmbedding):
         padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        target_device: Optional[torch.device] = None,
     ):
         super().__init__(
             num_embeddings,
@@ -523,6 +524,7 @@ class ParallelLMHead(VocabParallelEmbedding):
             padding_size,
             quant_config,
             prefix,
+            enable_tp=target_device!=torch.device("cpu"),
         )
         self.quant_config = quant_config
         if bias:

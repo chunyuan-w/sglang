@@ -205,18 +205,20 @@ class ModelRunner:
         else:
             dist_init_method = f"tcp://127.0.0.1:{self.dist_port}"
         set_custom_all_reduce(not self.server_args.disable_custom_all_reduce)
-        init_distributed_environment(
-            backend=backend,
-            world_size=self.tp_size,
-            rank=self.tp_rank,
-            local_rank=self.gpu_id,
-            distributed_init_method=dist_init_method,
-        )
-        initialize_model_parallel(tensor_model_parallel_size=self.tp_size)
+        if self.device != "cpu":
+            init_distributed_environment(
+                backend=backend,
+                world_size=self.tp_size,
+                rank=self.tp_rank,
+                local_rank=self.gpu_id,
+                distributed_init_method=dist_init_method,
+            )
+            initialize_model_parallel(tensor_model_parallel_size=self.tp_size)
         min_per_gpu_memory = get_available_gpu_memory(
             self.device, self.gpu_id, distributed=self.tp_size > 1
         )
-        self.tp_group = get_tp_group()
+        # TODO: add target_device as input arg to get_tp_group
+        self.tp_group = get_tp_group() if self.device != "cpu" else None
 
         # Check memory for tensor parallelism
         if self.tp_size > 1:

@@ -64,10 +64,11 @@ class DeepseekV2MLP(nn.Module):
         hidden_act: str,
         quant_config: Optional[QuantizationConfig] = None,
         reduce_results: bool = True,
+        target_device: Optional[torch.device] = None,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2, bias=False, quant_config=quant_config
+            hidden_size, [intermediate_size] * 2, bias=False, quant_config=quant_config, target_device=target_device,
         )
         self.down_proj = RowParallelLinear(
             intermediate_size,
@@ -75,6 +76,7 @@ class DeepseekV2MLP(nn.Module):
             bias=False,
             quant_config=quant_config,
             reduce_results=reduce_results,
+            target_device=target_device,
         )
         if hidden_act != "silu":
             raise ValueError(
@@ -96,9 +98,10 @@ class DeepseekV2MoE(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        target_device: Optional[torch.device] = None,
     ):
         super().__init__()
-        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_size = get_tensor_model_parallel_world_size(target_device)
         self.routed_scaling_factor = config.routed_scaling_factor
         self.n_shared_experts = config.n_shared_experts
         self.routed_scaling_factor = config.routed_scaling_factor
@@ -125,6 +128,7 @@ class DeepseekV2MoE(nn.Module):
             use_grouped_topk=True,
             num_expert_group=config.n_group,
             topk_group=config.topk_group,
+            target_device=target_device,
         )
 
         self.gate = ReplicatedLinear(
@@ -138,6 +142,7 @@ class DeepseekV2MoE(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,
+                target_device=target_device,
             )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -193,6 +198,7 @@ class DeepseekV2Attention(nn.Module):
         max_position_embeddings: int = 8192,
         quant_config: Optional[QuantizationConfig] = None,
         layer_id=None,
+        target_device: Optional[torch.device] = None,
     ) -> None:
         super().__init__()
         self.layer_id = layer_id
@@ -204,7 +210,7 @@ class DeepseekV2Attention(nn.Module):
         self.q_lora_rank = q_lora_rank
         self.kv_lora_rank = kv_lora_rank
         self.num_heads = num_heads
-        tp_size = get_tensor_model_parallel_world_size()
+        tp_size = get_tensor_model_parallel_world_size(target_device)
         assert num_heads % tp_size == 0
         self.num_local_heads = num_heads // tp_size
         self.scaling = self.qk_head_dim**-0.5
@@ -231,6 +237,7 @@ class DeepseekV2Attention(nn.Module):
                 self.num_heads * self.qk_head_dim,
                 bias=False,
                 quant_config=quant_config,
+                target_device=target_device,
             )
 
         self.kv_a_proj_with_mqa = ReplicatedLinear(
@@ -245,6 +252,7 @@ class DeepseekV2Attention(nn.Module):
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
             bias=False,
             quant_config=quant_config,
+            target_device=target_device,
         )
         # O projection.
         self.o_proj = RowParallelLinear(
@@ -252,6 +260,7 @@ class DeepseekV2Attention(nn.Module):
             self.hidden_size,
             bias=False,
             quant_config=quant_config,
+            target_device=target_device,
         )
         rope_scaling["rope_type"] = "deepseek_yarn"
         self.rotary_emb = get_rope(
@@ -261,6 +270,7 @@ class DeepseekV2Attention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
             is_neox_style=False,
+            target_device=target_device,
         )
 
         if rope_scaling:
@@ -341,6 +351,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         layer_id=None,
         use_dp=False,
+        target_device: Optional[torch.device] = None,
     ) -> None:
         super().__init__()
         self.layer_id = layer_id
@@ -352,7 +363,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         self.q_lora_rank = q_lora_rank
         self.kv_lora_rank = kv_lora_rank
         self.num_heads = num_heads
-        tp_size = get_tensor_model_parallel_world_size()
+        tp_size = get_tensor_model_parallel_world_size(target_device)
         assert num_heads % tp_size == 0
         self.num_local_heads = num_heads if use_dp else num_heads // tp_size
         self.scaling = self.qk_head_dim**-0.5
@@ -635,6 +646,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         config: PretrainedConfig,
         layer_id: int,
         quant_config: Optional[QuantizationConfig] = None,
+        target_device: Optional[torch.device] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -667,6 +679,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 quant_config=quant_config,
                 layer_id=layer_id,
                 use_dp=self.enable_dp_attention,
+                target_device=target_device,
             )
         else:
             self.self_attn = DeepseekV2Attention(
@@ -685,19 +698,21 @@ class DeepseekV2DecoderLayer(nn.Module):
                 max_position_embeddings=max_position_embeddings,
                 quant_config=quant_config,
                 layer_id=layer_id,
+                target_device=target_device,
             )
         if (
             config.n_routed_experts is not None
             and layer_id >= config.first_k_dense_replace
             and layer_id % config.moe_layer_freq == 0
         ):
-            self.mlp = DeepseekV2MoE(config=config, quant_config=quant_config)
+            self.mlp = DeepseekV2MoE(config=config, quant_config=quant_config, target_device=target_device,)
         else:
             self.mlp = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
+                target_device=target_device,
             )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
@@ -749,6 +764,7 @@ class DeepseekV2Model(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        target_device: Optional[torch.device] = None,
     ) -> None:
         super().__init__()
         self.padding_id = config.pad_token_id
@@ -757,7 +773,7 @@ class DeepseekV2Model(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
-            enable_tp=not global_server_args_dict["enable_dp_attention"],
+            enable_tp=not global_server_args_dict["enable_dp_attention"] and target_device != torch.device("cpu"),
         )
         self.layers = nn.ModuleList(
             [
@@ -765,6 +781,7 @@ class DeepseekV2Model(nn.Module):
                     config,
                     layer_id,
                     quant_config=quant_config,
+                    target_device=target_device,
                 )
                 for layer_id in range(config.num_hidden_layers)
             ]
@@ -795,11 +812,12 @@ class DeepseekV2ForCausalLM(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        target_device: Optional[torch.device] = None,
     ) -> None:
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.model = DeepseekV2Model(config, quant_config)
+        self.model = DeepseekV2Model(config, quant_config, target_device)
         if global_server_args_dict["enable_dp_attention"]:
             self.lm_head = ReplicatedLinear(
                 config.hidden_size,
@@ -809,9 +827,9 @@ class DeepseekV2ForCausalLM(nn.Module):
             self.logits_processor = LogitsProcessor(config, skip_all_gather=True)
         else:
             self.lm_head = ParallelLMHead(
-                config.vocab_size, config.hidden_size, quant_config=quant_config
+                config.vocab_size, config.hidden_size, quant_config=quant_config, target_device=target_device,
             )
-            self.logits_processor = LogitsProcessor(config)
+            self.logits_processor = LogitsProcessor(config, skip_all_gather=target_device==torch.device("cpu"))
 
     @torch.no_grad()
     def forward(
@@ -826,7 +844,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                 input_ids, hidden_states, self.lm_head, forward_batch
             )
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]], target_device: Optional[torch.device] = None):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
@@ -865,7 +883,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                weight_loader(param, loaded_weight, shard_id, target_device=target_device,)
                 break
             else:
                 for mapping in expert_params_mapping:
@@ -881,6 +899,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                         name,
                         shard_id=shard_id,
                         expert_id=expert_id,
+                        target_device=target_device,
                     )
                     break
                 else:
@@ -892,7 +911,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
-                    weight_loader(param, loaded_weight)
+                    weight_loader(param, loaded_weight, target_device=target_device)
 
         if not global_server_args_dict["disable_mla"]:
             for layer_id in range(self.config.num_hidden_layers):

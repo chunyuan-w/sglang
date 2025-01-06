@@ -227,7 +227,7 @@ class ReplicatedLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
 
-    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor, target_device: Optional[torch.device] = None):
         # If the weight on disk does not have a shape, give it one
         # (such scales for AutoFp8).
         if len(loaded_weight.shape) == 0:
@@ -285,6 +285,7 @@ class ColumnParallelLinear(LinearBase):
         quant_config: Optional[QuantizationConfig] = None,
         output_sizes: Optional[List[int]] = None,
         prefix: str = "",
+        target_device: Optional[torch.device] = None,
     ):
         super().__init__(
             input_size, output_size, skip_bias_add, params_dtype, quant_config, prefix
@@ -293,7 +294,7 @@ class ColumnParallelLinear(LinearBase):
         self.gather_output = gather_output
 
         # Divide the weight matrix along the last dimension.
-        tp_size = get_tensor_model_parallel_world_size()
+        tp_size = get_tensor_model_parallel_world_size(target_device)
         assert self.quant_method is not None
         self.output_size_per_partition = divide(self.output_size, tp_size)
         self.output_partition_sizes = [self.output_size_per_partition]
@@ -333,8 +334,8 @@ class ColumnParallelLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
 
-    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        tp_rank = get_tensor_model_parallel_rank()
+    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor, target_device: Optional[torch.device] = None):
+        tp_rank = get_tensor_model_parallel_rank(target_device)
         output_dim = getattr(param, "output_dim", None)
 
         # Special case for GGUF
@@ -429,9 +430,10 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         params_dtype: Optional[torch.dtype] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        target_device: Optional[torch.device] = None,
     ):
         self.output_sizes = output_sizes
-        tp_size = get_tensor_model_parallel_world_size()
+        tp_size = get_tensor_model_parallel_world_size(target_device)
         assert all(output_size % tp_size == 0 for output_size in output_sizes)
         super().__init__(
             input_size=input_size,
@@ -442,6 +444,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             params_dtype=params_dtype,
             quant_config=quant_config,
             prefix=prefix,
+            target_device=target_device,
         )
 
     def weight_loader(
@@ -449,6 +452,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         param: Parameter,
         loaded_weight: torch.Tensor,
         loaded_shard_id: Optional[int] = None,
+        target_device: Optional[torch.device] = None,
     ):
 
         # Special case for GGUF
@@ -520,8 +524,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             return
 
         assert loaded_shard_id < len(self.output_sizes)
-        tp_rank = get_tensor_model_parallel_rank()
-        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank(target_device)
+        tp_size = get_tensor_model_parallel_world_size(target_device)
         if output_dim is not None:
             shard_offset = sum(self.output_sizes[:loaded_shard_id]) // tp_size
             shard_size = self.output_sizes[loaded_shard_id] // tp_size
@@ -1036,6 +1040,7 @@ class RowParallelLinear(LinearBase):
         reduce_results: bool = True,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        target_device: Optional[torch.device] = None,
     ):
         super().__init__(
             input_size, output_size, skip_bias_add, params_dtype, quant_config, prefix
@@ -1045,8 +1050,8 @@ class RowParallelLinear(LinearBase):
         self.reduce_results = reduce_results
 
         # Divide the weight matrix along the last dimension.
-        self.tp_rank = get_tensor_model_parallel_rank()
-        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank(target_device)
+        self.tp_size = get_tensor_model_parallel_world_size(target_device)
         self.input_size_per_partition = divide(input_size, self.tp_size)
         assert self.quant_method is not None
 
@@ -1081,9 +1086,9 @@ class RowParallelLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
 
-    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        tp_rank = get_tensor_model_parallel_rank()
-        tp_size = get_tensor_model_parallel_world_size()
+    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor, target_device: Optional[torch.device] = None):
+        tp_rank = get_tensor_model_parallel_rank(target_device)
+        tp_size = get_tensor_model_parallel_world_size(target_device)
         input_dim = getattr(param, "input_dim", None)
         use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
 
