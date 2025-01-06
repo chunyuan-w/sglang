@@ -50,11 +50,15 @@ class MoERef(nn.Module):
         cnts.scatter_(1, topk_ids, 1)
         tokens_per_expert = cnts.sum(dim=0)
         idxs = topk_ids.view(-1).argsort()
+
+        # Find the tokens for each expert: [token_1 for expert0, token_3 for expert0, token_2 for expert1, ...]
+        #                tokens_per_expert: [2,                                       1,                   ...]
         sorted_tokens = x[idxs // topk_ids.shape[1]]
         tokens_per_expert = tokens_per_expert.cpu().numpy()
 
         outputs = []
         start_idx = 0
+        # len(tokens_per_expert) = total num of experts
         for i, num_tokens in enumerate(tokens_per_expert):
             end_idx = start_idx + num_tokens
             if num_tokens == 0:
@@ -75,15 +79,15 @@ class MoERef(nn.Module):
         
         print(idxs)
         print(new_x.shape)
-        new_x[idxs] = outs
+        new_x[idxs] = outs # Reorders outs back to the original order of the input x.
         final_out = (
-            new_x.view(*topk_ids.shape, -1)
+            new_x.view(*topk_ids.shape, -1) # (tokens, selected_experts, hidden_size)
             .type(topk_weight.dtype)
-            .mul_(topk_weight.unsqueeze(dim=-1)) # scales the reshaped new_x by topk_weight
+            .mul_(topk_weight.unsqueeze(dim=-1)) # (tokens, selected_experts, 1) scales the reshaped new_x by topk_weight
             .sum(dim=1) # collapses the contributions from all experts into a single output for each token.
             .type(new_x.dtype)
         )
-        return final_out
+        return final_out # (tokens, hidden_size)
 
 
 class FusedMoE(nn.Module):
@@ -114,13 +118,13 @@ class FusedMoE(nn.Module):
         self.w2_weight = torch.stack(weights_2, dim=0)
 
     def forward(self, x, topk_ids, topk_weight):
-        w13_weights = self.w13_weight[topk_ids]
+        w13_weights = self.w13_weight[topk_ids] # (tokens, selected_experts, 2 * intermediate_size, hidden_size)
         w1_weights, w3_weights = torch.chunk(w13_weights, 2, dim=2)
-        w2_weights = self.w2_weight[topk_ids]
+        w2_weights = self.w2_weight[topk_ids] # (tokens, selected_experts, hidden_size, intermediate_size)
         x1 = torch.einsum("ti,taoi -> tao", x, w1_weights)
         x1 = F.silu(x1)
         x3 = torch.einsum("ti, taoi -> tao", x, w3_weights)
-        expert_outs = torch.einsum("tao, taio -> tai", (x1 * x3), w2_weights)
+        expert_outs = torch.einsum("tao, taio -> tai", (x1 * x3), w2_weights) # (tokens, selected_experts, intermediate_size)
         return torch.einsum("tai,ta -> ti", expert_outs, topk_weight.to(expert_outs.dtype))
 
 
@@ -149,17 +153,20 @@ class IPEXMoE(nn.Module):
 
     def forward(self, x, topk_ids, topk_weight):
         output = torch.zeros_like(x, dtype=x.dtype)
+        
+        # one_hot output: (tokens, selected_experts, num_experts)
+        # after permute: (num_experts, selected_experts, tokens)
         expert_mask = torch.nn.functional.one_hot(
             topk_ids, num_classes=len(self.experts)
         ).permute(2, 1, 0)
             
         for i in range(len(self.experts)):
-            non_zero = expert_mask[i].nonzero()
-            if non_zero.size(0) == 0:
+            non_zero = expert_mask[i].nonzero() # indices of non-zero elements
+            if non_zero.size(0) == 0: # check if this expert needs to be applied to any token
                 continue
 
-            idx = non_zero.select(1, 0)
-            top_x = non_zero.select(1, 1)
+            idx = non_zero.select(1, 0) # select(dim, index), idx among the selected_experts
+            top_x = non_zero.select(1, 1) # the token that needs to apply this expert
             output = self.moe_kernel(
                 x,
                 top_x,
@@ -178,7 +185,7 @@ class MoETester(TestCase):
     def test_moe(self):
         # num_expert_per_token: top_k
 
-        tokens = 1
+        tokens = 4
         hidden_size = 64
         intermediate_size = 1024
         num_experts = 8
