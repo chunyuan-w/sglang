@@ -310,8 +310,8 @@ def latency_test_run_once(
     # TODO: profile first token
     synchronize(device)
     tic = time.time()
-    enabled = True
-    # enabled = False
+    # enabled = True
+    enabled = False
     # record_shapes = True
     record_shapes = False
     with torch.autograd.profiler.profile(enabled=enabled, record_shapes=record_shapes) as prof:
