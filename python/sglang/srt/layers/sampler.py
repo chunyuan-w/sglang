@@ -46,6 +46,7 @@ class Sampler(nn.Module):
 
         if sampling_info.is_all_greedy:
             # Use torch.argmax if all requests use greedy sampling
+            # print("my logits shape: ", logits.shape)
             batch_next_token_ids = torch.argmax(logits, -1)
         else:
             # Post process logits

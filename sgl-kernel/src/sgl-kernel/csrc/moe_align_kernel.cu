@@ -146,6 +146,7 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts, int64_t b
   });
 }
 
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("moe_align_block_size", &moe_align_block_size, "MOE Align Block Size (CUDA)");
 }

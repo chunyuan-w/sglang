@@ -25,6 +25,15 @@ logger = logging.getLogger(__name__)
 padding_size = 128 if bool(int(os.getenv("MOE_PADDING", "0"))) else 0
 
 
+# TODO: this is the kernel code
+# A single program ID (pid) handles tokens belonging to one or more experts, but the tokens are pre-sorted by expert in sorted_token_ids_ptr. This ensures:
+# Tokens assigned to the same expert are grouped together for processing.
+# Experts' weight matrices (B) are accessed in a contiguous and efficient manner.
+
+# For a given pid_m, the kernel only processes tokens assigned to a single expert. This means:
+# The a_ptrs (for tokens) and b_ptrs (for the expert's weights) are configured such that all computations in the block are between the tokens in the block and the weights of the same expert.
+
+
 @triton.jit
 def fused_moe_kernel(
     # Pointers to matrices
@@ -220,6 +229,7 @@ def fused_moe_kernel(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
+# TODO: check this
 def moe_align_block_size(
     topk_ids: torch.Tensor, block_size: int, num_experts: int
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -784,6 +794,9 @@ def fused_experts_impl(
 
     config = get_config_func(M)
 
+    # topk_ids.shape[1]: selected_experts
+    # N: hidden * 2
+    # M: tokens
     intermediate_cache1 = torch.empty(
         (M, topk_ids.shape[1], N),
         device=hidden_states.device,
@@ -835,6 +848,7 @@ def fused_experts_impl(
             curr_topk_ids, config["BLOCK_SIZE_M"], E
         )
 
+        
         invoke_fused_moe_kernel(
             curr_hidden_states,
             w1,
