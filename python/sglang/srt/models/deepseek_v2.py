@@ -428,12 +428,14 @@ class DeepseekV2AttentionMLA(nn.Module):
                     self.num_heads * self.qk_head_dim,
                     bias=False,
                     quant_config=quant_config,
+                    target_device=target_device,
                 )
             self.kv_b_proj = ColumnParallelLinear(
                 self.kv_lora_rank,
                 self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
                 bias=False,
                 quant_config=quant_config,
+                target_device=target_device,
             )
             # O projection.
             self.o_proj = RowParallelLinear(
@@ -441,6 +443,7 @@ class DeepseekV2AttentionMLA(nn.Module):
                 self.hidden_size,
                 bias=False,
                 quant_config=quant_config,
+                target_device=target_device,
             )
 
         self.kv_a_proj_with_mqa = ReplicatedLinear(
@@ -458,6 +461,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
             is_neox_style=False,
+            target_device=target_device
         )
 
         if rope_scaling:

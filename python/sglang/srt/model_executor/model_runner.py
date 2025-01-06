@@ -93,8 +93,9 @@ class ModelRunner:
             self.model_config.attention_arch == AttentionArch.MLA
             and not self.server_args.disable_mla
         ):
-            logger.info("MLA optimization is turned on. Use triton backend.")
-            self.server_args.attention_backend = "triton"
+            if self.server_args.device != "cpu":
+                logger.info("MLA optimization is turned on. Use triton backend.")
+                self.server_args.attention_backend = "triton"
 
         if self.server_args.enable_double_sparsity:
             logger.info(
