@@ -93,7 +93,7 @@ def is_flashinfer_available():
     """
     if not get_bool_env_var("SGLANG_IS_FLASHINFER_AVAILABLE", default="true"):
         return False
-    return torch.cuda.is_available() and torch.version.cuda
+    return True
 
 
 def is_ipv6(address):
