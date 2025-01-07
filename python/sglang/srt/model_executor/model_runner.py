@@ -218,8 +218,7 @@ class ModelRunner:
         min_per_gpu_memory = get_available_gpu_memory(
             self.device, self.gpu_id, distributed=self.tp_size > 1
         )
-        # TODO: add target_device as input arg to get_tp_group
-        self.tp_group = get_tp_group() if self.device != "cpu" else None
+        self.tp_group = get_tp_group(torch.device(self.device))
 
         # Check memory for tensor parallelism
         if self.tp_size > 1:
