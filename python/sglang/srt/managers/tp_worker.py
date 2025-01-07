@@ -133,7 +133,7 @@ class TpModelWorker:
         return getattr(self.model_runner.model, "pad_input_ids", None)
 
     def get_tp_cpu_group(self):
-        return self.model_runner.tp_group.cpu_group
+        return None if self.device == "cpu" else self.model_runner.tp_group.cpu_group
 
     def get_memory_pool(self):
         return (

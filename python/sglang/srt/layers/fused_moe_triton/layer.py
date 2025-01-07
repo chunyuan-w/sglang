@@ -219,15 +219,16 @@ class FusedMoE(torch.nn.Module):
         tp_size: Optional[int] = None,
         prefix: str = "",
         custom_routing_function: Optional[Callable] = None,
-        target_device: Optional[torch.device] = None,
     ):
         super().__init__()
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
 
+        from sglang.srt.managers.schedule_batch import global_server_args_dict
+        
         self.tp_size = (
-            tp_size if tp_size is not None else get_tensor_model_parallel_world_size(target_device)
+            tp_size if tp_size is not None else get_tensor_model_parallel_world_size(global_server_args_dict["device"])
         )
         self.top_k = top_k
         self.num_experts = num_experts
@@ -403,7 +404,6 @@ class FusedMoE(torch.nn.Module):
         weight_name: str,
         shard_id: str,
         expert_id: int,
-        target_device: Optional[torch.device] = None,
     ) -> None:
 
         # compressed-tensors checkpoints with packed weights are stored flipped
@@ -430,7 +430,10 @@ class FusedMoE(torch.nn.Module):
         SHARD_ID_TO_SHARDED_DIM = {"w1": 0, "w2": 1, "w3": 0}
 
         expert_data = param.data[expert_id]
-        tp_rank = get_tensor_model_parallel_rank(target_device)
+        
+        from sglang.srt.managers.schedule_batch import global_server_args_dict
+        
+        tp_rank = get_tensor_model_parallel_rank(global_server_args_dict["device"])
 
         # is_transposed: if the dim to shard the weight
         # should be flipped. Required by GPTQ, compressed-tensors

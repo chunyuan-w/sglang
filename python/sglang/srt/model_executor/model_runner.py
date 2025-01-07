@@ -146,6 +146,7 @@ class ModelRunner:
                 "enable_nan_detection": server_args.enable_nan_detection,
                 "enable_dp_attention": server_args.enable_dp_attention,
                 "enable_ep_moe": server_args.enable_ep_moe,
+                "device": server_args.device,
             }
         )
 
@@ -218,7 +219,7 @@ class ModelRunner:
         min_per_gpu_memory = get_available_gpu_memory(
             self.device, self.gpu_id, distributed=self.tp_size > 1
         )
-        self.tp_group = get_tp_group(torch.device(self.device))
+        self.tp_group = get_tp_group(self.device)
 
         # Check memory for tensor parallelism
         if self.tp_size > 1:

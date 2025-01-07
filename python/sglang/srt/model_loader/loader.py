@@ -131,7 +131,6 @@ def _get_quantization_config(
 def _initialize_model(
     model_config: ModelConfig,
     load_config: LoadConfig,
-    target_device: torch.device = None,
 ) -> nn.Module:
     """Initialize a model with the given configurations."""
     model_class, _ = get_model_architecture(model_config)
@@ -139,7 +138,6 @@ def _initialize_model(
     return model_class(
         config=model_config.hf_config,
         quant_config=quant_config,
-        target_device=target_device,
     )
 
 
@@ -359,10 +357,9 @@ class DefaultModelLoader(BaseModelLoader):
                 model = _initialize_model(
                     model_config,
                     self.load_config,
-                    target_device,
                 )
 
-            model.load_weights(self._get_all_weights(model_config, model), target_device=target_device)
+            model.load_weights(self._get_all_weights(model_config, model))
 
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
