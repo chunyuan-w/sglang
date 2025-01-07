@@ -163,8 +163,6 @@ def moe_forward_native(
 
     # Ref code from https://huggingface.co/deepseek-ai/DeepSeek-V2/blob/e0828e3cc0a03408724b80c3cc92c8e072db8d01/modeling_deepseek.py#L589
     len_experts = layer.num_experts
-    # TODO: remove this later
-    assert len_experts == layer.w13_weight.shape[0]
     
     cnts = topk_ids.new_zeros((topk_ids.shape[0], len_experts))
     cnts.scatter_(1, topk_ids, 1)
@@ -176,7 +174,6 @@ def moe_forward_native(
 
     outputs = []
     start_idx = 0
-    # len(tokens_per_expert) = total num of experts
     for i, num_tokens in enumerate(tokens_per_expert):
         end_idx = start_idx + num_tokens
         if num_tokens == 0:
@@ -186,10 +183,8 @@ def moe_forward_native(
         layer_w1_weight, layer_w3_weight = torch.chunk(layer.w13_weight[i], 2, dim=0)
         layer_w2_weight = layer.w2_weight[i]
         
-        # TODO: hard-coded to silu here
         # TODO: fuse gate and up linear
         # TODO: fuse silu and mul
-        # TODO: support the case with bias True
         gate_up = F.silu(F.linear(tokens_for_this_expert, layer_w1_weight)) * F.linear(tokens_for_this_expert, layer_w3_weight)
         expert_out = F.linear(gate_up, layer_w2_weight)
         outputs.append(expert_out)
