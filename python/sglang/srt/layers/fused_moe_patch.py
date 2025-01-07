@@ -180,12 +180,12 @@ def moe_forward_native(
             continue
         tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
         
-        layer_w1_weight, layer_w3_weight = torch.chunk(layer.w13_weight[i], 2, dim=0)
+        layer_w13_weight = layer.w13_weight[i]
         layer_w2_weight = layer.w2_weight[i]
         
-        # TODO: fuse gate and up linear
-        # TODO: fuse silu and mul
-        gate_up = F.silu(F.linear(tokens_for_this_expert, layer_w1_weight)) * F.linear(tokens_for_this_expert, layer_w3_weight)
+        gate_up = F.linear(tokens_for_this_expert, layer_w13_weight)
+        from sglang.srt.layers.activation import SiluAndMul
+        gate_up = SiluAndMul()(gate_up)
         expert_out = F.linear(gate_up, layer_w2_weight)
         outputs.append(expert_out)
         start_idx = end_idx
