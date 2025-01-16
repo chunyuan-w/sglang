@@ -59,11 +59,21 @@ from triton.runtime.cache import (
     default_dump_dir,
     default_override_dir,
 )
+from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.distributed.parallel_state import get_tp_group
 
 logger = logging.getLogger(__name__)
 
 show_time_cost = False
 time_infos = {}
+
+
+def tensor_model_parallel_all_reduce_wrapper(input_: torch.Tensor) -> torch.Tensor:
+    if input_.is_cpu:
+        get_tp_group()._all_reduce_in_place(input_)
+        return input_
+
+    return tensor_model_parallel_all_reduce(input_)
 
 
 def is_hip() -> bool:
