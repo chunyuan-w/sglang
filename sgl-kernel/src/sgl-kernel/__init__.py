@@ -1,13 +1,19 @@
-from sgl_kernel.ops import (
-    custom_dispose,
-    custom_reduce,
-    get_graph_buffer_ipc_meta,
-    init_custom_reduce,
-    int8_scaled_mm,
-    moe_align_block_size,
-    register_graph_buffers,
-    sampling_scaling_penalties,
-)
+import torch
+
+if torch.cuda.is_available():
+    from sgl_kernel.ops import (
+        custom_dispose,
+        custom_reduce,
+        get_graph_buffer_ipc_meta,
+        init_custom_reduce,
+        int8_scaled_mm,
+        moe_align_block_size,
+        register_graph_buffers,
+        sampling_scaling_penalties,
+    )
+else:
+    from sgl_kernel.ops.cpu import custom_reduce_cpu
+
 
 __all__ = [
     "moe_align_block_size",
