@@ -1,8 +1,7 @@
 from pathlib import Path
 
 from setuptools import setup
-import torch
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CppExtension
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 root = Path(__file__).parent.resolve()
 
@@ -42,11 +41,10 @@ nvcc_flags = [
     "-U__CUDA_NO_HALF2_OPERATORS__",
 ]
 cxx_flags = ["-O3"]
-libraries = ["c10", "torch", "torch_python"]
+libraries = ["c10", "torch", "torch_python", "cuda"]
 extra_link_args = ["-Wl,-rpath,$ORIGIN/../../torch/lib", "-L/usr/lib/x86_64-linux-gnu"]
-if torch.cuda.is_available():
-    libraries.append("cuda")
-    cuda_extension  = CUDAExtension(
+ext_modules = [
+    CUDAExtension(
         name="sgl_kernel.ops._kernels",
         sources=[
             "src/sgl-kernel/csrc/trt_reduce_internal.cu",
@@ -63,21 +61,8 @@ if torch.cuda.is_available():
         },
         libraries=libraries,
         extra_link_args=extra_link_args,
-    )
-
-cpu_extension = CppExtension(
-    name="sgl_kernel.ops.cpu._kernels",
-    sources=["src/sgl-kernel/csrc/cpu/all_reduce.cpp"],
-    extra_compile_args={
-        "cxx": cxx_flags,
-    },
-    libraries=libraries,
-    extra_link_args=extra_link_args,
-)
-
-ext_modules = [cpu_extension]
-if torch.cuda.is_available():
-    ext_modules.append(cuda_extension)
+    ),
+]
 
 setup(
     name="sgl-kernel",
