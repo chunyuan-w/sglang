@@ -16,6 +16,7 @@
 import gc
 import json
 import logging
+import os
 import time
 from typing import List, Optional, Tuple
 
@@ -100,6 +101,14 @@ class ModelRunner:
         self.spec_algorithm = SpeculativeAlgorithm.from_string(
             server_args.speculative_algorithm
         )
+        # Set local_omp_cpuid for each rank
+        # SGLANG_CPU_OMP_THREADS_BIND="0-39|40-79" python3 -m sglang.bench_one_batch --batch-size 1 --input 1024 --output 8 --model deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct --trust-remote-code --device cpu --attention-backend torch_native --disable-mla --tp 2
+        omp_cpuids = os.environ.get("SGLANG_CPU_OMP_THREADS_BIND", "all")
+        if omp_cpuids == "all":
+            self.local_omp_cpuid = "all"
+        else:
+            self.local_omp_cpuid = omp_cpuids.split("|")[tp_rank]
+        logger.info(f"my local_omp_cpuid: {self.local_omp_cpuid}")
 
         # Model-specific adjustment
         if (
@@ -236,6 +245,12 @@ class ModelRunner:
         set_custom_all_reduce(not self.server_args.disable_custom_all_reduce)
 
         if not self.is_draft_worker:
+            # Set threads for CPU
+            if self.device == "cpu":
+                ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
+                if ret:
+                    logger.info(ret)
+
             # Only initilzie the distributed environment on the target model worker.
             init_distributed_environment(
                 backend=backend,
