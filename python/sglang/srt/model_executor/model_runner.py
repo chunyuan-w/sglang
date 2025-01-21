@@ -247,9 +247,10 @@ class ModelRunner:
         if not self.is_draft_worker:
             # Set threads for CPU
             if self.device == "cpu":
-                ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
-                if ret:
-                    logger.info(ret)
+                if self.local_omp_cpuid != "all":
+                    ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
+                    if ret:
+                        logger.info(ret)
 
             # Only initilzie the distributed environment on the target model worker.
             init_distributed_environment(
