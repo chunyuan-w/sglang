@@ -247,6 +247,9 @@ class ModelRunner:
         if not self.is_draft_worker:
             # Set threads for CPU
             if self.device == "cpu":
+                # To hint IPEX uses shared memory based AllReduce
+                os.environ["LOCAL_WORLD_SIZE"] = str(self.tp_size)
+                
                 if self.local_omp_cpuid != "all":
                     ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
                     if ret:

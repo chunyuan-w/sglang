@@ -76,7 +76,9 @@ time_infos = {}
 def tensor_model_parallel_all_reduce_wrapper(input_: torch.Tensor) -> torch.Tensor:
     if input_.is_cpu:
         # get_tp_group()._all_reduce_in_place(input_)
-        sgl_kernel_cpu.all_reduce(input_, get_tp_group().device_group)
+        # sgl_kernel_cpu.all_reduce(input_, get_tp_group().device_group)
+        import intel_extension_for_pytorch as ipex
+        ipex.distributed.all_reduce(input_, group=get_tp_group().device_group)
         return input_
 
     return tensor_model_parallel_all_reduce(input_)
