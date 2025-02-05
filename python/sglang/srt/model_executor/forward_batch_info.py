@@ -196,6 +196,8 @@ class ForwardBatch:
 
     # For Qwen2-VL
     mrope_positions: torch.Tensor = None
+    
+    perform_sampling: bool = True
 
     def compute_mrope_positions(
         self, model_runner: ModelRunner, batch: ModelWorkerBatch
@@ -344,6 +346,8 @@ class ForwardBatch:
         # Init lora information
         if model_runner.server_args.lora_paths is not None:
             model_runner.lora_manager.prepare_lora_batch(ret)
+
+        ret.perform_sampling = model_runner.tp_rank == 0
 
         return ret
 
