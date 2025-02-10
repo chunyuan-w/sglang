@@ -151,3 +151,8 @@ void all_reduce(
   process_group->allreduce(tensors)->wait();
   return;
 }
+
+void all_reduce_outer_loop(torch::Tensor& data, size_t numel, int data_size)
+{
+    
+}

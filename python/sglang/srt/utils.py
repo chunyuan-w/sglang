@@ -77,7 +77,8 @@ def tensor_model_parallel_all_reduce_wrapper(input_: torch.Tensor) -> torch.Tens
     if input_.is_cpu:
         # get_tp_group()._all_reduce_in_place(input_)
         shm_comm_op = get_tp_group().shm_comm_op
-        shm_comm_op.all_reduce(input_, get_tp_group().device_group)
+        # shm_comm_op.all_reduce(input_, get_tp_group().device_group)
+        shm_comm_op.inference_all_reduce(input_, get_tp_group().device_group)
         # sgl_kernel_cpu is the self.shm_comm_op in deepspeed
         # import intel_extension_for_pytorch as ipex
         # ipex.distributed.all_reduce(input_, group=get_tp_group().device_group)

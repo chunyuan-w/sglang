@@ -8,4 +8,5 @@ void shm_initialize(int size, int rank, char* addr_string, char* port_string);
 void all_reduce(
     torch::Tensor input,
     c10::intrusive_ptr<c10d::ProcessGroup> process_group);
+void all_reduce_outer_loop(torch::Tensor& data, size_t numel, int data_size);    
 #endif
