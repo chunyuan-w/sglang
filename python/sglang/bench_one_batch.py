@@ -238,9 +238,7 @@ def extend(reqs, model_runner):
     forward_batch = ForwardBatch.init_new(model_worker_batch, model_runner)
     logits_output = model_runner.forward(forward_batch)
     next_token_ids = model_runner.sample(logits_output, forward_batch)
-    print(f"my logits_output: {logits_output}")
-    
-    return next_token_ids, logits_output.next_token_logits if forward_batch.perform_sampling else None, batch
+    return next_token_ids, logits_output.next_token_logits, batch
 
 
 @torch.no_grad
@@ -347,17 +345,9 @@ def latency_test_run_once(
         profiler.start()
 
     # Prefill
-    enabled = True
-    # enabled = False
-    # record_shapes = True
-    record_shapes = False    
     synchronize(device)
     tic = time.time()
-    with torch.autograd.profiler.profile(enabled=enabled, record_shapes=record_shapes) as prof:
-        next_token_ids, _, batch = extend(reqs, model_runner)
-    if enabled:
-        if rank_print == print:
-            prof.export_chrome_trace("/home/chunyuan/sglang-dev/sglang/first_token_trace_ipex_shm_tp2.json")
+    next_token_ids, _, batch = extend(reqs, model_runner)
     synchronize(device)
     prefill_latency = time.time() - tic
     tot_latency += prefill_latency
@@ -371,15 +361,9 @@ def latency_test_run_once(
     # Decode
     decode_latencies = []
     for i in range(output_len - 1):
-        # TODO: broadcast the next_token_ids?
-        
         synchronize(device)
         tic = time.time()
-        with torch.autograd.profiler.profile(enabled=enabled, record_shapes=record_shapes) as prof:
-            next_token_ids, _ = decode(next_token_ids, batch, model_runner)
-        if enabled:
-            if rank_print == print:
-                prof.export_chrome_trace("/home/chunyuan/sglang-dev/sglang/next_token_trace_ipex_shm_tp2.json")        
+        next_token_ids, _ = decode(next_token_ids, batch, model_runner)
         synchronize(device)
         latency = time.time() - tic
         tot_latency += latency

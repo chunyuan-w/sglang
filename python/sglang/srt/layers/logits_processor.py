@@ -23,7 +23,6 @@ from torch import nn
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
-    tensor_model_parallel_gather,
 )
 
 from sglang.srt.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -70,7 +69,6 @@ class LogitsMetadata:
     extend_logprob_start_lens_cpu: Optional[List[int]] = None
     extend_logprob_pruned_lens_cpu: Optional[List[int]] = None
     top_logprobs_nums: Optional[List[int]] = None
-    perform_sampling: bool = True
 
     @classmethod
     def from_forward_batch(cls, forward_batch: ForwardBatch):
@@ -101,7 +99,6 @@ class LogitsMetadata:
             extend_logprob_start_lens_cpu=forward_batch.extend_logprob_start_lens_cpu,
             extend_logprob_pruned_lens_cpu=extend_logprob_pruned_lens_cpu,
             top_logprobs_nums=forward_batch.top_logprobs_nums,
-            perform_sampling=forward_batch.perform_sampling,
         )
 
 
@@ -147,11 +144,6 @@ class LogitsProcessor(nn.Module):
 
         # Compute logits
         last_logits = self._get_logits(last_hidden, lm_head)
-        
-        # Only perform sampling in the driver worker
-        if not logits_metadata.perform_sampling:
-            return None
-        
         if (
             not logits_metadata.extend_return_logprob
             or logits_metadata.capture_hidden_mode.need_capture()
@@ -234,16 +226,12 @@ class LogitsProcessor(nn.Module):
             logits.mul_(self.logit_scale)
 
         if self.do_tensor_parallel_all_gather:
-            
-            # logits = tensor_model_parallel_all_gather(logits)
-            logits = tensor_model_parallel_gather(logits)
+            logits = tensor_model_parallel_all_gather(logits)
 
-        
-        if logits is not None:
-            logits = logits[:, : self.config.vocab_size].float()
+        logits = logits[:, : self.config.vocab_size].float()
 
-            if self.final_logit_softcapping:
-                fused_softcap(logits, self.final_logit_softcapping)
+        if self.final_logit_softcapping:
+            fused_softcap(logits, self.final_logit_softcapping)
 
         return logits
 
