@@ -7,7 +7,7 @@ extra_link_args = ["-Wl,-rpath,$ORIGIN/../../torch/lib", "-L/usr/lib/x86_64-linu
 ext_modules = [
     CppExtension(
         name="sgl_kernel_cpu",  # Python module name
-        sources=["src/sgl-kernel/csrc/cpu/all_reduce.cpp", "src/sgl-kernel/csrc/cpu/interface.cpp", "src/sgl-kernel/csrc/cpu/shm.cpp"],
+        sources=["src/sgl-kernel/csrc/cpu/interface.cpp", "src/sgl-kernel/csrc/cpu/shm.cpp"],
         extra_compile_args={
             "cxx": cxx_flags,
         },

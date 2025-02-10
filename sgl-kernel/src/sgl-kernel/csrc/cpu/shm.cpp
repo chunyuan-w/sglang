@@ -143,3 +143,11 @@ void shm_initialize(int size, int rank, char* addr_string, char* port_string)
         distributed_buffer[1][i] = workspace[i]->buffer + BUFFER1_OFFSET(1);
     }
 }
+
+void all_reduce(
+    torch::Tensor input,
+    c10::intrusive_ptr<c10d::ProcessGroup> process_group) {
+  std::vector<torch::Tensor> tensors = {input};
+  process_group->allreduce(tensors)->wait();
+  return;
+}

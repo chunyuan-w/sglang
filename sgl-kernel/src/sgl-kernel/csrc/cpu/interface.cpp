@@ -1,7 +1,8 @@
+// TODO: this is initially taken from shm_interface.cpp in deepspeed
+// Seems we need to adapt it to be same as ccl.cpp
 #include <torch/extension.h>
 
 #include "shm.h"
-#include "all_reduce.h"
 
 // Communication settings
 static int world_rank = -1;
