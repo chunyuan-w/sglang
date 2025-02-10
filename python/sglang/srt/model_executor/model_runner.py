@@ -258,6 +258,8 @@ class ModelRunner:
                 # TODO: init world_size=self.tp_size and rank=self.tp_rank for SHM OP?
                 import sgl_kernel_cpu
                 shm_comm_op = sgl_kernel_cpu
+                # To hint SGLang uses shared memory based AllReduce: if (size >= 1 && size == ls) { all_ranks_local_p = true; } check in interface.cpp
+                os.environ["LOCAL_SIZE"] = str(self.tp_size)
                 shm_comm_op.initialize(self.tp_size, self.tp_rank)
 
             # Only initilzie the distributed environment on the target model worker.
