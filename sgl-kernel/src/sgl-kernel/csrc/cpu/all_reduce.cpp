@@ -9,8 +9,3 @@ void all_reduce(
   process_group->allreduce(tensors)->wait();
   return;
 }
-
-// Bind the function to Python
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("all_reduce", &all_reduce, "All reduce (CPU)");
-}
