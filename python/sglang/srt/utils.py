@@ -44,7 +44,7 @@ import requests
 
 # cd sgl-kernel
 # python setup_cpu.py develop
-import sgl_kernel_cpu
+# import sgl_kernel_cpu
 import torch
 import torch.distributed
 import torch.distributed as dist
@@ -76,9 +76,11 @@ time_infos = {}
 def tensor_model_parallel_all_reduce_wrapper(input_: torch.Tensor) -> torch.Tensor:
     if input_.is_cpu:
         # get_tp_group()._all_reduce_in_place(input_)
-        # sgl_kernel_cpu.all_reduce(input_, get_tp_group().device_group)
-        import intel_extension_for_pytorch as ipex
-        ipex.distributed.all_reduce(input_, group=get_tp_group().device_group)
+        shm_comm_op = get_tp_group().shm_comm_op
+        shm_comm_op.all_reduce(input_, get_tp_group().device_group)
+        # sgl_kernel_cpu is the self.shm_comm_op in deepspeed
+        # import intel_extension_for_pytorch as ipex
+        # ipex.distributed.all_reduce(input_, group=get_tp_group().device_group)
         return input_
 
     return tensor_model_parallel_all_reduce(input_)

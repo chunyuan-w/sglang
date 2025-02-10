@@ -254,6 +254,11 @@ class ModelRunner:
                     ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
                     if ret:
                         logger.info(ret)
+                
+                # TODO: init world_size=self.tp_size and rank=self.tp_rank for SHM OP?
+                import sgl_kernel_cpu
+                shm_comm_op = sgl_kernel_cpu
+                shm_comm_op.initialize(self.tp_size, self.tp_rank)
 
             # Only initilzie the distributed environment on the target model worker.
             init_distributed_environment(
@@ -263,7 +268,8 @@ class ModelRunner:
                 local_rank=self.gpu_id,
                 distributed_init_method=dist_init_method,
             )
-            initialize_model_parallel(tensor_model_parallel_size=self.tp_size)
+            print("my shm_comm_op:", shm_comm_op)
+            initialize_model_parallel(tensor_model_parallel_size=self.tp_size, shm_comm_op=shm_comm_op)
             initialize_dp_attention(
                 enable_dp_attention=self.server_args.enable_dp_attention,
                 tp_rank=self.tp_rank,
