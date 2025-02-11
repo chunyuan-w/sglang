@@ -811,6 +811,9 @@ class ModelRunner:
     def sample(
         self, logits_output: LogitsProcessorOutput, forward_batch: ForwardBatch
     ) -> torch.Tensor:
+        if not forward_batch.perform_sampling:
+            return None
+        
         # Apply logit bias
         sampling_info = forward_batch.sampling_info
         if sampling_info.sampling_info_done:
