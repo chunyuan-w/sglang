@@ -562,9 +562,11 @@ void all_reduce_outer_loop(torch::Tensor& data, size_t numel, int data_size)
         auto data_ptr = ((char*)(data.data_ptr()) + offset);
         size_t chunk_size = data_size - offset > MAX_BUF_SIZE ? MAX_BUF_SIZE : data_size - offset;
         size_t chunk_el = chunk_size / (data_size / numel);
-        if (chunk_size < NAIVE_ALLREDUCE_THRESHOLD)
+        if (chunk_size < NAIVE_ALLREDUCE_THRESHOLD) {
             symmetric_naive_all_reduce(data_ptr, data.scalar_type(), chunk_size, chunk_el);
-        else
+        }
+        else {
             distributed_naive_reduce(data_ptr, data.scalar_type(), chunk_size, chunk_el);
+        }
     }    
 }

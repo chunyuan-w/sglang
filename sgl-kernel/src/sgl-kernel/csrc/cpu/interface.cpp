@@ -58,8 +58,8 @@ void inference_all_reduce(torch::Tensor& data, c10::intrusive_ptr<c10d::ProcessG
         all_reduce_outer_loop(data, numel, data_size);
 
         // TODO: impl the above func and remove this call
-        std::vector<torch::Tensor> tensors = {data};
-        process_group->allreduce(tensors)->wait();
+        // std::vector<torch::Tensor> tensors = {data};
+        // process_group->allreduce(tensors)->wait();
 
     }
 
