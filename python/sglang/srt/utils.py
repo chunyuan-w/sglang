@@ -73,12 +73,36 @@ show_time_cost = False
 time_infos = {}
 
 
+_TP_wrapper = None
+
+
+class GroupCoordinatorWrapper:
+    def __init__(
+        self,
+        shm_comm_op=None,
+    ):
+        self.shm_comm_op = shm_comm_op
+
+def get_tp_wrapper():
+    assert _TP_wrapper is not None, "tensor model parallel group is not initialized"
+    return _TP_wrapper
+
+
+def init_tp_wrapper(shm_comm_op=None,):
+    global _TP_wrapper
+    assert _TP_wrapper is None, "tensor model parallel group is already initialized"
+    _TP_wrapper = GroupCoordinatorWrapper(shm_comm_op)
+
+
 def tensor_model_parallel_all_reduce_wrapper(input_: torch.Tensor) -> torch.Tensor:
     if input_.is_cpu:
         # get_tp_group()._all_reduce_in_place(input_)
-        shm_comm_op = get_tp_group().shm_comm_op
+        shm_comm_op = get_tp_wrapper().shm_comm_op
         # shm_comm_op.all_reduce(input_, get_tp_group().device_group)
+        # print("rank: ", get_tp_group().local_rank, " before all reduce: ", input_)
         shm_comm_op.inference_all_reduce(input_, get_tp_group().device_group)
+        # print("rank: ", get_tp_group().local_rank, " after all reduce: ", input_)
+        
         # sgl_kernel_cpu is the self.shm_comm_op in deepspeed
         # import intel_extension_for_pytorch as ipex
         # ipex.distributed.all_reduce(input_, group=get_tp_group().device_group)

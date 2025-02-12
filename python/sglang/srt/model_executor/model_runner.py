@@ -66,6 +66,7 @@ from sglang.srt.utils import (
     monkey_patch_vllm_gguf_config,
     monkey_patch_vllm_p2p_access_check,
     set_cpu_offload_max_bytes,
+    init_tp_wrapper,
 )
 
 logger = logging.getLogger(__name__)
@@ -271,7 +272,8 @@ class ModelRunner:
                 distributed_init_method=dist_init_method,
             )
             print("my shm_comm_op:", shm_comm_op)
-            initialize_model_parallel(tensor_model_parallel_size=self.tp_size, shm_comm_op=shm_comm_op)
+            initialize_model_parallel(tensor_model_parallel_size=self.tp_size)
+            init_tp_wrapper(shm_comm_op)
             initialize_dp_attention(
                 enable_dp_attention=self.server_args.enable_dp_attention,
                 tp_rank=self.tp_rank,
