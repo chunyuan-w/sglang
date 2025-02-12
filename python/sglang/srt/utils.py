@@ -64,19 +64,13 @@ from triton.runtime.cache import (
     default_override_dir,
 )
 from uvicorn.config import LOGGING_CONFIG
-from vllm.distributed import tensor_model_parallel_all_reduce, tensor_model_parallel_all_gather
+from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import get_tp_group
 
 logger = logging.getLogger(__name__)
 
 show_time_cost = False
 time_infos = {}
-
-
-
-def tensor_model_parallel_all_gather_wrapper(input_: torch.Tensor,
-                                     dim: int = -1) -> torch.Tensor:
-    return tensor_model_parallel_all_gather(input_, dim)
 
 
 def tensor_model_parallel_all_reduce_wrapper(input_: torch.Tensor) -> torch.Tensor:

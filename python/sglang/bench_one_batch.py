@@ -67,7 +67,6 @@ from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.utils import configure_logger, kill_process_tree, suppress_other_loggers
 
-from vllm.distributed.parallel_state import get_tp_group
 
 @dataclasses.dataclass
 class BenchArgs:
@@ -239,10 +238,7 @@ def extend(reqs, model_runner):
     forward_batch = ForwardBatch.init_new(model_worker_batch, model_runner)
     logits_output = model_runner.forward(forward_batch)
     next_token_ids = model_runner.sample(logits_output, forward_batch)
-    # print("my next_token_ids:", next_token_ids)
-    # print("my logits_output:", logits_output)
-    
-    return next_token_ids, logits_output.next_token_logits if logits_output is not None else None, batch
+    return next_token_ids, logits_output.next_token_logits, batch
 
 
 @torch.no_grad
@@ -253,7 +249,7 @@ def decode(input_token_ids, batch, model_runner):
     forward_batch = ForwardBatch.init_new(model_worker_batch, model_runner)
     logits_output = model_runner.forward(forward_batch)
     next_token_ids = model_runner.sample(logits_output, forward_batch)
-    return next_token_ids, logits_output.next_token_logits if logits_output is not None else None
+    return next_token_ids, logits_output.next_token_logits
 
 
 def correctness_test(
@@ -316,7 +312,6 @@ def latency_test_run_once(
     device,
     profile,
     profile_filename_prefix,
-    tp_rank,
 ):
     max_batch_size = model_runner.max_total_num_tokens // (input_len + output_len)
     if batch_size > max_batch_size:
@@ -367,30 +362,6 @@ def latency_test_run_once(
     decode_latencies = []
     for i in range(output_len - 1):
         synchronize(device)
-        # TODO: broadcast next_token_ids here
-        
-        # print("my before broadcast:", next_token_ids, " tp_rank:", tp_rank)
-        
-        # ensure the broadcast is in-place
-        # if tp_rank == 0:
-        #     torch.distributed.broadcast(
-        #         next_token_ids, src=0, group=get_tp_group().device_group
-        #     )
-        # else:
-        #     next_token_ids = torch.empty([1], dtype=torch.long)
-        #     torch.distributed.broadcast(
-        #         next_token_ids, src=0, group=get_tp_group().device_group
-        #     )            
-        
-        inp = [next_token_ids]
-        torch.distributed.broadcast_object_list(
-            inp, src=0, group=get_tp_group().device_group
-        )
-        next_token_ids = inp[0]
-        
-        # print("my after broadcast:", next_token_ids, " tp_rank:", tp_rank)
-        
-        
         tic = time.time()
         next_token_ids, _ = decode(next_token_ids, batch, model_runner)
         synchronize(device)
@@ -460,7 +431,6 @@ def latency_test(
         server_args.device,
         profile=False,
         profile_filename_prefix="",  # not used
-        tp_rank=tp_rank,
     )
 
     rank_print("Benchmark ...")
@@ -482,7 +452,6 @@ def latency_test(
             server_args.device,
             bench_args.profile,
             bench_args.profile_filename_prefix,
-            tp_rank=tp_rank,
         )
         if ret is not None:
             result_list.append(ret)
