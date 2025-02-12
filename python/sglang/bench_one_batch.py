@@ -345,9 +345,17 @@ def latency_test_run_once(
         profiler.start()
 
     # Prefill
+    # enabled = True
+    enabled = False
+    # record_shapes = True
+    record_shapes = False        
     synchronize(device)
     tic = time.time()
-    next_token_ids, _, batch = extend(reqs, model_runner)
+    with torch.autograd.profiler.profile(enabled=enabled, record_shapes=record_shapes) as prof:
+        next_token_ids, _, batch = extend(reqs, model_runner)
+    if enabled:
+        if rank_print == print:
+            prof.export_chrome_trace("/home/chunyuan/sglang-dev/sglang/first_token_trace_ipex_shm_tp2_run2.json")
     synchronize(device)
     prefill_latency = time.time() - tic
     tot_latency += prefill_latency
@@ -363,7 +371,11 @@ def latency_test_run_once(
     for i in range(output_len - 1):
         synchronize(device)
         tic = time.time()
-        next_token_ids, _ = decode(next_token_ids, batch, model_runner)
+        with torch.autograd.profiler.profile(enabled=enabled, record_shapes=record_shapes) as prof:
+            next_token_ids, _ = decode(next_token_ids, batch, model_runner)
+        if enabled:
+            if rank_print == print:
+                prof.export_chrome_trace("/home/chunyuan/sglang-dev/sglang/next_token_trace_ipex_shm_tp2_run2.json")  
         synchronize(device)
         latency = time.time() - tic
         tot_latency += latency
