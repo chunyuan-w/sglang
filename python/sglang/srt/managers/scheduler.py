@@ -468,6 +468,7 @@ class Scheduler:
 
     @torch.no_grad()
     def event_loop_overlap(self):
+        # print("my event_loop_overlap")
         """A scheduler loop that overlaps the CPU processing and GPU computation."""
         result_queue = deque()
 
@@ -483,6 +484,7 @@ class Scheduler:
             self.cur_batch = batch
 
             if batch:
+                # print("my run_batch in event_loop_overlap")
                 result = self.run_batch(batch)
                 result_queue.append((batch.copy(), result))
 
@@ -870,6 +872,9 @@ class Scheduler:
         return self.running_batch
 
     def get_new_batch_prefill(self) -> Optional[ScheduleBatch]:
+        # TODO: seems this is needed to make all print work
+        # print("my get_new_batch_prefill")
+        
         # Check if the grammar is ready in the grammar queue
         if self.grammar_queue:
             self.move_ready_grammar_requests()
@@ -1042,10 +1047,13 @@ class Scheduler:
         """Run a batch."""
         self.forward_ct += 1
 
+        # print("my before run batch", flush=True)
         if self.is_generation:
             if batch.forward_mode.is_decode_or_idle() or batch.extend_num_tokens != 0:
                 if self.spec_algorithm.is_none():
                     model_worker_batch = batch.get_model_worker_batch()
+                    # print("my before forward_batch_generation", flush=True)
+                    
                     logits_output, next_token_ids = (
                         self.tp_worker.forward_batch_generation(model_worker_batch)
                     )

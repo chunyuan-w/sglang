@@ -1,5 +1,6 @@
 #include <torch/extension.h>
-
+#include <sched.h>
+#include <sys/syscall.h>
 #include "shm.h"
 
 // Communication settings
@@ -36,6 +37,30 @@ void initialize(int size, int rank)
 }
 
 void shm_allreduce(torch::Tensor& data, c10::intrusive_ptr<c10d::ProcessGroup> process_group, py::object op) {
+    // int pid = getpid();
+    // pid_t tid = syscall(SYS_gettid);
+
+    // std::cout << "Rank:" << world_rank <<" Process:" << pid  <<  " Thread: " << tid << "\n";    
+    
+    
+    // int pid = getpid();
+    // pid_t tid = syscall(SYS_gettid);
+
+    // cpu_set_t mask;
+    // CPU_ZERO(&mask);
+
+    // if (sched_getaffinity(tid, sizeof(cpu_set_t), &mask) == -1) {
+    //     std::cerr << "sched_getaffinity failed. errno: " << errno << " (" << std::strerror(errno) << ")\n";
+    //     return;
+    // }
+
+    // for (int i = 0; i < CPU_SETSIZE; ++i) {
+    //     if (CPU_ISSET(i, &mask)) {
+    //         std::cout << "Rank:" << world_rank <<" Process:" << pid  <<  " Thread " << tid << " can run on CPUs: " << i << "\n";
+    //     }
+    // }
+
+
     static py::object ReduceOp = py::module_::import("torch.distributed").attr("ReduceOp");
     static auto ReduceOpSum = (int)py::int_(ReduceOp.attr("SUM").attr("value"));
     TORCH_CHECK(py::int_(op.attr("value")) == ReduceOpSum, "Only torch.distributed.ReduceOp.SUM is supported");

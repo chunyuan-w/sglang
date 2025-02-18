@@ -490,6 +490,7 @@ def launch_engine(
         for tp_rank in tp_rank_range:
             reader, writer = mp.Pipe(duplex=False)
             gpu_id = server_args.base_gpu_id + tp_rank % tp_size_per_node
+            # print("my before tp process")
             proc = mp.Process(
                 target=run_scheduler_process,
                 args=(server_args, port_args, gpu_id, tp_rank, None, writer),
@@ -598,6 +599,7 @@ def launch_server(
         enable_func_timer()
 
     # Send a warmup request
+    # print("my before warmup thread")
     t = threading.Thread(
         target=_wait_and_warmup,
         args=(
@@ -774,6 +776,7 @@ class Engine:
         lora_path: Optional[List[Optional[str]]] = None,
         stream: bool = False,
     ):
+        # print("my generate")
         obj = GenerateReqInput(
             text=prompt,
             input_ids=input_ids,

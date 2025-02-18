@@ -1,3 +1,6 @@
+#include <sched.h>
+#include <sys/syscall.h>
+
 #include <ATen/ATen.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -405,6 +408,29 @@ static void parallel_memcpy(void* to, void* from, size_t n_bytes)
     // process aligned part
 #pragma omp parallel for
     for (int i = 0; i < aligned_bytes; i += VECTOR_LENGTH_IN_BYTES) {
+
+
+        // int pid = getpid();
+        // pid_t tid = syscall(SYS_gettid);
+
+        // std::cout << "Rank:" << world_rank <<" Process:" << pid  <<  " Thread: " << tid << "\n";
+
+
+        // cpu_set_t mask;
+        // CPU_ZERO(&mask);
+
+        // if (sched_getaffinity(tid, sizeof(cpu_set_t), &mask) == -1) {
+        //     std::cerr << "sched_getaffinity failed. errno: " << errno << " (" << std::strerror(errno) << ")\n";
+        //     return;
+        // }
+
+        // for (int j = 0; j < CPU_SETSIZE; ++j) {
+        //     if (CPU_ISSET(j, &mask)) {
+        //         std::cout << "Rank:" << world_rank <<" Process:" << pid  <<  " Thread " << tid << " can run on CPUs: " << j << "\n";
+        //     }
+        // }
+
+
         auto val = _mm256_loadu_si256((__m256i*)((char*)from + i));
         _mm256_storeu_si256((__m256i*)((char*)to + i), val);
     }

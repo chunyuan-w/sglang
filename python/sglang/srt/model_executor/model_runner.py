@@ -248,7 +248,11 @@ class ModelRunner:
             if self.device == "cpu":
                 # Bind OpenMP threads to CPU cores
                 if self.local_omp_cpuid != "all":
+                    # print("my launch server TP")
+                    # ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
                     torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
+                    # if ret:
+                        # logger.info(ret)                    
 
                 # Initialization of shm all_reduce
                 import sgl_kernel.ops._kernels
@@ -258,6 +262,19 @@ class ModelRunner:
                 os.environ["LOCAL_SIZE"] = str(self.tp_size)
                 shm_comm_op.initialize(self.tp_size, self.tp_rank)
                 init_tp_wrapper(shm_comm_op)
+                
+                # # Intel OpenMP setting
+                # ld_prealod_str = os.getenv("LD_PRELOAD", "")
+                # if "libiomp5.so" in ld_prealod_str:
+                #     # The time(milliseconds) that a thread should wait after
+                #     # completing the execution of a parallel region, before sleeping.
+                #     os.environ['KMP_BLOCKTIME'] = "1"
+                #     # Prevents the CPU to run into low performance state
+                #     os.environ['KMP_TPAUSE'] = "0"
+                #     # Provides fine granularity parallelism
+                #     os.environ['KMP_FORKJOIN_BARRIER_PATTERN'] = "dist,dist"
+                #     os.environ['KMP_PLAIN_BARRIER_PATTERN'] = "dist,dist"
+                #     os.environ['KMP_REDUCTION_BARRIER_PATTERN'] = "dist,dist"                
 
             # Only initilzie the distributed environment on the target model worker.
             init_distributed_environment(

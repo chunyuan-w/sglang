@@ -76,6 +76,7 @@ class TpModelWorkerClient:
         self.input_queue = Queue()
         self.output_queue = Queue()
         self.forward_stream = torch.get_device_module(self.device).Stream()
+        # TODO: this is the thread used for forward in server mode
         self.forward_thread = threading.Thread(
             target=self.forward_thread_func,
         )
@@ -118,6 +119,7 @@ class TpModelWorkerClient:
         batch_lists = [None] * 2
 
         while True:
+            # print("my forward_thread_func_", flush=True)
             model_worker_batch, future_token_ids_ct = self.input_queue.get()
             if not model_worker_batch:
                 break
@@ -178,6 +180,8 @@ class TpModelWorkerClient:
         return logits_output, next_token_ids
 
     def forward_batch_generation(self, model_worker_batch: ModelWorkerBatch):
+        # print("my tp_worker_overlap", flush=True)
+        
         # Create a new copy of sampling_info because it will be updated in-place by the scheduler for the next batch.
         sampling_info = model_worker_batch.sampling_info
         sampling_info.update_penalties()

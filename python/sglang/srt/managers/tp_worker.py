@@ -158,6 +158,8 @@ class TpModelWorker:
         launch_done: Optional[threading.Event] = None,
         skip_sample: bool = False,
     ):
+        # print("my normal_tp_worker", flush=True)
+        
         forward_batch = ForwardBatch.init_new(model_worker_batch, self.model_runner)
         logits_output = self.model_runner.forward(forward_batch)
         if launch_done:
