@@ -21,9 +21,13 @@ from pathlib import Path
 import torch
 from setuptools import find_packages, setup
 from setuptools.command.build_py import build_py
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+from torch.utils.cpp_extension import BuildExtension, CppExtension, CUDAExtension
 
 root = Path(__file__).parent.resolve()
+
+force_cuda = os.environ.get("SGL_KERNEL_FORCE_CUDA", "0") == "1"
+
+build_cuda_sources = torch.cuda.is_available() or force_cuda
 
 
 if "bdist_wheel" in sys.argv and "--plat-name" not in sys.argv:
@@ -55,9 +59,10 @@ cutlass_default = root / "3rdparty" / "cutlass"
 cutlass = Path(os.environ.get("CUSTOM_CUTLASS_SRC_DIR", default=cutlass_default))
 flashinfer = root / "3rdparty" / "flashinfer"
 deepgemm = root / "3rdparty" / "deepgemm"
-include_dirs = [
+include_dirs = []
+cuda_include_dirs = [
     root / "include",
-    root / "csrc",
+    root / "csrc",    
     cutlass.resolve() / "include",
     cutlass.resolve() / "tools" / "util" / "include",
     flashinfer.resolve() / "include",
@@ -142,6 +147,11 @@ nvcc_flags_fp8 = [
 ]
 
 sources = [
+    "src/sgl-kernel/csrc/cpu/interface.cpp",
+    "src/sgl-kernel/csrc/cpu/shm.cpp",
+]
+cuda_sources = (
+    [
     "csrc/allreduce/trt_reduce_internal.cu",
     "csrc/allreduce/trt_reduce_kernel.cu",
     "csrc/attention/lightning_attention_decode_kernel.cu",
@@ -163,8 +173,8 @@ sources = [
     "3rdparty/flashinfer/csrc/norm.cu",
     "3rdparty/flashinfer/csrc/renorm.cu",
     "3rdparty/flashinfer/csrc/sampling.cu",
-]
-
+    ],
+)
 enable_bf16 = os.getenv("SGL_KERNEL_ENABLE_BF16", "0") == "1"
 enable_fp8 = os.getenv("SGL_KERNEL_ENABLE_FP8", "0") == "1"
 enable_sm90a = os.getenv("SGL_KERNEL_ENABLE_SM90A", "0") == "1"
@@ -199,18 +209,26 @@ for flag in [
         pass
 
 cxx_flags = ["-O3"]
-libraries = ["c10", "torch", "torch_python", "cuda", "cublas"]
+extra_compile_args = {"cxx": cxx_flags}
+libraries = ["c10", "torch", "torch_python"]
+cuda_libraries = ["cuda", "cublas"]
+if build_cuda_sources:
+    sources.update(cuda_sources)
+    include_dirs.extend(cuda_include_dirs)
+    extra_compile_args.update({"nvcc": nvcc_flags})
+    libraries.extend(cuda_libraries)
+    Extension = CUDAExtension
+else:
+    Extension = CppExtension
+
 extra_link_args = ["-Wl,-rpath,$ORIGIN/../../torch/lib", "-L/usr/lib/x86_64-linux-gnu"]
 
 ext_modules = [
-    CUDAExtension(
+    Extension(
         name="sgl_kernel.common_ops",
         sources=sources,
         include_dirs=include_dirs,
-        extra_compile_args={
-            "nvcc": nvcc_flags,
-            "cxx": cxx_flags,
-        },
+        extra_compile_args=extra_compile_args,
         libraries=libraries,
         extra_link_args=extra_link_args,
         py_limited_api=True,
