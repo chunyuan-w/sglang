@@ -64,6 +64,7 @@ class TpModelWorker:
             is_embedding=server_args.is_embedding,
             dtype=server_args.dtype,
             quantization=server_args.quantization,
+            tp_size=server_args.tp_size,
         )
         self.model_runner = ModelRunner(
             model_config=self.model_config,

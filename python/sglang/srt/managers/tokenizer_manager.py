@@ -140,6 +140,7 @@ class TokenizerManager:
             is_embedding=server_args.is_embedding,
             dtype=server_args.dtype,
             quantization=server_args.quantization,
+            tp_size=server_args.tp_size,
         )
 
         self.is_generation = self.model_config.is_generation
