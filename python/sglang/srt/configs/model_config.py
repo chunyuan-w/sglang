@@ -43,6 +43,7 @@ class ModelConfig:
         is_embedding: Optional[bool] = None,
         dtype: str = "auto",
         quantization: Optional[str] = None,
+        tp_size=None,
     ) -> None:
         self.model_path = model_path
         self.revision = revision
@@ -113,18 +114,43 @@ class ModelConfig:
             self.attention_arch = AttentionArch.MHA
 
         self.num_attention_heads = self.hf_text_config.num_attention_heads
-        self.num_key_value_heads = getattr(
-            self.hf_text_config, "num_key_value_heads", None
-        )
 
-        # for Dbrx and MPT models
-        if self.hf_config.model_type in ["dbrx", "mpt"]:
+        # TODO: we need to set tp_size when initializing ModelConfig.
+        # Currently we only changed it in bench_one_batch
+        # Is there a better way to set tp_size so that we don't need to
+        # touch all the ModelConfig init?
+        assert tp_size is not None
+        tensor_parallel_size = tp_size
+        if self.num_attention_heads % tensor_parallel_size != 0:
+
+            def round_to_size(num, round_size):
+                return ((num + round_size - 1) // round_size) * round_size
+
+            query_heads_per_kv = (
+                self.num_attention_heads // self.get_total_num_kv_heads()
+            )
+            total_kv_heads = self.get_total_num_kv_heads()
+
+            self.num_key_value_heads = round_to_size(
+                total_kv_heads, tensor_parallel_size
+            )
+            print("my num_attention_heads before:", self.num_attention_heads)
+            self.num_attention_heads = (
+                round_to_size(total_kv_heads, tensor_parallel_size) * query_heads_per_kv
+            )
+        else:
             self.num_key_value_heads = getattr(
-                self.hf_config.attn_config, "kv_n_heads", None
+                self.hf_text_config, "num_key_value_heads", None
             )
 
-        if self.num_key_value_heads is None:
-            self.num_key_value_heads = self.num_attention_heads
+            # for Dbrx and MPT models
+            if self.hf_config.model_type in ["dbrx", "mpt"]:
+                self.num_key_value_heads = getattr(
+                    self.hf_config.attn_config, "kv_n_heads", None
+                )
+
+            if self.num_key_value_heads is None:
+                self.num_key_value_heads = self.num_attention_heads
         self.hidden_size = self.hf_text_config.hidden_size
         self.num_hidden_layers = self.hf_text_config.num_hidden_layers
         self.vocab_size = self.hf_text_config.vocab_size
@@ -187,7 +213,12 @@ class ModelConfig:
 
     def get_num_kv_heads(self, tensor_parallel_size) -> int:
         """Returns the number of KV heads per GPU."""
-        total_num_kv_heads = self.get_total_num_kv_heads()
+        # TODO: check impact on other models.
+        # This change is needed to make the MHATokenToKVPool init size correct
+        # total_num_kv_heads = self.get_total_num_kv_heads()
+        total_num_kv_heads = self.num_attention_heads
+        print("my total_num_kv_heads:", total_num_kv_heads)
+        print("my modified head:", self.num_attention_heads)
         # If tensor parallelism is used, we divide the number of KV heads by
         # the tensor parallel size. We will replicate the KV heads in the
         # case where the number of KV heads is smaller than the tensor

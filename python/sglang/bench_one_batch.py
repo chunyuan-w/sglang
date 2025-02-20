@@ -137,6 +137,7 @@ def load_model(server_args, port_args, tp_rank):
         is_embedding=server_args.is_embedding,
         dtype=server_args.dtype,
         quantization=server_args.quantization,
+        tp_size=server_args.tp_size,
     )
     model_runner = ModelRunner(
         model_config=model_config,

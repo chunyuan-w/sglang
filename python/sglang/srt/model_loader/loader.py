@@ -138,6 +138,7 @@ def _initialize_model(
     return model_class(
         config=model_config.hf_config,
         quant_config=quant_config,
+        model_config=model_config,
     )
 
 

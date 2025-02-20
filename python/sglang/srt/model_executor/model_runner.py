@@ -684,6 +684,9 @@ class ModelRunner:
                 enable_memory_saver=self.server_args.enable_memory_saver,
             )
         else:
+            print("my head_dim:", self.model_config.head_dim)
+            # TODO: head_num should be set using the updated attention heads num
+            # We temporarily changed def get_num_kv_heads(self, tensor_parallel_size) -> int:
             self.token_to_kv_pool = MHATokenToKVPool(
                 self.max_total_num_tokens,
                 dtype=self.kv_cache_dtype,

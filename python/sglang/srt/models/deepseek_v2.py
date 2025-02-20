@@ -143,11 +143,20 @@ class DeepseekV2MoE(nn.Module):
         self.gate = MoEGate(config=config)
 
         MoEImpl = EPMoE if global_server_args_dict["enable_ep_moe"] else FusedMoE
+
+        def round_to_size(num, round_size):
+            return ((num + round_size - 1) // round_size) * round_size
+
+        moe_intermediate_size = config.moe_intermediate_size
+        if config.num_attention_heads % self.tp_size != 0:
+            moe_intermediate_size = round_to_size(
+                moe_intermediate_size, self.tp_size * 8
+            )
         self.experts = MoEImpl(
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
-            intermediate_size=config.moe_intermediate_size,
+            intermediate_size=moe_intermediate_size,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             use_grouped_topk=True,
@@ -157,7 +166,7 @@ class DeepseekV2MoE(nn.Module):
         )
 
         if config.n_shared_experts is not None:
-            intermediate_size = config.moe_intermediate_size * config.n_shared_experts
+            intermediate_size = moe_intermediate_size * config.n_shared_experts
             self.shared_experts = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
@@ -210,6 +219,7 @@ class DeepseekV2Attention(nn.Module):
         max_position_embeddings: int = 8192,
         quant_config: Optional[QuantizationConfig] = None,
         layer_id=None,
+        model_config=None,
     ) -> None:
         super().__init__()
         self.layer_id = layer_id
@@ -220,9 +230,10 @@ class DeepseekV2Attention(nn.Module):
         self.v_head_dim = v_head_dim
         self.q_lora_rank = q_lora_rank
         self.kv_lora_rank = kv_lora_rank
-        self.num_heads = num_heads
+        self.num_heads = model_config.num_attention_heads
+        num_heads = model_config.num_attention_heads
         tp_size = get_tensor_model_parallel_world_size()
-        assert num_heads % tp_size == 0
+        assert num_heads % tp_size == 0, f"{num_heads} is not divisible by {tp_size}"
         self.num_local_heads = num_heads // tp_size
         self.scaling = self.qk_head_dim**-0.5
         self.rope_theta = rope_theta
@@ -686,6 +697,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         layer_id: int,
         quant_config: Optional[QuantizationConfig] = None,
         is_nextn: bool = False,
+        model_config=None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -736,6 +748,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 max_position_embeddings=max_position_embeddings,
                 quant_config=quant_config,
                 layer_id=layer_id,
+                model_config=model_config,
             )
         if is_nextn or (
             config.n_routed_experts is not None
@@ -800,6 +813,7 @@ class DeepseekV2Model(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        model_config=None,
     ) -> None:
         super().__init__()
         self.padding_id = config.pad_token_id
@@ -816,6 +830,7 @@ class DeepseekV2Model(nn.Module):
                     config,
                     layer_id,
                     quant_config=quant_config,
+                    model_config=model_config,
                 )
                 for layer_id in range(config.num_hidden_layers)
             ]
@@ -846,11 +861,12 @@ class DeepseekV2ForCausalLM(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        model_config=None,
     ) -> None:
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.model = DeepseekV2Model(config, quant_config)
+        self.model = DeepseekV2Model(config, quant_config, model_config)
         if global_server_args_dict["enable_dp_attention"]:
             self.lm_head = ReplicatedLinear(
                 config.hidden_size,
