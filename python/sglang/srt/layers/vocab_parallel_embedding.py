@@ -234,8 +234,11 @@ class VocabParallelEmbedding(torch.nn.Module):
             self.tp_size = 1
 
         self.num_embeddings = num_embeddings
-        self.padding_size = padding_size * get_tensor_model_parallel_world_size()
         self.org_vocab_size = org_num_embeddings or num_embeddings
+        if pad_vocab_size(self.org_vocab_size, padding_size) % self.tp_size != 0:
+            padding_size *= self.tp_size
+        self.padding_size = padding_size
+
         num_added_embeddings = num_embeddings - self.org_vocab_size
         self.use_presharded_weights = use_presharded_weights
         if use_presharded_weights:
