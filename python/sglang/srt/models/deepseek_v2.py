@@ -58,6 +58,9 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.utils import is_cuda_available, is_hip
 
+# TODO: why using 8?
+DEFAULT_MOE_PADDING_SIZE = 8
+
 is_hip_ = is_hip()
 
 if is_cuda_available():
@@ -150,7 +153,7 @@ class DeepseekV2MoE(nn.Module):
         moe_intermediate_size = config.moe_intermediate_size
         if config.num_attention_heads % self.tp_size != 0:
             moe_intermediate_size = round_to_size(
-                moe_intermediate_size, self.tp_size * 8
+                moe_intermediate_size, self.tp_size * DEFAULT_MOE_PADDING_SIZE
             )
         self.experts = MoEImpl(
             num_experts=config.n_routed_experts,

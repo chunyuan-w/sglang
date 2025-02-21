@@ -420,7 +420,6 @@ class FusedMoE(torch.nn.Module):
         shard_size = expert_data.shape[shard_dim]
 
         if not self.use_presharded_weights:
-            # TODO: suppot tp=3
             loaded_weight_shard_dim = loaded_weight.size(shard_dim)
             actual_shard_size = min(
                 shard_size, loaded_weight_shard_dim - shard_size * tp_rank

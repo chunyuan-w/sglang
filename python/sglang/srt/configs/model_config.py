@@ -216,9 +216,9 @@ class ModelConfig:
         # TODO: check impact on other models.
         # This change is needed to make the MHATokenToKVPool init size correct
         # total_num_kv_heads = self.get_total_num_kv_heads()
-        total_num_kv_heads = self.num_attention_heads
-        print("my total_num_kv_heads:", total_num_kv_heads)
-        print("my modified head:", self.num_attention_heads)
+        total_num_kv_heads = self.num_key_value_heads
+        print("my self.get_total_num_kv_heads:", self.get_total_num_kv_heads())
+        print("my modified num_key_value_heads:", self.num_key_value_heads)
         # If tensor parallelism is used, we divide the number of KV heads by
         # the tensor parallel size. We will replicate the KV heads in the
         # case where the number of KV heads is smaller than the tensor
