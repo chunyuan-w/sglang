@@ -52,6 +52,7 @@ from sglang.srt.layers.rotary_embedding import get_rope, get_rope_wrapper
 from sglang.srt.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
+    pad_vocab_size,
 )
 from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
@@ -147,12 +148,9 @@ class DeepseekV2MoE(nn.Module):
 
         MoEImpl = EPMoE if global_server_args_dict["enable_ep_moe"] else FusedMoE
 
-        def round_to_size(num, round_size):
-            return ((num + round_size - 1) // round_size) * round_size
-
         moe_intermediate_size = config.moe_intermediate_size
         if config.num_attention_heads % self.tp_size != 0:
-            moe_intermediate_size = round_to_size(
+            moe_intermediate_size = pad_vocab_size(
                 moe_intermediate_size, self.tp_size * DEFAULT_MOE_PADDING_SIZE
             )
         self.experts = MoEImpl(

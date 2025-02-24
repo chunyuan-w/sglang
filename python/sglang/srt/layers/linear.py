@@ -149,6 +149,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        # TODO: is changing from empty to zeros really needed?
         weight = Parameter(
             torch.zeros(
                 sum(output_partition_sizes),
@@ -407,6 +408,9 @@ class ColumnParallelLinear(LinearBase):
             actual_shard_size = min(
                 loaded_weight.size(output_dim) - start_idx, shard_size
             )
+            # print("my actual_shard_size:", actual_shard_size)
+            # print("my shard_size:", shard_size)
+
             if not self.use_presharded_weights:
                 loaded_weight = loaded_weight.narrow(
                     output_dim, start_idx, actual_shard_size
