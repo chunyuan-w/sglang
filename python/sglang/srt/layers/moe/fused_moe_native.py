@@ -109,6 +109,12 @@ def moe_forward_native(
         layer_w13_weight = layer.w13_weight[i]
         layer_w2_weight = layer.w2_weight[i]
 
+        # TODO: workaround for FP8
+        if layer_w13_weight.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
+            layer_w13_weight = layer_w13_weight.to(torch.bfloat16)
+        if layer_w2_weight.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
+            layer_w2_weight = layer_w2_weight.to(torch.bfloat16)        
+        
         gate_up = F.linear(tokens_for_this_expert, layer_w13_weight)
         gate_up = act(gate_up)
         expert_out = F.linear(gate_up, layer_w2_weight)

@@ -39,6 +39,7 @@ from sglang.srt.layers.quantization.fp8_utils import (
     apply_w8a8_block_fp8_linear,
     normalize_e4m3fn_to_e4m3fnuz,
 )
+from sglang.srt.layers.moe.fused_moe_native import moe_forward_native
 from sglang.srt.utils import (
     get_bool_env_var,
     is_hip,
@@ -160,7 +161,8 @@ class Fp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
-        self.cutlass_fp8_supported = cutlass_fp8_supported()
+        # self.cutlass_fp8_supported = cutlass_fp8_supported()
+        self.cutlass_fp8_supported = False
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
@@ -389,24 +391,32 @@ class Fp8LinearMethod(LinearMethodBase):
             )
 
         if self.block_quant:
-            return apply_w8a8_block_fp8_linear(
-                input=x,
-                weight=layer.weight,
-                block_size=self.quant_config.weight_block_size,
-                weight_scale=layer.weight_scale_inv,
-                input_scale=None,
-                bias=bias,
-            )
+            # R1 calls into here
+            # TODO: workaround for FP8
+            bf16_weight = layer.weight.to(torch.bfloat16)
+            return F.linear(x, bf16_weight, bias)            
+            # return apply_w8a8_block_fp8_linear(
+            #     input=x,
+            #     weight=layer.weight,
+            #     block_size=self.quant_config.weight_block_size,
+            #     weight_scale=layer.weight_scale_inv,
+            #     input_scale=None,
+            #     bias=bias,
+            # )
 
-        return apply_fp8_linear(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            input_scale=layer.input_scale,
-            bias=bias,
-            cutlass_fp8_supported=self.cutlass_fp8_supported,
-            use_per_token_if_dynamic=False,
-        )
+        # V2-lite calls into here
+        # TODO: workaround for FP8
+        bf16_weight = layer.weight.to(torch.bfloat16)
+        return F.linear(x, bf16_weight, bias)
+        # return apply_fp8_linear(
+        #     input=x,
+        #     weight=layer.weight,
+        #     weight_scale=layer.weight_scale,
+        #     input_scale=layer.input_scale,
+        #     bias=bias,
+        #     cutlass_fp8_supported=self.cutlass_fp8_supported,
+        #     use_per_token_if_dynamic=False,
+        # )
 
 
 class Fp8MoEMethod:
@@ -775,6 +785,21 @@ class Fp8MoEMethod:
         from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_experts
         from sglang.srt.layers.moe.topk import select_experts
 
+        # TODO: workaround for FP8
+        return moe_forward_native(
+            layer,
+            x,
+            use_grouped_topk,
+            top_k,
+            router_logits,
+            renormalize,
+            topk_group,
+            num_expert_group,
+            custom_routing_function,
+            correction_bias,
+            activation,
+        )
+        
         # Expert selection
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
@@ -817,6 +842,7 @@ class Fp8MoEMethod:
 
         else:
             # Expert fusion with FP8 quantization
+            # V2 lite reaches here
             return fused_experts(
                 x,
                 layer.w13_weight,
