@@ -10,6 +10,7 @@ from torch.nn import functional as F
 
 from sglang.srt.layers.activation import GeluAndMul, SiluAndMul
 from sglang.srt.layers.moe.topk import select_experts
+from sglang.srt.layers.quantization.fp8_utils import convert_block_quant_fp8_to_bf16
 
 
 def fused_moe_forward_native(
@@ -65,6 +66,7 @@ def moe_forward_native(
     custom_routing_function: Optional[Callable] = None,
     correction_bias: Optional[torch.Tensor] = None,
     activation: str = "silu",
+    weight_block_size=None,
 ) -> torch.Tensor:
 
     topk_weights, topk_ids = select_experts(
@@ -108,6 +110,25 @@ def moe_forward_native(
 
         layer_w13_weight = layer.w13_weight[i]
         layer_w2_weight = layer.w2_weight[i]
+
+        # We temporarily convert weight from FP8 to BF16 here to make DeepSeek R1 runnable on CPU
+        if layer_w13_weight.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
+            w13_weight_scale_inv = layer.w13_weight_scale_inv[i]
+            layer_w13_weight = convert_block_quant_fp8_to_bf16(
+                layer_w13_weight,
+                w13_weight_scale_inv,
+                weight_block_size,
+                tokens_for_this_expert.dtype,
+            )
+
+        if layer_w2_weight.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
+            w2_weight_scale_inv = layer.w2_weight_scale_inv[i]
+            layer_w2_weight = convert_block_quant_fp8_to_bf16(
+                layer_w2_weight,
+                w2_weight_scale_inv,
+                weight_block_size,
+                tokens_for_this_expert.dtype,
+            )
 
         gate_up = F.linear(tokens_for_this_expert, layer_w13_weight)
         gate_up = act(gate_up)

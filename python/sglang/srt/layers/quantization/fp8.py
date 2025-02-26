@@ -29,6 +29,7 @@ from sglang.srt.layers.linear import (
     LinearMethodBase,
     UnquantizedLinearMethod,
 )
+from sglang.srt.layers.moe.fused_moe_native import moe_forward_native
 from sglang.srt.layers.parameter import ModelWeightParameter, PerTensorScaleParameter
 from sglang.srt.layers.quantization.base_config import (
     QuantizationConfig,
@@ -36,6 +37,7 @@ from sglang.srt.layers.quantization.base_config import (
 )
 from sglang.srt.layers.quantization.fp8_utils import (
     BlockQuantScaleParameter,
+    convert_block_quant_fp8_to_bf16,
     apply_w8a8_block_fp8_linear,
     normalize_e4m3fn_to_e4m3fnuz,
 )
@@ -160,7 +162,9 @@ class Fp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
-        self.cutlass_fp8_supported = cutlass_fp8_supported()
+        # TODO: temporarily set cutlass_fp8_supported directly to False here
+        # self.cutlass_fp8_supported = cutlass_fp8_supported()
+        self.cutlass_fp8_supported = False
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
@@ -389,6 +393,16 @@ class Fp8LinearMethod(LinearMethodBase):
             )
 
         if self.block_quant:
+            # We temporarily convert weight from FP8 to BF16 here to make DeepSeek R1 runnable on CPU
+            if layer.weight.device == torch.device("cpu"):
+                bf16_weight = convert_block_quant_fp8_to_bf16(
+                    layer.weight,
+                    layer.weight_scale_inv,
+                    self.quant_config.weight_block_size,
+                    x.dtype,
+                )
+                return F.linear(x, bf16_weight, bias)
+
             return apply_w8a8_block_fp8_linear(
                 input=x,
                 weight=layer.weight,
@@ -774,6 +788,24 @@ class Fp8MoEMethod:
     ) -> torch.Tensor:
         from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_experts
         from sglang.srt.layers.moe.topk import select_experts
+
+        # Use moe native on CPU for now
+        # TODO: replace it with optimized moe kernel when it's ready
+        if x.device == torch.device("cpu"):
+            return moe_forward_native(
+                layer,
+                x,
+                use_grouped_topk,
+                top_k,
+                router_logits,
+                renormalize,
+                topk_group,
+                num_expert_group,
+                custom_routing_function,
+                correction_bias,
+                activation,
+                self.quant_config.weight_block_size,
+            )
 
         # Expert selection
         topk_weights, topk_ids = select_experts(
