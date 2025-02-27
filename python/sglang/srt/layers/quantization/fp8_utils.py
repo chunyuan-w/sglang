@@ -29,15 +29,23 @@ def apply_block_scale(fp8_weight, weight_scale_inv, block_size, act_dtype):
         f32_weight = torch.nn.functional.pad(f32_weight, (0, pad_N, 0, pad_M))
 
     new_M, new_N = f32_weight.shape
-
     num_blocks_M = new_M // block_M
     num_blocks_N = new_N // block_N
 
-    weight_scale_expanded = weight_scale_inv.unsqueeze(-1).unsqueeze(-1)
-    weight_scale_expanded = weight_scale_expanded.expand(
-        num_blocks_M, num_blocks_N, block_M, block_N
-    )
-    weight_scale_expanded = weight_scale_expanded.contiguous().reshape(new_M, new_N)
+    if weight_scale_inv.shape != (num_blocks_M, num_blocks_N):
+        padded_scale = torch.ones(
+            (num_blocks_M, num_blocks_N),
+            dtype=weight_scale_inv.dtype,
+            device=weight_scale_inv.device,
+        )
+        padded_scale[: weight_scale_inv.shape[0], : weight_scale_inv.shape[1]] = (
+            weight_scale_inv
+        )
+        weight_scale_inv = padded_scale
+
+    weight_scale_expanded = weight_scale_inv.repeat_interleave(
+        block_M, dim=0
+    ).repeat_interleave(block_N, dim=1)
 
     f32_weight_scaled = f32_weight * weight_scale_expanded
 
