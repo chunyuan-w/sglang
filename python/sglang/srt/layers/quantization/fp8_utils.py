@@ -15,6 +15,38 @@ if _is_cuda:
     from sgl_kernel import fp8_blockwise_scaled_mm
 
 
+def apply_block_scale(fp8_weight, weight_scale_inv, block_size, act_dtype):
+    f32_weight = fp8_weight.float()
+    weight_shape = fp8_weight.shape
+    M, N = weight_shape
+
+    block_M, block_N = block_size
+
+    pad_M = (block_M - (M % block_M)) % block_M
+    pad_N = (block_N - (N % block_N)) % block_N
+
+    if pad_M > 0 or pad_N > 0:
+        f32_weight = torch.nn.functional.pad(f32_weight, (0, pad_N, 0, pad_M))
+
+    new_M, new_N = f32_weight.shape
+
+    num_blocks_M = new_M // block_M
+    num_blocks_N = new_N // block_N
+
+    weight_scale_expanded = weight_scale_inv.unsqueeze(-1).unsqueeze(-1)
+    weight_scale_expanded = weight_scale_expanded.expand(
+        num_blocks_M, num_blocks_N, block_M, block_N
+    )
+    weight_scale_expanded = weight_scale_expanded.contiguous().reshape(new_M, new_N)
+
+    f32_weight_scaled = f32_weight * weight_scale_expanded
+
+    if pad_M > 0 or pad_N > 0:
+        f32_weight_scaled = f32_weight_scaled[:M, :N]
+
+    return f32_weight_scaled.to(act_dtype)
+
+
 def normalize_e4m3fn_to_e4m3fnuz(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,

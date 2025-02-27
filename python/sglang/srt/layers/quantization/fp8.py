@@ -29,6 +29,7 @@ from sglang.srt.layers.linear import (
     LinearMethodBase,
     UnquantizedLinearMethod,
 )
+from sglang.srt.layers.moe.fused_moe_native import moe_forward_native
 from sglang.srt.layers.parameter import ModelWeightParameter, PerTensorScaleParameter
 from sglang.srt.layers.quantization.base_config import (
     QuantizationConfig,
@@ -36,10 +37,10 @@ from sglang.srt.layers.quantization.base_config import (
 )
 from sglang.srt.layers.quantization.fp8_utils import (
     BlockQuantScaleParameter,
+    apply_block_scale,
     apply_w8a8_block_fp8_linear,
     normalize_e4m3fn_to_e4m3fnuz,
 )
-from sglang.srt.layers.moe.fused_moe_native import moe_forward_native
 from sglang.srt.utils import (
     get_bool_env_var,
     is_hip,
@@ -393,16 +394,23 @@ class Fp8LinearMethod(LinearMethodBase):
         if self.block_quant:
             # R1 calls into here
             # TODO: workaround for FP8
-            bf16_weight = layer.weight.to(torch.bfloat16)
-            return F.linear(x, bf16_weight, bias)            
-            # return apply_w8a8_block_fp8_linear(
-            #     input=x,
-            #     weight=layer.weight,
-            #     block_size=self.quant_config.weight_block_size,
-            #     weight_scale=layer.weight_scale_inv,
-            #     input_scale=None,
-            #     bias=bias,
-            # )
+            if layer.weight.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
+                # breakpoint()
+                bf16_weight = apply_block_scale(
+                    layer.weight,
+                    layer.weight_scale_inv,
+                    self.quant_config.weight_block_size,
+                    x.dtype,
+                )
+                return F.linear(x, bf16_weight, bias)
+            return apply_w8a8_block_fp8_linear(
+                input=x,
+                weight=layer.weight,
+                block_size=self.quant_config.weight_block_size,
+                weight_scale=layer.weight_scale_inv,
+                input_scale=None,
+                bias=bias,
+            )
 
         # V2-lite calls into here
         # TODO: workaround for FP8
@@ -798,8 +806,9 @@ class Fp8MoEMethod:
             custom_routing_function,
             correction_bias,
             activation,
+            self.quant_config.weight_block_size,
         )
-        
+
         # Expert selection
         topk_weights, topk_ids = select_experts(
             hidden_states=x,

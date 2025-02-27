@@ -10,6 +10,7 @@ from torch.nn import functional as F
 
 from sglang.srt.layers.activation import GeluAndMul, SiluAndMul
 from sglang.srt.layers.moe.topk import select_experts
+from sglang.srt.layers.quantization.fp8_utils import apply_block_scale
 
 
 def fused_moe_forward_native(
@@ -65,6 +66,7 @@ def moe_forward_native(
     custom_routing_function: Optional[Callable] = None,
     correction_bias: Optional[torch.Tensor] = None,
     activation: str = "silu",
+    weight_block_size=None,
 ) -> torch.Tensor:
 
     topk_weights, topk_ids = select_experts(
@@ -108,13 +110,26 @@ def moe_forward_native(
 
         layer_w13_weight = layer.w13_weight[i]
         layer_w2_weight = layer.w2_weight[i]
+        w13_weight_scale_inv = layer.w13_weight_scale_inv[i]
+        w2_weight_scale_inv = layer.w2_weight_scale_inv[i]
 
         # TODO: workaround for FP8
         if layer_w13_weight.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
-            layer_w13_weight = layer_w13_weight.to(torch.bfloat16)
+            layer_w13_weight = apply_block_scale(
+                layer_w13_weight,
+                w13_weight_scale_inv,
+                weight_block_size,
+                tokens_for_this_expert.dtype,
+            )
+
         if layer_w2_weight.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
-            layer_w2_weight = layer_w2_weight.to(torch.bfloat16)        
-        
+            layer_w2_weight = apply_block_scale(
+                layer_w2_weight,
+                w2_weight_scale_inv,
+                weight_block_size,
+                tokens_for_this_expert.dtype,
+            )
+
         gate_up = F.linear(tokens_for_this_expert, layer_w13_weight)
         gate_up = act(gate_up)
         expert_out = F.linear(gate_up, layer_w2_weight)
