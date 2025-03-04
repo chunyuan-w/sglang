@@ -29,6 +29,7 @@ from sglang.srt.layers.attention.triton_ops.decode_attention import (
 
 
 def is_hip():
+    return False
     return triton.runtime.driver.active.get_current_target().backend == "hip"
 
 
