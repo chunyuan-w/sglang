@@ -99,6 +99,7 @@ class W8A8Int8LinearMethod(LinearMethodBase):
             output_dim=0,
             weight_loader=weight_loader,
         )
+        # breakpoint()
         layer.register_parameter("weight", weight)
 
         weight_scale = ChannelQuantScaleParameter(
@@ -114,8 +115,10 @@ class W8A8Int8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ):
+        breakpoint()
         x_q, x_scale = per_token_quant_int8(x)
 
+        # TODO: GEMM compute is done here
         return int8_scaled_mm(
             x_q, layer.weight, x_scale, layer.weight_scale, out_dtype=x.dtype, bias=bias
         )

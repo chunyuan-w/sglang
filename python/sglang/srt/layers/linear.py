@@ -385,6 +385,8 @@ class ColumnParallelLinear(LinearBase):
             self.register_parameter("bias", None)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+        if param.data.dtype == torch.int8:
+            breakpoint()
         output_dim = getattr(param, "output_dim", None)
 
         # Special case for GGUF
@@ -414,6 +416,7 @@ class ColumnParallelLinear(LinearBase):
             loaded_weight = loaded_weight.reshape(1)
 
         assert param_data.shape == loaded_weight.shape
+        # TODO: prepack weight here?
         param_data.copy_(loaded_weight)
 
     def weight_loader_v2(self, param: Parameter, loaded_weight: torch.Tensor):
