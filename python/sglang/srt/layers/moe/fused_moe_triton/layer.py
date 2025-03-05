@@ -31,6 +31,8 @@ if torch.cuda.is_available():
 else:
     fused_experts = None  # type: ignore
 
+from flashinfer.gemm import convert_weight_packed
+
 import logging
 
 is_hip_ = is_hip()
@@ -105,6 +107,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        print("my enter")
         if is_hip_ and get_bool_env_var("CK_MOE"):
             layer.w13_weight = torch.nn.Parameter(
                 permute_weight(layer.w13_weight.data),
@@ -116,6 +119,20 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 requires_grad=False,
             )
             torch.cuda.empty_cache()
+        else:
+            print("before packing w13_weight")
+            layer.w13_weight = torch.nn.Parameter(
+                convert_weight_packed(layer.w13_weight.data),
+                requires_grad=False,
+            )
+            print("after packing w13_weight")
+            
+            layer.w2_weight = torch.nn.Parameter(
+                convert_weight_packed(layer.w2_weight.data),
+                requires_grad=False,
+            )
+            print("after packing w2_weight")
+            
         return
 
     def apply(
@@ -500,6 +517,7 @@ class FusedMoE(torch.nn.Module):
         # dimension intermediate_size is used.
         SHARD_ID_TO_SHARDED_DIM = {"w1": 0, "w2": 1, "w3": 0}
 
+        
         expert_data = param.data[expert_id]
         tp_rank = get_tensor_model_parallel_rank()
 
