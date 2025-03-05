@@ -25,6 +25,8 @@ if torch.cuda.is_available():
 else:
     fused_experts = None  # type: ignore
 
+from flashinfer.gemm import convert_weight_packed
+
 import logging
 
 is_hip_ = is_hip()
@@ -99,6 +101,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        print("my enter")
         if is_hip_ and get_bool_env_var("CK_MOE"):
             layer.w13_weight = torch.nn.Parameter(
                 permute_weight(layer.w13_weight.data),
@@ -110,6 +113,20 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 requires_grad=False,
             )
             torch.cuda.empty_cache()
+        else:
+            print("before packing w13_weight")
+            layer.w13_weight = torch.nn.Parameter(
+                convert_weight_packed(layer.w13_weight.data),
+                requires_grad=False,
+            )
+            print("after packing w13_weight")
+            
+            layer.w2_weight = torch.nn.Parameter(
+                convert_weight_packed(layer.w2_weight.data),
+                requires_grad=False,
+            )
+            print("after packing w2_weight")
+            
         return
 
     def apply(
@@ -399,6 +416,8 @@ class FusedMoE(torch.nn.Module):
         else:
             assert shard_id == "w3"
             expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
+        # breakpoint()
+        # loaded_weight = convert_weight_packed(loaded_weight)
         expert_data.copy_(loaded_weight)
 
     def _load_w2(
@@ -421,6 +440,9 @@ class FusedMoE(torch.nn.Module):
             )
 
         # w2, down_proj: Load into only logical weight of w2.
+        # TODO: prepack here?
+        # breakpoint()
+        # loaded_weight = convert_weight_packed(loaded_weight)
         expert_data.copy_(loaded_weight)
 
     def _load_single_value(
@@ -483,6 +505,7 @@ class FusedMoE(torch.nn.Module):
         # dimension intermediate_size is used.
         SHARD_ID_TO_SHARDED_DIM = {"w1": 0, "w2": 1, "w3": 0}
 
+        
         expert_data = param.data[expert_id]
         tp_rank = get_tensor_model_parallel_rank()
 
