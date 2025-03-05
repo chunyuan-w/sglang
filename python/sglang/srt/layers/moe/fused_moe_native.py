@@ -79,6 +79,17 @@ def moe_forward_native(
         correction_bias=correction_bias,
         torch_native=True,
     )
+    
+    # TODO: call flashinfer moe
+    from flashinfer.gemm import fused_experts
+    return fused_experts(
+        x,
+        layer.w13_weight,
+        layer.w2_weight,
+        topk_weights,
+        topk_ids,
+        False, # TODO: fix inplace
+    )
 
     # Ref code from https://huggingface.co/deepseek-ai/DeepSeek-V2/blob/e0828e3cc0a03408724b80c3cc92c8e072db8d01/modeling_deepseek.py#L589
     len_experts = layer.num_experts
