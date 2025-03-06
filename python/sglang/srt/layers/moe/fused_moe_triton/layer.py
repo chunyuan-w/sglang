@@ -101,7 +101,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        print("my enter")
         if is_hip_ and get_bool_env_var("CK_MOE"):
             layer.w13_weight = torch.nn.Parameter(
                 permute_weight(layer.w13_weight.data),
@@ -113,20 +112,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 requires_grad=False,
             )
             torch.cuda.empty_cache()
-        else:
-            print("before packing w13_weight")
+
+        # Pack weight for get better performance on CPU
+        if layer.w13_weight.device == torch.device("cpu") and layer.w2_weight.device == torch.device("cpu"):
             layer.w13_weight = torch.nn.Parameter(
                 convert_weight_packed(layer.w13_weight.data),
                 requires_grad=False,
             )
-            print("after packing w13_weight")
-            
             layer.w2_weight = torch.nn.Parameter(
                 convert_weight_packed(layer.w2_weight.data),
                 requires_grad=False,
             )
-            print("after packing w2_weight")
-            
         return
 
     def apply(
