@@ -161,6 +161,10 @@ class UnquantizedLinearMethod(LinearMethodBase):
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # TODO: prepack for linear
+        return
+
     def apply(
         self,
         layer: torch.nn.Module,
