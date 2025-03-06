@@ -80,7 +80,7 @@ def moe_forward_native(
         torch_native=True,
     )
     
-    # TODO: call flashinfer moe
+    # TODO: check if the flashinfer moe support other activations
     from flashinfer.gemm import fused_experts
     return fused_experts(
         x,
@@ -88,7 +88,8 @@ def moe_forward_native(
         layer.w2_weight,
         topk_weights,
         topk_ids,
-        False, # TODO: fix inplace
+        False, # inplace
+        True, # is_vnni
     )
 
     # Ref code from https://huggingface.co/deepseek-ai/DeepSeek-V2/blob/e0828e3cc0a03408724b80c3cc92c8e072db8d01/modeling_deepseek.py#L589
