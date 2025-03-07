@@ -15,6 +15,7 @@ if _is_cuda:
     from sgl_kernel import fp8_blockwise_scaled_mm
 
 
+# TODO: optimize apply_block_scale
 def apply_block_scale(fp8_weight, weight_scale_inv, block_size, act_dtype):
     f32_weight = fp8_weight.float()
     weight_shape = fp8_weight.shape

@@ -110,11 +110,10 @@ def moe_forward_native(
 
         layer_w13_weight = layer.w13_weight[i]
         layer_w2_weight = layer.w2_weight[i]
-        w13_weight_scale_inv = layer.w13_weight_scale_inv[i]
-        w2_weight_scale_inv = layer.w2_weight_scale_inv[i]
 
-        # TODO: workaround for FP8
+        # We temporarily convert weight from FP8 to BF16 here to make DeepSeek R1 runnable on CPU
         if layer_w13_weight.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
+            w13_weight_scale_inv = layer.w13_weight_scale_inv[i]
             layer_w13_weight = apply_block_scale(
                 layer_w13_weight,
                 w13_weight_scale_inv,
@@ -123,6 +122,7 @@ def moe_forward_native(
             )
 
         if layer_w2_weight.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
+            w2_weight_scale_inv = layer.w2_weight_scale_inv[i]
             layer_w2_weight = apply_block_scale(
                 layer_w2_weight,
                 w2_weight_scale_inv,

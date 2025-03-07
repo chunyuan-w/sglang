@@ -162,6 +162,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
+        # TODO: temporarily set cutlass_fp8_supported directly to False here
         # self.cutlass_fp8_supported = cutlass_fp8_supported()
         self.cutlass_fp8_supported = False
 
@@ -392,10 +393,8 @@ class Fp8LinearMethod(LinearMethodBase):
             )
 
         if self.block_quant:
-            # R1 calls into here
-            # TODO: workaround for FP8
-            if layer.weight.dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
-                # breakpoint()
+            # We temporarily convert weight from FP8 to BF16 here to make DeepSeek R1 runnable on CPU
+            if layer.weight.device == torch.device("cpu"):
                 bf16_weight = apply_block_scale(
                     layer.weight,
                     layer.weight_scale_inv,
@@ -403,6 +402,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     x.dtype,
                 )
                 return F.linear(x, bf16_weight, bias)
+
             return apply_w8a8_block_fp8_linear(
                 input=x,
                 weight=layer.weight,
@@ -412,19 +412,15 @@ class Fp8LinearMethod(LinearMethodBase):
                 bias=bias,
             )
 
-        # V2-lite calls into here
-        # TODO: workaround for FP8
-        bf16_weight = layer.weight.to(torch.bfloat16)
-        return F.linear(x, bf16_weight, bias)
-        # return apply_fp8_linear(
-        #     input=x,
-        #     weight=layer.weight,
-        #     weight_scale=layer.weight_scale,
-        #     input_scale=layer.input_scale,
-        #     bias=bias,
-        #     cutlass_fp8_supported=self.cutlass_fp8_supported,
-        #     use_per_token_if_dynamic=False,
-        # )
+        return apply_fp8_linear(
+            input=x,
+            weight=layer.weight,
+            weight_scale=layer.weight_scale,
+            input_scale=layer.input_scale,
+            bias=bias,
+            cutlass_fp8_supported=self.cutlass_fp8_supported,
+            use_per_token_if_dynamic=False,
+        )
 
 
 class Fp8MoEMethod:
@@ -793,21 +789,23 @@ class Fp8MoEMethod:
         from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_experts
         from sglang.srt.layers.moe.topk import select_experts
 
-        # TODO: workaround for FP8
-        return moe_forward_native(
-            layer,
-            x,
-            use_grouped_topk,
-            top_k,
-            router_logits,
-            renormalize,
-            topk_group,
-            num_expert_group,
-            custom_routing_function,
-            correction_bias,
-            activation,
-            self.quant_config.weight_block_size,
-        )
+        # Use moe native on CPU for now
+        # TODO: replace it with optimized moe kernel when it's ready
+        if x.device == torch.device("cpu"):
+            return moe_forward_native(
+                layer,
+                x,
+                use_grouped_topk,
+                top_k,
+                router_logits,
+                renormalize,
+                topk_group,
+                num_expert_group,
+                custom_routing_function,
+                correction_bias,
+                activation,
+                self.quant_config.weight_block_size,
+            )
 
         # Expert selection
         topk_weights, topk_ids = select_experts(
@@ -851,7 +849,6 @@ class Fp8MoEMethod:
 
         else:
             # Expert fusion with FP8 quantization
-            # V2 lite reaches here
             return fused_experts(
                 x,
                 layer.w13_weight,
