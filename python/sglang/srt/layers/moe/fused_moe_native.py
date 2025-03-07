@@ -11,6 +11,7 @@ from torch.nn import functional as F
 from sglang.srt.layers.activation import GeluAndMul, SiluAndMul
 from sglang.srt.layers.moe.topk import select_experts
 
+from sgl_kernel.ops._kernels import fused_experts_cpu
 
 def fused_moe_forward_native(
     layer: torch.nn.Module,
@@ -81,8 +82,7 @@ def moe_forward_native(
     )
     
     # TODO: check if the flashinfer moe support other activations
-    from flashinfer.gemm import fused_experts
-    return fused_experts(
+    return fused_experts_cpu(
         x,
         layer.w13_weight,
         layer.w2_weight,

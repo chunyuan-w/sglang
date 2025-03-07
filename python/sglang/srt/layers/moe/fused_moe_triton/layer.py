@@ -31,7 +31,7 @@ if torch.cuda.is_available():
 else:
     fused_experts = None  # type: ignore
 
-from flashinfer.gemm import convert_weight_packed
+from sgl_kernel.ops._kernels import convert_weight_packed
 
 import logging
 
