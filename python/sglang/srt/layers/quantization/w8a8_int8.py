@@ -219,6 +219,8 @@ class W8A8Int8MoEMethod:
         layer.w2_weight_scale = Parameter(
             layer.w2_weight_scale.data, requires_grad=False
         )
+        
+        # TODO: prepack
 
     def apply(
         self,
@@ -237,6 +239,8 @@ class W8A8Int8MoEMethod:
         from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_experts
         from sglang.srt.layers.moe.topk import select_experts
 
+        # TODO: use fused_experts_cpu
+        
         # Expert selection
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
