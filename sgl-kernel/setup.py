@@ -224,11 +224,15 @@ extra_compile_args = {"cxx": [
 }
 libraries = ["c10", "torch", "torch_python"]
 cuda_libraries = ["cuda", "cublas"]
+cmdclass = {
+    "build_ext": BuildExtension.with_options(use_ninja=True),
+}
 if build_cuda_sources:
     sources.update(cuda_sources)
     include_dirs.extend(cuda_include_dirs)
     extra_compile_args.update({"nvcc": nvcc_flags})
     libraries.extend(cuda_libraries)
+    cmdclass.update({"build_py": CustomBuildPy,})
     Extension = CUDAExtension
 else:
     Extension = CppExtension
@@ -253,9 +257,6 @@ setup(
     packages=find_packages(where="python"),
     package_dir={"": "python"},
     ext_modules=ext_modules,
-    cmdclass={
-        "build_ext": BuildExtension.with_options(use_ninja=True),
-        "build_py": CustomBuildPy,
-    },
+    cmdclass=cmdclass,
     options={"bdist_wheel": {"py_limited_api": "cp39"}},
 )
