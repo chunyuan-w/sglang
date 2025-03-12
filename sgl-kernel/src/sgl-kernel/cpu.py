@@ -26,6 +26,20 @@ def convert_weight_packed(weight):
     return sgl_kernel.ops._kernels.convert_weight_packed(weight)
 
 
+def weight_packed_linear(
+    x,
+    weight,
+    bias,
+    is_vnni=True,
+):
+    return sgl_kernel.ops._kernels.weight_packed_linear(
+        x,
+        weight,
+        bias,
+        is_vnni,
+    )
+
+
 def decode_attention(
     q,
     k_buffer,

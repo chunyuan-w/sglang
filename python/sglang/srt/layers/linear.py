@@ -8,7 +8,12 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter, UninitializedParameter
 
-from sglang.srt.cpu_utils import get_actual_shard_size, reset_param_data_if_needed
+from sglang.srt.cpu_utils import (
+    cpu_has_amx_support,
+    get_actual_shard_size,
+    prepack_weight_if_needed,
+    reset_param_data_if_needed,
+)
 from sglang.srt.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -162,6 +167,13 @@ class UnquantizedLinearMethod(LinearMethodBase):
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
 
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Pack weight for get better performance on CPU
+        layer.weight = torch.nn.Parameter(
+            prepack_weight_if_needed(layer.weight.data),
+            requires_grad=False,
+        )
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -169,7 +181,13 @@ class UnquantizedLinearMethod(LinearMethodBase):
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
-        return F.linear(x, layer.weight, bias)
+        # TODO: check device is on CPU
+        if cpu_has_amx_support():
+            from sgl_kernel.cpu import weight_packed_linear
+
+            return weight_packed_linear(x, layer.weight, bias)
+        else:
+            return F.linear(x, layer.weight, bias)
 
 
 class LinearBase(torch.nn.Module):
