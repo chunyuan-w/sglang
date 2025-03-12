@@ -247,7 +247,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 topk_weights,
                 topk_ids,
                 False,  # inplace
-                True,  # is_vnni
             )
         else:
             return moe_forward_native(
