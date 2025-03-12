@@ -36,6 +36,10 @@ from sglang.srt.layers.quantization.base_config import (
 from sglang.srt.layers.quantization.fp8_utils import BlockQuantScaleParameter
 from sglang.srt.utils import set_weight_attrs
 
+if cpu_has_amx_support():
+    import sgl_kernel.cpu
+
+
 logger = logging.getLogger(__name__)
 
 WEIGHT_LOADER_V2_SUPPORTED = [
@@ -183,9 +187,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
 
         # TODO: check device is on CPU
         if cpu_has_amx_support():
-            from sgl_kernel.cpu import weight_packed_linear
-
-            return weight_packed_linear(x, layer.weight, bias)
+            return sgl_kernel.cpu.weight_packed_linear(x, layer.weight, bias)
         else:
             return F.linear(x, layer.weight, bias)
 
