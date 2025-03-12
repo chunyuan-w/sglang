@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter, UninitializedParameter
 
-from sglang.srt.cpu_utils import get_actual_shard_size, reset_param_data_if_needed
+from sglang.srt.cpu_utils import get_actual_shard_size, reset_param_data_if_needed, support_amx, need_weight_pack
 from sglang.srt.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -30,6 +30,8 @@ from sglang.srt.layers.quantization.base_config import (
 )
 from sglang.srt.layers.quantization.fp8_utils import BlockQuantScaleParameter
 from sglang.srt.utils import set_weight_attrs
+
+from sgl_kernel.ops._kernels import convert_weight_packed, weight_packed_linear
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +164,13 @@ class UnquantizedLinearMethod(LinearMethodBase):
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
 
+    # def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    #     if need_weight_pack([layer.weight]):
+    #         layer.weight = torch.nn.Parameter(
+    #             convert_weight_packed(layer.weight.data),
+    #             requires_grad=False,
+    #         )            
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -169,7 +178,19 @@ class UnquantizedLinearMethod(LinearMethodBase):
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
-        return F.linear(x, layer.weight, bias)
+        breakpoint()
+        
+        if support_amx() and x.device == torch.device("cpu"):
+            # TODO: switch to optimized linear here
+            M = x.size(0)
+            # TODO: check the shape is correct even with weightpack
+            N = layer.weight.size(0)
+            
+            out = torch.empty([M, N], dtype=x.dtype)
+            weight_packed_linear(out, x, layer.weight, bias, False) # TODO: convert is_vnni to True when weight_pack is added
+            return out
+        else:
+            return F.linear(x, layer.weight, bias)
 
 
 class LinearBase(torch.nn.Module):
