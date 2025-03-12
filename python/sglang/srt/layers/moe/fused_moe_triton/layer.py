@@ -33,7 +33,7 @@ else:
 
 import logging
 
-from sgl_kernel.ops._kernels import convert_weight_packed, fused_experts_cpu
+from sgl_kernel.cpu import convert_weight_packed, fused_experts
 
 is_hip_ = is_hip()
 
@@ -240,7 +240,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 torch_native=True,
             )
 
-            return fused_experts_cpu(
+            return fused_experts(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
