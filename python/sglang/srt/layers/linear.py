@@ -164,12 +164,12 @@ class UnquantizedLinearMethod(LinearMethodBase):
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
 
-    # def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-    #     if need_weight_pack([layer.weight]):
-    #         layer.weight = torch.nn.Parameter(
-    #             convert_weight_packed(layer.weight.data),
-    #             requires_grad=False,
-    #         )            
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if need_weight_pack([layer.weight]):
+            layer.weight = torch.nn.Parameter(
+                convert_weight_packed(layer.weight.data),
+                requires_grad=False,
+            )            
 
     def apply(
         self,
@@ -178,8 +178,6 @@ class UnquantizedLinearMethod(LinearMethodBase):
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
-        breakpoint()
-        
         if support_amx() and x.device == torch.device("cpu"):
             # TODO: switch to optimized linear here
             M = x.size(0)
@@ -187,7 +185,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
             N = layer.weight.size(0)
             
             out = torch.empty([M, N], dtype=x.dtype)
-            weight_packed_linear(out, x, layer.weight, bias, False) # TODO: convert is_vnni to True when weight_pack is added
+            weight_packed_linear(out, x, layer.weight, bias, True)
             return out
         else:
             return F.linear(x, layer.weight, bias)
