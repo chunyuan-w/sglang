@@ -86,6 +86,7 @@ class BenchArgs:
     cut_len: int = 4
     profile: bool = False
     profile_filename_prefix: str = "profile"
+    profile_shape: bool = False
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -107,6 +108,9 @@ class BenchArgs:
         parser.add_argument(
             "--profile", action="store_true", help="Use Torch Profiler."
         )
+        parser.add_argument(
+            "--profile-shape", action="store_true", help="Profile shape in Torch Profiler."
+        )        
         parser.add_argument(
             "--profile-filename-prefix",
             type=str,
@@ -316,6 +320,7 @@ def latency_test_run_once(
     device,
     profile,
     profile_filename_prefix,
+    profile_shape=False,
 ):
     max_batch_size = model_runner.max_total_num_tokens // (input_len + output_len)
     if batch_size > max_batch_size:
@@ -351,7 +356,11 @@ def latency_test_run_once(
     # Prefill
     synchronize(device)
     tic = time.time()
-    next_token_ids, _, batch = extend(reqs, model_runner)
+    with torch.autograd.profiler.profile(enabled=profile, record_shapes=profile_shape) as prof:
+        next_token_ids, _, batch = extend(reqs, model_runner)
+    if profile:
+        print(prof.key_averages(group_by_input_shape=profile_shape).table(sort_by="self_cpu_time_total"))        
+        
     synchronize(device)
     prefill_latency = time.time() - tic
     tot_latency += prefill_latency
@@ -367,7 +376,10 @@ def latency_test_run_once(
     for i in range(output_len - 1):
         synchronize(device)
         tic = time.time()
-        next_token_ids, _ = decode(next_token_ids, batch, model_runner)
+        with torch.autograd.profiler.profile(enabled=profile and i == (output_len - 2), record_shapes=profile_shape) as prof:
+            next_token_ids, _ = decode(next_token_ids, batch, model_runner)
+        if profile and i == (output_len - 2):
+            print(prof.key_averages(group_by_input_shape=profile_shape).table(sort_by="self_cpu_time_total"))          
         synchronize(device)
         latency = time.time() - tic
         tot_latency += latency
@@ -378,13 +390,13 @@ def latency_test_run_once(
                 f"Decode.  latency: {latency:6.5f} s, throughput: {throughput:9.2f} token/s"
             )
 
-    if profile:
-        profiler.stop()
-        profile_filename = f"{profile_filename_prefix}_batch{batch_size}_input{input_len}_output{output_len}.trace.json.gz"
-        parent_dir = os.path.dirname(os.path.abspath(profile_filename))
-        os.makedirs(parent_dir, exist_ok=True)
-        profiler.export_chrome_trace(profile_filename)
-        rank_print(f"torch profiler chrome trace saved to {profile_filename}")
+    # if profile:
+    #     profiler.stop()
+    #     profile_filename = f"{profile_filename_prefix}_batch{batch_size}_input{input_len}_output{output_len}.trace.json.gz"
+    #     parent_dir = os.path.dirname(os.path.abspath(profile_filename))
+    #     os.makedirs(parent_dir, exist_ok=True)
+    #     profiler.export_chrome_trace(profile_filename)
+    #     rank_print(f"torch profiler chrome trace saved to {profile_filename}")
 
     # Record decode timing from 2nd output
     if output_len > 1:
@@ -461,6 +473,7 @@ def latency_test(
             server_args.device,
             bench_args.profile if tp_rank == 0 else None,
             bench_args.profile_filename_prefix,
+            bench_args.profile_shape,
         )
         if ret is not None:
             result_list.append(ret)
