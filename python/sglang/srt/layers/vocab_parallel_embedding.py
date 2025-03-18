@@ -566,6 +566,18 @@ class ParallelLMHead(VocabParallelEmbedding):
             self.weight = embed_tokens.weight
             return self
 
+    def pack_method(self):
+        from sglang.srt.cpu_utils import cpu_has_amx_support, prepack_weight_if_needed
+
+        self.weight = torch.nn.Parameter(
+            prepack_weight_if_needed(self.weight),
+            requires_grad=False,
+        )
+
+        self.use_intel_amx_backend = (
+            self.weight.device == torch.device("cpu") and cpu_has_amx_support()
+        )
+
     def forward(self, input_):
         del input_
         raise RuntimeError("LMHead's weights should be used in the sampler.")

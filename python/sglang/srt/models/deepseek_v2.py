@@ -25,6 +25,7 @@ from torch import nn
 from transformers import PretrainedConfig
 from vllm import _custom_ops as ops
 
+from sglang.srt.cpu_utils import cpu_has_amx_support, prepack_weight_if_needed
 from sglang.srt.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -64,6 +65,9 @@ from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.utils import add_prefix, is_cuda_available, is_hip
+
+if cpu_has_amx_support():
+    import sgl_kernel.cpu
 
 _is_hip = is_hip()
 
@@ -128,7 +132,20 @@ class MoEGate(nn.Module):
         else:
             self.e_score_correction_bias = None
 
+    def pack_method(self):
+        self.weight = torch.nn.Parameter(
+            prepack_weight_if_needed(self.weight),
+            requires_grad=False,
+        )
+
+        self.use_intel_amx_backend = (
+            self.weight.device == torch.device("cpu") and cpu_has_amx_support()
+        )
+
     def forward(self, hidden_states):
+        if self.use_intel_amx_backend:
+            return sgl_kernel.cpu.weight_packed_linear(hidden_states, self.weight, None)
+
         logits = F.linear(hidden_states, self.weight, None)
         return logits
 
@@ -1061,6 +1078,7 @@ class DeepseekV2ForCausalLM(nn.Module):
             config, quant_config, prefix=add_prefix("model", prefix)
         )
         if global_server_args_dict["enable_dp_attention"]:
+            # TODO: how about packed linear here?
             self.lm_head = ReplicatedLinear(
                 config.hidden_size,
                 config.vocab_size,
