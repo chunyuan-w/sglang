@@ -18,7 +18,10 @@ from sglang.srt.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from sglang.srt.layers.quantization.int8_kernel import per_token_quant_int8
+from sglang.srt.cpu_utils import cpu_has_amx_support, _process_weight_after_loading
 
+if cpu_has_amx_support():
+    import sgl_kernel.cpu
 
 class W8A8Int8Config(QuantizationConfig):
     """Config class for W8A8 Int8 Quantization.
@@ -74,6 +77,10 @@ class W8A8Int8LinearMethod(LinearMethodBase):
         self.quantization_config = quantization_config
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if layer.weight.device == torch.device("cpu"):
+            _process_weight_after_loading(layer, ["weight"])
+            return
+        
         layer.weight = Parameter(layer.weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
 
@@ -114,11 +121,14 @@ class W8A8Int8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
     ):
+        if layer.use_intel_amx_backend:
+            return sgl_kernel.cpu.int8_scaled_mm(x, layer.weight, layer.weight_scale, bias)
+        
         x_q, x_scale = per_token_quant_int8(x)
 
         return int8_scaled_mm(
             x_q, layer.weight, x_scale, layer.weight_scale, out_dtype=x.dtype, bias=bias
-        )
+        )       
 
 
 class W8A8Int8MoEMethod:

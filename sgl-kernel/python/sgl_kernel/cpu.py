@@ -119,3 +119,12 @@ def grouped_topk(
         num_expert_group,
         topk_group,
     )
+
+def int8_scaled_mm(
+    mat1,
+    mat2,
+    scales,
+    bias,
+    is_vnni=True,
+):
+    return sgl_kernel.common_ops.int8_scaled_mm_cpu(mat1, mat2, scales, bias, is_vnni)
