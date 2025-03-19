@@ -122,6 +122,7 @@ class W8A8Int8LinearMethod(LinearMethodBase):
         bias: Optional[torch.Tensor] = None,
     ):
         if layer.use_intel_amx_backend:
+            print("my enter")
             return sgl_kernel.cpu.int8_scaled_mm(x, layer.weight, layer.weight_scale, bias)
         
         x_q, x_scale = per_token_quant_int8(x)
@@ -218,6 +219,8 @@ class W8A8Int8MoEMethod:
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # TODO: MoE pack
+        
         layer.w13_weight = Parameter(layer.w13_weight, requires_grad=False)
         layer.w2_weight = Parameter(layer.w2_weight, requires_grad=False)
         layer.w13_weight_scale = Parameter(
@@ -246,6 +249,8 @@ class W8A8Int8MoEMethod:
         from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_experts
         from sglang.srt.layers.moe.topk import select_experts
 
+        # TODO: CPU MoE
+        
         # Expert selection
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
