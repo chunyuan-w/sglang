@@ -73,13 +73,30 @@ def prepack_weight_if_needed(weight):
     return convert_weight_packed(weight)
 
 
-class PackWeightMethod:
-    def process_weights_after_loading(self, module: torch.nn.Module) -> None:
-        module.weight = torch.nn.Parameter(
-            prepack_weight_if_needed(module.weight),
-            requires_grad=False,
+def _process_weight_after_loading(module, weight_names) -> None:
+    # Pack weight for get better performance on CPU
+    for weight_name in weight_names:
+        setattr(
+            module,
+            weight_name,
+            torch.nn.Parameter(
+                prepack_weight_if_needed(getattr(module, weight_name)),
+                requires_grad=False,
+            ),
         )
 
-        module.use_intel_amx_backend = (
-            module.weight.device == torch.device("cpu") and cpu_has_amx_support()
+    module.use_intel_amx_backend = (
+        all(
+            getattr(module, weight_name).device == torch.device("cpu")
+            for weight_name in weight_names
         )
+        and cpu_has_amx_support()
+    )
+
+
+class PackWeightMethod:
+    def __init__(self, weight_names):
+        self.weight_names = weight_names
+
+    def process_weights_after_loading(self, module) -> None:
+        _process_weight_after_loading(module, self.weight_names)

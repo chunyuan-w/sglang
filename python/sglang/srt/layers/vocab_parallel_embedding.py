@@ -546,7 +546,7 @@ class ParallelLMHead(VocabParallelEmbedding):
 
         from sglang.srt.cpu_utils import PackWeightMethod
 
-        self.quant_method = PackWeightMethod()
+        self.quant_method = PackWeightMethod(weight_names=["weight"])
         if bias:
             self.bias = Parameter(
                 torch.empty(self.num_embeddings_per_partition, dtype=params_dtype)

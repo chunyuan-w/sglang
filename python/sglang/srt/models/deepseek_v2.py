@@ -135,7 +135,7 @@ class MoEGate(nn.Module):
             )
         else:
             self.e_score_correction_bias = None
-        self.quant_method = PackWeightMethod()
+        self.quant_method = PackWeightMethod(weight_names=["weight"])
 
     def forward(self, hidden_states):
         if self.use_intel_amx_backend:
