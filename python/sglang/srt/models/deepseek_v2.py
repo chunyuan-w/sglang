@@ -1073,7 +1073,7 @@ class DeepseekV2ForCausalLM(nn.Module):
             config, quant_config, prefix=add_prefix("model", prefix)
         )
         if global_server_args_dict["enable_dp_attention"]:
-            # TODO: how about packed linear here?
+            # TODO: use weight_packed_linear for enable_dp_attention
             self.lm_head = ReplicatedLinear(
                 config.hidden_size,
                 config.vocab_size,

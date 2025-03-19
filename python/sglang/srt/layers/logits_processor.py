@@ -426,7 +426,7 @@ class LogitsProcessor(nn.Module):
                 )
         else:
             # GGUF models
-            # TODO: packed linear
+            # TODO: use weight_packed_linear for GGUF models
             logits = lm_head.quant_method.apply(lm_head, hidden_states, embedding_bias)
 
         if self.logit_scale is not None:
