@@ -71,3 +71,15 @@ def prepack_weight_if_needed(weight):
         return weight
 
     return convert_weight_packed(weight)
+
+
+class PackWeightMethod:
+    def process_weights_after_loading(self, module: torch.nn.Module) -> None:
+        module.weight = torch.nn.Parameter(
+            prepack_weight_if_needed(module.weight),
+            requires_grad=False,
+        )
+
+        module.use_intel_amx_backend = (
+            module.weight.device == torch.device("cpu") and cpu_has_amx_support()
+        )

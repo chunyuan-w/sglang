@@ -25,7 +25,11 @@ from torch import nn
 from transformers import PretrainedConfig
 from vllm import _custom_ops as ops
 
-from sglang.srt.cpu_utils import cpu_has_amx_support, prepack_weight_if_needed
+from sglang.srt.cpu_utils import (
+    PackWeightMethod,
+    cpu_has_amx_support,
+    prepack_weight_if_needed,
+)
 from sglang.srt.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -131,16 +135,7 @@ class MoEGate(nn.Module):
             )
         else:
             self.e_score_correction_bias = None
-
-    def pack_method(self):
-        self.weight = torch.nn.Parameter(
-            prepack_weight_if_needed(self.weight),
-            requires_grad=False,
-        )
-
-        self.use_intel_amx_backend = (
-            self.weight.device == torch.device("cpu") and cpu_has_amx_support()
-        )
+        self.quant_method = PackWeightMethod()
 
     def forward(self, hidden_states):
         if self.use_intel_amx_backend:

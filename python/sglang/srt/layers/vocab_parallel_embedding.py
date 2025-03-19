@@ -543,6 +543,10 @@ class ParallelLMHead(VocabParallelEmbedding):
             use_presharded_weights=use_presharded_weights,
         )
         self.quant_config = quant_config
+
+        from sglang.srt.cpu_utils import PackWeightMethod
+
+        self.quant_method = PackWeightMethod()
         if bias:
             self.bias = Parameter(
                 torch.empty(self.num_embeddings_per_partition, dtype=params_dtype)
@@ -565,18 +569,6 @@ class ParallelLMHead(VocabParallelEmbedding):
         else:
             self.weight = embed_tokens.weight
             return self
-
-    def pack_method(self):
-        from sglang.srt.cpu_utils import cpu_has_amx_support, prepack_weight_if_needed
-
-        self.weight = torch.nn.Parameter(
-            prepack_weight_if_needed(self.weight),
-            requires_grad=False,
-        )
-
-        self.use_intel_amx_backend = (
-            self.weight.device == torch.device("cpu") and cpu_has_amx_support()
-        )
 
     def forward(self, input_):
         del input_
