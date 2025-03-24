@@ -222,7 +222,6 @@ class W8A8Int8MoEMethod:
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # TODO: MoE pack
         if layer.w13_weight.device == torch.device(
             "cpu"
         ) and layer.w2_weight.device == torch.device("cpu"):
@@ -256,6 +255,7 @@ class W8A8Int8MoEMethod:
     ) -> torch.Tensor:
         from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_experts
         from sglang.srt.layers.moe.topk import select_experts
+
         # Expert selection
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
