@@ -9,6 +9,11 @@ def fused_experts(
     topk_weights,
     topk_ids,
     inplace,
+    use_int8_w8a8=False,
+    w1_scale=None,
+    w2_scale=None,
+    a1_scale=None,
+    a2_scale=None,
     is_vnni=True,
 ):
     return sgl_kernel.common_ops.fused_experts_cpu(
@@ -18,6 +23,11 @@ def fused_experts(
         topk_weights,
         topk_ids,
         inplace,
+        use_int8_w8a8,
+        w1_scale,
+        w2_scale,
+        a1_scale,
+        a2_scale,        
         is_vnni,
     )
 

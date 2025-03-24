@@ -220,6 +220,9 @@ class W8A8Int8MoEMethod:
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # TODO: MoE pack
+        if layer.w13_weight.device == torch.device("cpu") and layer.w2_weight.device == torch.device("cpu"):
+            _process_weight_after_loading(layer, ["w13_weight", "w2_weight"])
+            return
         
         layer.w13_weight = Parameter(layer.w13_weight, requires_grad=False)
         layer.w2_weight = Parameter(layer.w2_weight, requires_grad=False)
@@ -264,6 +267,22 @@ class W8A8Int8MoEMethod:
             correction_bias=correction_bias,
         )
 
+        if layer.use_intel_amx_backend:
+            breakpoint()
+            return sgl_kernel.cpu.fused_experts(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
+                inplace=True,
+                use_int8_w8a8=True,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                a1_scale=layer.w13_input_scale,
+                a2_scale=layer.w2_input_scale,                
+            )
+        
         return fused_experts(
             x,
             layer.w13_weight,
