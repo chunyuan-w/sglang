@@ -122,7 +122,6 @@ class W8A8Int8LinearMethod(LinearMethodBase):
         bias: Optional[torch.Tensor] = None,
     ):
         if layer.use_intel_amx_backend:
-            print("my enter")
             x_q, x_scale =  sgl_kernel.cpu.per_token_quant_int8(x)
             return sgl_kernel.cpu.int8_scaled_mm(x_q, layer.weight, x_scale, layer.weight_scale, bias, x.dtype)
         
@@ -269,7 +268,6 @@ class W8A8Int8MoEMethod:
         )
 
         if layer.use_intel_amx_backend:
-            breakpoint()
             return sgl_kernel.cpu.fused_experts(
                 x,
                 layer.w13_weight,
