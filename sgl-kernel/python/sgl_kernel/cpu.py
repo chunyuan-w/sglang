@@ -133,8 +133,13 @@ def grouped_topk(
 def int8_scaled_mm(
     mat1,
     mat2,
-    scales,
+    scales1,
+    scales2,
     bias,
+    out_dtype,
     is_vnni=True,
 ):
-    return sgl_kernel.common_ops.int8_scaled_mm_cpu(mat1, mat2, scales, bias, is_vnni)
+    return sgl_kernel.common_ops.int8_scaled_mm_cpu(mat1, mat2, scales1, scales2, bias, out_dtype, is_vnni)
+
+def per_token_quant_int8(x):
+    return sgl_kernel.common_ops.per_token_quant_int8_cpu(x)
