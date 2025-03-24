@@ -10,6 +10,7 @@ if is_cuda:
 
 from torch.nn.parameter import Parameter
 
+from sglang.srt.cpu_utils import _process_weight_after_loading, cpu_has_amx_support
 from sglang.srt.distributed import get_tensor_model_parallel_world_size
 from sglang.srt.layers.linear import LinearMethodBase
 from sglang.srt.layers.parameter import ChannelQuantScaleParameter, ModelWeightParameter
@@ -18,10 +19,10 @@ from sglang.srt.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from sglang.srt.layers.quantization.int8_kernel import per_token_quant_int8
-from sglang.srt.cpu_utils import cpu_has_amx_support, _process_weight_after_loading
 
 if cpu_has_amx_support():
     import sgl_kernel.cpu
+
 
 class W8A8Int8Config(QuantizationConfig):
     """Config class for W8A8 Int8 Quantization.
@@ -80,7 +81,7 @@ class W8A8Int8LinearMethod(LinearMethodBase):
         if layer.weight.device == torch.device("cpu"):
             _process_weight_after_loading(layer, ["weight"])
             return
-        
+
         layer.weight = Parameter(layer.weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
 
@@ -122,14 +123,16 @@ class W8A8Int8LinearMethod(LinearMethodBase):
         bias: Optional[torch.Tensor] = None,
     ):
         if layer.use_intel_amx_backend:
-            x_q, x_scale =  sgl_kernel.cpu.per_token_quant_int8(x)
-            return sgl_kernel.cpu.int8_scaled_mm(x_q, layer.weight, x_scale, layer.weight_scale, bias, x.dtype)
-        
+            x_q, x_scale = sgl_kernel.cpu.per_token_quant_int8(x)
+            return sgl_kernel.cpu.int8_scaled_mm(
+                x_q, layer.weight, x_scale, layer.weight_scale, bias, x.dtype
+            )
+
         x_q, x_scale = per_token_quant_int8(x)
 
         return int8_scaled_mm(
             x_q, layer.weight, x_scale, layer.weight_scale, out_dtype=x.dtype, bias=bias
-        )       
+        )
 
 
 class W8A8Int8MoEMethod:
@@ -220,10 +223,12 @@ class W8A8Int8MoEMethod:
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # TODO: MoE pack
-        if layer.w13_weight.device == torch.device("cpu") and layer.w2_weight.device == torch.device("cpu"):
+        if layer.w13_weight.device == torch.device(
+            "cpu"
+        ) and layer.w2_weight.device == torch.device("cpu"):
             _process_weight_after_loading(layer, ["w13_weight", "w2_weight"])
             return
-        
+
         layer.w13_weight = Parameter(layer.w13_weight, requires_grad=False)
         layer.w2_weight = Parameter(layer.w2_weight, requires_grad=False)
         layer.w13_weight_scale = Parameter(
@@ -251,9 +256,6 @@ class W8A8Int8MoEMethod:
     ) -> torch.Tensor:
         from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_experts
         from sglang.srt.layers.moe.topk import select_experts
-
-        # TODO: CPU MoE
-        
         # Expert selection
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
@@ -279,9 +281,9 @@ class W8A8Int8MoEMethod:
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
                 a1_scale=layer.w13_input_scale,
-                a2_scale=layer.w2_input_scale,                
+                a2_scale=layer.w2_input_scale,
             )
-        
+
         return fused_experts(
             x,
             layer.w13_weight,

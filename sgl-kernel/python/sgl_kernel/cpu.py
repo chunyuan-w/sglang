@@ -27,7 +27,7 @@ def fused_experts(
         w1_scale,
         w2_scale,
         a1_scale,
-        a2_scale,        
+        a2_scale,
         is_vnni,
     )
 
@@ -109,6 +109,7 @@ def weight_packed_linear(
         is_vnni,
     )
 
+
 def grouped_topk(
     topk_weights,
     topk_ids,
@@ -130,6 +131,7 @@ def grouped_topk(
         topk_group,
     )
 
+
 def int8_scaled_mm(
     mat1,
     mat2,
@@ -139,7 +141,10 @@ def int8_scaled_mm(
     out_dtype,
     is_vnni=True,
 ):
-    return sgl_kernel.common_ops.int8_scaled_mm_cpu(mat1, mat2, scales1, scales2, bias, out_dtype, is_vnni)
+    return sgl_kernel.common_ops.int8_scaled_mm_cpu(
+        mat1, mat2, scales1, scales2, bias, out_dtype, is_vnni
+    )
+
 
 def per_token_quant_int8(x):
     return sgl_kernel.common_ops.per_token_quant_int8_cpu(x)
