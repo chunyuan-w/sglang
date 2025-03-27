@@ -38,7 +38,7 @@ def shared_expert(
     w2,
     fused_experts_out,
     routed_scaling_factor,
-    inplace=True,
+    inplace,
     use_int8_w8a8=False,
     w1_scale=None,
     w2_scale=None,

@@ -202,25 +202,21 @@ class DeepseekV2MoE(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         if self.n_shared_experts is not None:
-            original_hidden_states = hidden_states.clone()
-            
             router_logits = self.gate(hidden_states)
             
-            # inplace is True in fused_experts
+            # [Note] inplace should be False in fused_experts.
+            # If inplace is True in fused_experts(self.experts), hidden_states will be changed after fused_experts
+            # While hidden_states is still needed in shared_expert.
             fused_experts_out = self.experts(hidden_states=hidden_states, router_logits=router_logits)
+            # TODO: check use_intel_amx_backend
+            # TODO: where to add int8?
             final_hidden_states = sgl_kernel.cpu.shared_expert(
-                original_hidden_states,
+                hidden_states,
                 self.shared_experts.gate_up_proj.weight,
                 self.shared_experts.down_proj.weight,
                 fused_experts_out,
                 self.routed_scaling_factor,
-                inplace=False,
-                use_int8_w8a8=False,
-                w1_scale=None,
-                w2_scale=None,
-                a1_scale=None,
-                a2_scale=None,
-                is_vnni=True, # TODO: add weight pack and change to True            
+                inplace=True,          
             )
         else:
             router_logits = self.gate(hidden_states)
