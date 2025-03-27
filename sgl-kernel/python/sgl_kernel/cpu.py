@@ -44,7 +44,7 @@ def shared_expert(
     w2_scale=None,
     a1_scale=None,
     a2_scale=None,
-    is_vnni=True,    
+    is_vnni=True,
 ):
     return sgl_kernel.common_ops.shared_expert_cpu(
         hidden_states,
@@ -58,7 +58,7 @@ def shared_expert(
         w2_scale,
         a1_scale,
         a2_scale,
-        is_vnni,        
+        is_vnni,
     )
 
 
