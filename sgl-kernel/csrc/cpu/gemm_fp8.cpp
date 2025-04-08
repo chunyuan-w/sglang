@@ -540,6 +540,7 @@ at::Tensor convert_weight_packed_fp8(at::Tensor& weight) {
   TORCH_CHECK(IC % TILE_K == 0, "invalid weight input features ", IC);
 
   constexpr int64_t BLOCK_N = block_size_n();
+  const int64_t NB = div_up(OC, BLOCK_N);
 
   // use phony sizes here [E, OC, IC], for each [E], [OC, IC] -> [IC / 2, OC, 2]
   auto packed_weight = at::empty({}, weight.options());
@@ -559,16 +560,23 @@ at::Tensor convert_weight_packed_fp8(at::Tensor& weight) {
     packed_t* packed_data = packed_weight.data_ptr<packed_t>();
 
     // parallel on {E}
-    at::parallel_for(0, E, 0, [&](int64_t begin, int64_t end) {
-      for (int64_t e = begin; e < end; ++e) {
-        for (int64_t n = 0; n < OC; n += BLOCK_N) {
-          int64_t n_size = std::min(BLOCK_N, OC - n);
-          pack_vnni<packed_t>(
-              packed_data + e * stride + n * IC,
-              w_data + e * stride + n * IC,
-              n_size,
-              IC);
-        }
+    at::parallel_for(0, E * NB, 0, [&](int64_t begin, int64_t end) {
+      int64_t e{0}, nb{0};
+      data_index_init(begin, e, E, nb, NB);
+
+      for (int64_t i = begin; i < end; ++i) {
+        UNUSED(i);
+
+        int64_t n = nb * BLOCK_N;
+        int64_t n_size = std::min(BLOCK_N, OC - n);
+        pack_vnni<packed_t>(
+            packed_data + e * OC * packed_row_size + n * packed_row_size,
+            w_data + e * stride + n * IC,
+            n_size,
+            IC);
+
+        // move to the next index
+        data_index_step(e, E, nb, NB);
       }
     });
   });
