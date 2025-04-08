@@ -4,9 +4,298 @@
 
 namespace {
 
+// global float8 LUT
+alignas(64) static uint16_t e4m3_to_16bit[256];
+
+template <typename T>
+static void initialize_e4m3_to_16bit_tables() {
+  // run only once
+  static bool initialized_16bit = false;
+  if (!initialized_16bit) {
+    std::cout << "\n@@@@ doing lut init ..." << std::endl;
+    for (uint8_t u8 = 0; u8 < 256; ++u8) {
+      auto value = static_cast<T>(c10::bit_cast<c10::Float8_e4m3fn>(u8));
+      uint16_t value_bits = c10::bit_cast<uint16_t>(value);
+      e4m3_to_16bit[u8] = value_bits;
+      if (u8 == 255) {
+        break;
+      }
+    }
+    initialized_16bit = true;
+  }
+}
+
+template <typename scalar_t>
+inline void copy_add_stub(scalar_t* __restrict__ out, const float* __restrict__ input, const float* __restrict__ bias, int64_t size) {
+  using bVec = at::vec::Vectorized<scalar_t>;
+  using fVec = at::vec::Vectorized<float>;
+  constexpr int kVecSize = bVec::size();
+
+  int64_t d;
+  #pragma GCC unroll 4
+  for (d = 0; d <= size - kVecSize; d += kVecSize) {
+    fVec data0 = fVec::loadu(input + d) + fVec::loadu(bias + d);
+    fVec data1 = fVec::loadu(input + d + fVec::size()) + fVec::loadu(bias + d + fVec::size());
+    bVec out_vec = convert_from_float_ext<scalar_t>(data0, data1);
+    out_vec.store(out + d);
+  }
+  for (; d < size; ++d) {
+    out[d] = static_cast<scalar_t>(input[d] + bias[d]);
+  }
+}
+
+template <typename scalar_t>
+inline void copy_mul_stub(
+    scalar_t* __restrict__ out,
+    const float* __restrict__ input,
+    int size,
+    float scale) {
+  using bVec = at::vec::Vectorized<scalar_t>;
+  using fVec = at::vec::Vectorized<float>;
+  constexpr int kVecSize = bVec::size();
+  const fVec vscale = fVec(scale);
+
+  int d;
+#pragma GCC unroll 4
+  for (d = 0; d <= size - kVecSize; d += kVecSize) {
+    fVec data0 = fVec::loadu(input + d) * vscale;
+    fVec data1 = fVec::loadu(input + d + fVec::size()) * vscale;
+    bVec out_vec = convert_from_float_ext<scalar_t>(data0, data1);
+    out_vec.store(out + d);
+  }
+  for (; d < size; ++d) {
+    out[d] = static_cast<scalar_t>(input[d] * scale);
+  }
+}
+
+inline void unpack_B(
+    at::BFloat16* __restrict__ Btmp,
+    const at::Float8_e4m3fn* __restrict__ packed_B,
+    int N,
+    int K,
+    int ldb,
+    int ldb_tmp) {
+  // [K/2, N, 2]
+  const int K2 = K >> 1;
+  const int ldb2 = ldb; // ldb * 2 >> 1;
+  const uint16_t* b_ptr = reinterpret_cast<const uint16_t*>(packed_B);
+
+  const __m512i mask = _mm512_set1_epi32(0xFFFF);
+
+#pragma GCC unroll 4
+  for (int k = 0; k < K2; ++k) {
+    for (int n = 0; n < N; n += 32) {
+      __m512i b8 = _mm512_loadu_si512(b_ptr + k * ldb2 + n);
+      __m512i idx0 = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(b8));
+      __m512i idx1 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(b8, 1));
+      __m512i idx2 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(b8, 2));
+      __m512i idx3 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(b8, 3));
+
+      __m512i b16_0 = _mm512_i32gather_epi32(idx0, e4m3_to_16bit, 2);
+      __m512i b16_1 = _mm512_i32gather_epi32(idx1, e4m3_to_16bit, 2);
+      __m512i b16_2 = _mm512_i32gather_epi32(idx2, e4m3_to_16bit, 2);
+      __m512i b16_3 = _mm512_i32gather_epi32(idx3, e4m3_to_16bit, 2);
+
+      __m512i b16_02 = _mm512_or_epi32(
+          _mm512_slli_epi32(b16_2, 16), _mm512_and_epi32(b16_0, mask));
+      __m512i b16_13 = _mm512_or_epi32(
+          _mm512_slli_epi32(b16_3, 16), _mm512_and_epi32(b16_1, mask));
+
+      _mm512_storeu_si512(Btmp + k * ldb_tmp * 2 + n * 2 + 0, b16_02);
+      _mm512_storeu_si512(Btmp + k * ldb_tmp * 2 + n * 2 + 32, b16_13);
+    }
+  }
+}
+
+template <typename scalar_t, typename packed_t, bool has_bias>
+struct brgemm {};
+
+template <typename scalar_t, bool has_bias>
+struct brgemm<scalar_t, scalar_t, has_bias> {
+  static inline void apply(
+      const scalar_t* __restrict__ A,
+      const scalar_t* __restrict__ B,
+      scalar_t* __restrict__ C,
+      scalar_t* __restrict__ Btmp,
+      float* __restrict__ Ctmp,
+      const float* __restrict__ bias,
+      float scales2,
+      int M,
+      int N,
+      int K,
+      int lda,
+      int ldb,
+      int ldc) {
+    UNUSED(scales2);
+
+    constexpr int BLOCK_N = block_size_n();
+    at::native::cpublas::brgemm(
+        M, N, K, lda, ldb, BLOCK_N, /* add_C */ false, A, B, Ctmp);
+
+    // copy from Ctmp to C
+    for (int m = 0; m < M; ++m) {
+      if constexpr (has_bias) {
+        // TODO: fix has_bias with scale: copy_add_mul_stub??
+        copy_add_stub(C + m * ldc, Ctmp + m * BLOCK_N, bias, N);
+      } else {
+        copy_mul_stub(C + m * ldc, Ctmp + m * BLOCK_N, N, scales2);
+
+      }      
+    }
+  }
+};
+
+template <bool has_bias>
+struct brgemm<at::BFloat16, at::Float8_e4m3fn, has_bias> {
+  static inline void apply(
+      const at::BFloat16* __restrict__ A,
+      const at::Float8_e4m3fn* __restrict__ B,
+      at::BFloat16* __restrict__ C,
+      at::BFloat16* __restrict__ Btmp,
+      float* __restrict__ Ctmp,
+      const float* __restrict__ bias,
+      float scales2,
+      int M,
+      int N,
+      int K,
+      int lda,
+      int ldb,
+      int ldc) {
+    constexpr int BLOCK_N = block_size_n();
+
+    // [BLOCK_K, BLOCK_N] -> [BLOCK_K / 2, BLOCK_N * 2]
+    const int ldb_tmp = block_size_n();
+
+    // accumulate across K per BLOCK_K
+    for (int k = 0; k < K; k += BLOCK_K) {
+      int kb_size = std::min(BLOCK_K, K - k);
+      unpack_B(Btmp, B + k * ldb, N, kb_size, ldb, ldb_tmp);
+
+      const bool add_C = (k != 0);
+      at::native::cpublas::brgemm(
+          M, N, kb_size, lda, ldb_tmp, BLOCK_N, add_C, A + k, Btmp, Ctmp);
+    }
+
+    // copy from Ctmp to C and mul scale
+    // TODO: scales is a ptr now instead of a scalar
+    for (int m = 0; m < M; ++m) {
+      if constexpr (has_bias) {
+        // TODO: fix has_bias with scale: copy_add_mul_stub??
+        
+        copy_add_stub(C + m * ldc, Ctmp + m * BLOCK_N, bias, N);
+      } else {
+        copy_mul_stub(C + m * ldc, Ctmp + m * BLOCK_N, N, scales2);
+      }      
+    }
+  }
+};
+
+template <typename scalar_t, typename packed_t, bool has_bias>
+void tinygemm_kernel(
+    const scalar_t* __restrict__ A,
+    const packed_t* __restrict__ B,
+    scalar_t* __restrict__ C,
+    scalar_t* __restrict__ Btmp,
+    float* __restrict__ Ctmp,
+    float scales2,
+    const float* __restrict__ bias,
+    int64_t M,
+    int64_t N,
+    int64_t K,
+    int64_t lda,
+    int64_t ldb,
+    int64_t ldc,
+    bool brg) {
+
+  if (brg) {
+    brgemm<scalar_t, packed_t, has_bias>::apply(
+        A, B, C, Btmp, Ctmp, bias, scales2, M, N, K, lda, ldb, ldc);
+    return;
+  }
+
+  // TODO: add non-brg
+  TORCH_CHECK(false, "non-brg path unsupported yet");
+
+}
+
+template <typename scalar_t, typename packed_t>
+void fp8_scaled_mm_kernel_impl(
+    scalar_t* __restrict__ out,
+    const scalar_t* __restrict__ mat1,
+    const packed_t* __restrict__ mat2,
+    float scales2,
+    const float* __restrict__ bias,
+    int64_t M,
+    int64_t N,
+    int64_t K,
+    int64_t block_size_N,
+    int64_t block_size_K) {
+
+  constexpr int64_t BLOCK_M = block_size_m();
+  constexpr int64_t BLOCK_N = block_size_n();
+  const int64_t MB = div_up(M, BLOCK_M);
+  const int64_t NB = div_up(N, BLOCK_N);
+  const int64_t scale_size_N = div_up(N, block_size_N);
+  const int64_t scale_size_K = div_up(K, block_size_K);
+
+  // use avx512-bf16 when a) M is small; b) dtype is bfloat16, otherwise use amx
+  // TODO: support use_brgemm = false;
+  // const bool use_brgemm = (M > 4) || (!std::is_same_v<scalar_t, at::BFloat16>);
+  const bool use_brgemm = true;
+
+  // parallel on [MB, NB]
+  AT_DISPATCH_BOOL(bias != nullptr, has_bias, [&] {
+    at::parallel_for(0, MB * NB, 0, [&](int64_t begin, int64_t end) {
+      int64_t mb{0}, nb{0};
+      data_index_init(begin, mb, MB, nb, NB);
+
+      // for brgemm, use float32 for accumulate
+      alignas(64) float Ctmp[BLOCK_M * BLOCK_N];
+      // for brgemm when mat2 is float8_e4m3
+      alignas(64) scalar_t Btmp[BLOCK_N * BLOCK_K];
+      
+      // TODO: fix scale index for blockwise quant
+    //   const float* scale_ptr = scales2 + div_up(nb * BLOCK_N, block_size_N) * scale_size_K;
+
+      for (int64_t i = begin; i < end; ++i) {
+        UNUSED(i);
+        int64_t mb_start = mb * BLOCK_M;
+        int64_t mb_size = std::min(M - mb_start, BLOCK_M);
+        int64_t nb_start = nb * BLOCK_N;
+        int64_t nb_size = std::min(N - nb_start, BLOCK_N);
+
+        tinygemm_kernel<scalar_t, packed_t, has_bias>(
+            /*   A */ mat1 + mb_start * K,
+            /*   B */ mat2 + nb_start * K /* nb * BLOCK_N * K */,
+            /*   C */ out + mb_start * N + nb_start,
+            /* Btmp*/ Btmp,
+            /* Ctmp*/ Ctmp,
+            // /*scale*/ scale_ptr,
+            /*scale*/ scales2,
+            /* bias*/ bias + nb_start,
+            /*   M */ mb_size,
+            /*   N */ nb_size,
+            /*   K */ K,
+            /* lda */ K,
+            /* ldb */ nb_size,
+            /* ldc */ N,
+            /* brg */ use_brgemm);
+
+        // move to the next index
+        data_index_step(mb, MB, nb, NB);
+      }
+
+      if (use_brgemm) {
+        at::native::cpublas::brgemm_release();
+      }
+    });
+  });
+
+}
+
 } // anonymous namespace
 
-at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, at::Tensor& scales2,
+at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, float scales2,
     std::vector<int64_t> block_size, std::optional<at::Tensor>& bias, 
     at::ScalarType out_dtype, bool is_vnni) {
   RECORD_FUNCTION("sgl-kernel::fp8_scaled_mm_cpu", std::vector<c10::IValue>({mat1, mat2, scales2, block_size, bias}));
@@ -15,9 +304,9 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, at::Tensor& sca
   
   CHECK_LAST_DIM_CONTIGUOUS_INPUT(mat1);
   CHECK_INPUT(mat2);
-  CHECK_INPUT(scales2);
-  TORCH_CHECK(scales2.scalar_type() == at::kFloat,
-      "fp8_scaled_mm_cpu: expect scales2 to be float32.");
+//   CHECK_INPUT(scales2);
+//   TORCH_CHECK(scales2.scalar_type() == at::kFloat,
+    //   "fp8_scaled_mm_cpu: expect scales2 to be float32.");
   
   int64_t M = mat1.size(0);
   int64_t N = mat2.size(0);
@@ -28,19 +317,28 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, at::Tensor& sca
   CHECK_DIM(2, mat1);
   CHECK_DIM(2, mat2);
 
-  // TODO: check len of block_size == ndim of mat2
+  TORCH_CHECK(block_size.size() == 2,
+      "fp8_scaled_mm_cpu: expect block_size.size() to be 2.");
+  
+  // TODO: K is [0] or [1]??
+  int64_t block_size_N = block_size[0];
+  int64_t block_size_K = block_size[1];
 
-  // TODO: check out_dtype == mat1.dtype
+  TORCH_CHECK(mat1.scalar_type() == out_dtype,
+      "fp8_scaled_mm_cpu: expect A has same dtype with out_dtype.");  
   auto out = at::empty({M, N}, mat1.options().dtype(out_dtype));
   
+  // TODO: do we need to support strides?
   // strides
-  int64_t mat1_strideM = mat1.stride(0);
-  int64_t out_strideM = out.stride(0);
+//   int64_t mat1_strideM = mat1.stride(0);
+//   int64_t out_strideM = out.stride(0);
 
+  // TODO: support the indivisible cases
+  TORCH_CHECK(N % block_size_N == 0, "unsupported block_size_N");
+  TORCH_CHECK(K % block_size_K == 0, "unsupported block_size_K");
 
   const bool has_bias = bias.has_value();
   const float* bias_data = nullptr;
-  
   
   if (has_bias) {
     CHECK_EQ(bias.value().size(0), N);
@@ -50,7 +348,22 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, at::Tensor& sca
   std::cout << "my w: " << mat2 << "\n";
   std::cout << "my packed_w: " << packed_w << "\n";
 
+  CPU_DISPATCH_PACKED_FLOAT_TYPES(out_dtype, packed_w.scalar_type(), "fp8_scaled_mm_kernel_impl", [&] {
+    fp8_scaled_mm_kernel_impl<scalar_t, packed_t>(
+        out.data_ptr<scalar_t>(),
+        mat1.data_ptr<scalar_t>(),
+        packed_w.data_ptr<packed_t>(),
+        scales2,
+        bias_data,
+        M,
+        N,
+        K,
+        block_size_N,
+        block_size_K);
+  });
+
+
   // TODO: fix me
-  return mat1;
+  return out;
 
 }
