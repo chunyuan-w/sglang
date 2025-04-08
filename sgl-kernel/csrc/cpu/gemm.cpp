@@ -65,6 +65,33 @@ inline void pack_vnni<int8_t>(int8_t* __restrict__ packed, const int8_t* __restr
   s8s8_compensation<BLOCK_N>(packed, K);
 }
 
+// for fp8, shuffle per 64
+//   [0, 1, ... 31][32, 33, ... 63]
+//   [0, 2, ... 62][ 1,  3, ... 63]
+template <>
+inline void pack_vnni<at::Float8_e4m3fn>(at::Float8_e4m3fn* __restrict__ packed, const at::Float8_e4m3fn* __restrict__ weight, int N, int K) {
+  const int VNNI_BLK = 2;
+  for (int n = 0; n < N; ++n) {
+    for (int k = 0; k < K / VNNI_BLK; ++k) {
+      for (int d = 0; d < VNNI_BLK; ++d) {
+        packed[k * N * VNNI_BLK + n * VNNI_BLK + d] = weight[n * K + k * VNNI_BLK + d];
+      }
+    }
+  }
+
+  at::Float8_e4m3fn arr[64];
+  for (int i = 0; i < N * K / 64; ++i) {
+    auto row_ptr = packed + i * 64;
+    memcpy(arr, row_ptr, 64 * sizeof(at::Float8_e4m3fn));
+    // from [32, 2] to [2, 32]
+    for (int j = 0; j < 2; ++j) {
+      for (int k = 0; k < 32; ++k) {
+        row_ptr[j * 32 + k] = arr[k * 2 + j];
+      }
+    }
+  }
+}
+
 template <typename scalar_t>
 inline void copy_stub(scalar_t* __restrict__ out, const float* __restrict__ input, int64_t size) {
   using bVec = at::vec::Vectorized<scalar_t>;
