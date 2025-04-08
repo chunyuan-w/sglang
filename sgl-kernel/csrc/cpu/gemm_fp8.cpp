@@ -522,7 +522,9 @@ void bmm_kernel_impl(
 
 } // anonymous namespace
 
+// TODO: check why directly reuse the convert_weight_packed in gemm.cpp makes the result wrong
 at::Tensor convert_weight_packed_fp8(at::Tensor& weight) {
+  // for 3d moe weights
   // weight : [E, OC, IC]
   //     w1 : [E, 2N,  K]
   //     w2 : [E,  K,  N]
@@ -547,7 +549,7 @@ at::Tensor convert_weight_packed_fp8(at::Tensor& weight) {
   const int64_t stride = OC * IC;
 
   TORCH_CHECK(st == at::kBFloat16 || st == at::kHalf || st == at::kChar || st == at::kFloat8_e4m3fn,
-      "expect weight to be bfloat16, float16 or float8_e4m3fn.");
+      "expect weight to be bfloat16, float16, int8 or fp8_e4m3.");
 
   CPU_DISPATCH_PACKED_TYPES(st, [&] {
     // adjust most inner dimension size
@@ -559,7 +561,7 @@ at::Tensor convert_weight_packed_fp8(at::Tensor& weight) {
     const packed_t* w_data = weight.data_ptr<packed_t>();
     packed_t* packed_data = packed_weight.data_ptr<packed_t>();
 
-    // parallel on {E}
+    // parallel on {E, NB}
     at::parallel_for(0, E * NB, 0, [&](int64_t begin, int64_t end) {
       int64_t e{0}, nb{0};
       data_index_init(begin, e, E, nb, NB);
@@ -590,6 +592,7 @@ at::Tensor convert_weight_packed_fp8(at::Tensor& weight) {
 //
 void fp8_scaled_mm_cpu(at::Tensor& out, at::Tensor& mat1, at::Tensor& mat2, bool is_vnni,
     std::optional<at::Tensor>& scale) {
+  RECORD_FUNCTION("sgl-kernel::fp8_scaled_mm_cpu", std::vector<c10::IValue>({out, mat1, mat2}));
 
   auto packed_w = is_vnni ? mat2 : convert_weight_packed_fp8(mat2);
 
