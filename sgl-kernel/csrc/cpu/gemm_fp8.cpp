@@ -526,24 +526,27 @@ at::Tensor convert_weight_packed_fp8(at::Tensor& weight) {
   // weight : [E, OC, IC]
   //     w1 : [E, 2N,  K]
   //     w2 : [E,  K,  N]
-  CHECK_DIM(3, weight);
+//   CHECK_DIM(2, weight);
   CHECK_INPUT(weight);
+  
+  const int64_t ndim = weight.ndimension();
+  TORCH_CHECK(ndim == 2 || ndim == 3, "expect weight to be 2d or 3d, got ", ndim, "d tensor.");
   const auto st = weight.scalar_type();
-  const int E = weight.size(0);
-  const int OC = weight.size(1);
-  const int IC = weight.size(2);
+  const int64_t E = ndim == 3 ? weight.size(0) : 1;
+  const int64_t OC = ndim == 3 ? weight.size(1) : weight.size(0);
+  const int64_t IC = ndim == 3 ? weight.size(2) : weight.size(1);
 
   // we handle 2 TILE_N at a time.
   TORCH_CHECK(OC % TILE_N == 0, "invalid weight out features ", OC);
   TORCH_CHECK(IC % TILE_K == 0, "invalid weight input features ", IC);
 
-  constexpr int BLOCK_N = block_size_n();
+  constexpr int64_t BLOCK_N = block_size_n();
 
   // use phony sizes here [E, OC, IC], for each [E], [OC, IC] -> [IC / 2, OC, 2]
   auto packed_weight = at::empty({E, OC, IC}, weight.options());
-  const int stride = OC * IC;
+  const int64_t stride = OC * IC;
 
-  TORCH_CHECK(st == at::kBFloat16 || st == at::kHalf || st == at::kFloat8_e4m3fn,
+  TORCH_CHECK(st == at::kBFloat16 || st == at::kHalf || st == at::kChar || st == at::kFloat8_e4m3fn,
       "expect weight to be bfloat16, float16 or float8_e4m3fn.");
 
   CPU_DISPATCH_PACKED_TYPES(st, [&] {
@@ -551,10 +554,10 @@ at::Tensor convert_weight_packed_fp8(at::Tensor& weight) {
     packed_t* packed_data = packed_weight.data_ptr<packed_t>();
 
     // parallel on {E}
-    at::parallel_for(0, E, 0, [&](int begin, int end) {
-      for (int e = begin; e < end; ++e) {
-        for (int n = 0; n < OC; n += BLOCK_N) {
-          int n_size = std::min(BLOCK_N, OC - n);
+    at::parallel_for(0, E, 0, [&](int64_t begin, int64_t end) {
+      for (int64_t e = begin; e < end; ++e) {
+        for (int64_t n = 0; n < OC; n += BLOCK_N) {
+          int64_t n_size = std::min(BLOCK_N, OC - n);
           pack_vnni<packed_t>(
               packed_data + e * stride + n * IC,
               w_data + e * stride + n * IC,
