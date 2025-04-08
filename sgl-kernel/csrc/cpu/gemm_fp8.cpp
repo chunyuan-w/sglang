@@ -526,9 +526,8 @@ at::Tensor convert_weight_packed_fp8(at::Tensor& weight) {
   // weight : [E, OC, IC]
   //     w1 : [E, 2N,  K]
   //     w2 : [E,  K,  N]
-//   CHECK_DIM(2, weight);
   CHECK_INPUT(weight);
-  
+
   const int64_t ndim = weight.ndimension();
   TORCH_CHECK(ndim == 2 || ndim == 3, "expect weight to be 2d or 3d, got ", ndim, "d tensor.");
   const auto st = weight.scalar_type();
@@ -543,13 +542,19 @@ at::Tensor convert_weight_packed_fp8(at::Tensor& weight) {
   constexpr int64_t BLOCK_N = block_size_n();
 
   // use phony sizes here [E, OC, IC], for each [E], [OC, IC] -> [IC / 2, OC, 2]
-  auto packed_weight = at::empty({E, OC, IC}, weight.options());
+  auto packed_weight = at::empty({}, weight.options());
   const int64_t stride = OC * IC;
 
   TORCH_CHECK(st == at::kBFloat16 || st == at::kHalf || st == at::kChar || st == at::kFloat8_e4m3fn,
       "expect weight to be bfloat16, float16 or float8_e4m3fn.");
 
   CPU_DISPATCH_PACKED_TYPES(st, [&] {
+    // adjust most inner dimension size
+    const int packed_row_size = get_row_size<packed_t>(IC);
+    auto sizes = weight.sizes().vec();
+    sizes[ndim - 1] = packed_row_size;
+    packed_weight.resize_(sizes);
+
     const packed_t* w_data = weight.data_ptr<packed_t>();
     packed_t* packed_data = packed_weight.data_ptr<packed_t>();
 
