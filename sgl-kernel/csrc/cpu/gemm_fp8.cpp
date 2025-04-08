@@ -161,6 +161,10 @@ struct brgemm<at::BFloat16, at::Float8_e4m3fn, has_bias> {
       int lda,
       int ldb,
       int ldc) {
+    
+    printf("my in apply\n");
+    std::cout << "has_bias:" << has_bias << "\n";
+
     constexpr int BLOCK_N = block_size_n();
 
     // [BLOCK_K, BLOCK_N] -> [BLOCK_K / 2, BLOCK_N * 2]
@@ -175,6 +179,7 @@ struct brgemm<at::BFloat16, at::Float8_e4m3fn, has_bias> {
       at::native::cpublas::brgemm(
           M, N, kb_size, lda, ldb_tmp, BLOCK_N, add_C, A + k, Btmp, Ctmp);
     }
+    std::cout << "Ctmp: " << Ctmp[0] << "\n";
 
     // copy from Ctmp to C and mul scale
     // TODO: scales is a ptr now instead of a scalar
@@ -187,6 +192,9 @@ struct brgemm<at::BFloat16, at::Float8_e4m3fn, has_bias> {
         copy_mul_stub(C + m * ldc, Ctmp + m * BLOCK_N, N, scales2);
       }      
     }
+
+    std::cout << "C: " << C[0] << "\n";
+
   }
 };
 
@@ -349,6 +357,9 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, float scales2,
   std::cout << "my packed_w: " << packed_w << "\n";
 
   CPU_DISPATCH_PACKED_FLOAT_TYPES(out_dtype, packed_w.scalar_type(), "fp8_scaled_mm_kernel_impl", [&] {
+    
+    initialize_e4m3_to_16bit_tables<scalar_t>();
+    
     fp8_scaled_mm_kernel_impl<scalar_t, packed_t>(
         out.data_ptr<scalar_t>(),
         mat1.data_ptr<scalar_t>(),
