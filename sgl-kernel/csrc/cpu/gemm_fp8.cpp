@@ -62,49 +62,6 @@ inline void copy_mul_stub(scalar_t* __restrict__ out, const float* __restrict__ 
   }
 }
 
-
-// convert to vnni format
-// from [N, K] to [K/2, N, 2] for bfloat16 and float16
-template <typename scalar_t>
-inline void pack_vnni(scalar_t* __restrict__ packed, const scalar_t* __restrict__ weight, int N, int K) {
-  const int VNNI_BLK = 2;
-  for (int n = 0; n < N; ++n) {
-    for (int k = 0; k < K / VNNI_BLK; ++k) {
-      for (int d = 0; d < VNNI_BLK; ++d) {
-        packed[k * N * VNNI_BLK + n * VNNI_BLK + d] = weight[n * K + k * VNNI_BLK + d];
-      }
-    }
-  }
-}
-
-// for fp8, shuffle per 64
-//   [0, 1, ... 31][32, 33, ... 63]
-//   [0, 2, ... 62][ 1,  3, ... 63]
-template <>
-inline void pack_vnni<at::Float8_e4m3fn>(at::Float8_e4m3fn* __restrict__ packed, const at::Float8_e4m3fn* __restrict__ weight, int N, int K) {
-  const int VNNI_BLK = 2;
-  for (int n = 0; n < N; ++n) {
-    for (int k = 0; k < K / VNNI_BLK; ++k) {
-      for (int d = 0; d < VNNI_BLK; ++d) {
-        packed[k * N * VNNI_BLK + n * VNNI_BLK + d] = weight[n * K + k * VNNI_BLK + d];
-      }
-    }
-  }
-
-  at::Float8_e4m3fn arr[64];
-  for (int i = 0; i < N * K / 64; ++i) {
-    auto row_ptr = packed + i * 64;
-    memcpy(arr, row_ptr, 64 * sizeof(at::Float8_e4m3fn));
-    // from [32, 2] to [2, 32]
-    for (int j = 0; j < 2; ++j) {
-      for (int k = 0; k < 32; ++k) {
-        row_ptr[j * 32 + k] = arr[k * 2 + j];
-      }
-    }
-  }
-}
-
-
 template <typename scalar_t, typename packed_t, int BLOCK_M, int BLOCK_N>
 struct tinygemm_kernel_nn {
   static inline void apply(
@@ -522,69 +479,6 @@ void bmm_kernel_impl(
 
 } // anonymous namespace
 
-// TODO: check why directly reuse the convert_weight_packed in gemm.cpp makes the result wrong
-at::Tensor convert_weight_packed_fp8(at::Tensor& weight) {
-  // for 3d moe weights
-  // weight : [E, OC, IC]
-  //     w1 : [E, 2N,  K]
-  //     w2 : [E,  K,  N]
-  CHECK_INPUT(weight);
-
-  const int64_t ndim = weight.ndimension();
-  TORCH_CHECK(ndim == 2 || ndim == 3, "expect weight to be 2d or 3d, got ", ndim, "d tensor.");
-  const auto st = weight.scalar_type();
-  const int64_t E = ndim == 3 ? weight.size(0) : 1;
-  const int64_t OC = ndim == 3 ? weight.size(1) : weight.size(0);
-  const int64_t IC = ndim == 3 ? weight.size(2) : weight.size(1);
-
-  // we handle 2 TILE_N at a time.
-  TORCH_CHECK(OC % TILE_N == 0, "invalid weight out features ", OC);
-  TORCH_CHECK(IC % TILE_K == 0, "invalid weight input features ", IC);
-
-  constexpr int64_t BLOCK_N = block_size_n();
-  const int64_t NB = div_up(OC, BLOCK_N);
-
-  // use phony sizes here [E, OC, IC], for each [E], [OC, IC] -> [IC / 2, OC, 2]
-  auto packed_weight = at::empty({}, weight.options());
-  const int64_t stride = OC * IC;
-
-  TORCH_CHECK(st == at::kBFloat16 || st == at::kHalf || st == at::kChar || st == at::kFloat8_e4m3fn,
-      "expect weight to be bfloat16, float16, int8 or fp8_e4m3.");
-
-  CPU_DISPATCH_PACKED_TYPES(st, [&] {
-    // adjust most inner dimension size
-    const int packed_row_size = get_row_size<packed_t>(IC);
-    auto sizes = weight.sizes().vec();
-    sizes[ndim - 1] = packed_row_size;
-    packed_weight.resize_(sizes);
-
-    const packed_t* w_data = weight.data_ptr<packed_t>();
-    packed_t* packed_data = packed_weight.data_ptr<packed_t>();
-
-    // parallel on {E, NB}
-    at::parallel_for(0, E * NB, 0, [&](int64_t begin, int64_t end) {
-      int64_t e{0}, nb{0};
-      data_index_init(begin, e, E, nb, NB);
-
-      for (int64_t i = begin; i < end; ++i) {
-        UNUSED(i);
-
-        int64_t n = nb * BLOCK_N;
-        int64_t n_size = std::min(BLOCK_N, OC - n);
-        pack_vnni<packed_t>(
-            packed_data + e * OC * packed_row_size + n * packed_row_size,
-            w_data + e * stride + n * IC,
-            n_size,
-            IC);
-
-        // move to the next index
-        data_index_step(e, E, nb, NB);
-      }
-    });
-  });
-  return packed_weight;
-}
-
 // mat1 : [B, M, K]
 // mat2 : [B, N, K] or [B, OC, IC]
 // out  : [B, M, N]
@@ -594,7 +488,7 @@ void fp8_scaled_mm_cpu(at::Tensor& out, at::Tensor& mat1, at::Tensor& mat2, bool
     std::optional<at::Tensor>& scale) {
   RECORD_FUNCTION("sgl-kernel::fp8_scaled_mm_cpu", std::vector<c10::IValue>({out, mat1, mat2}));
 
-  auto packed_w = is_vnni ? mat2 : convert_weight_packed_fp8(mat2);
+  auto packed_w = is_vnni ? mat2 : convert_weight_packed(mat2);
 
   // input and out could be non-contiguous
   // weight needs to be contiguous in [OC, IC] order
