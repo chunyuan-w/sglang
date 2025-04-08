@@ -67,6 +67,7 @@ inline void copy_mul_stub(scalar_t* __restrict__ out, const float* __restrict__ 
 // from [N, K] to [K/2, N, 2] for bfloat16 and float16
 template <typename scalar_t>
 inline void pack_vnni(scalar_t* __restrict__ packed, const scalar_t* __restrict__ weight, int N, int K) {
+  const int VNNI_BLK = 2;
   for (int n = 0; n < N; ++n) {
     for (int k = 0; k < K / VNNI_BLK; ++k) {
       for (int d = 0; d < VNNI_BLK; ++d) {
@@ -81,6 +82,7 @@ inline void pack_vnni(scalar_t* __restrict__ packed, const scalar_t* __restrict_
 //   [0, 2, ... 62][ 1,  3, ... 63]
 template <>
 inline void pack_vnni<at::Float8_e4m3fn>(at::Float8_e4m3fn* __restrict__ packed, const at::Float8_e4m3fn* __restrict__ weight, int N, int K) {
+  const int VNNI_BLK = 2;
   for (int n = 0; n < N; ++n) {
     for (int k = 0; k < K / VNNI_BLK; ++k) {
       for (int d = 0; d < VNNI_BLK; ++d) {
@@ -295,7 +297,7 @@ struct brgemm<scalar_t, scalar_t> {
       scalar_t* __restrict__ Btmp, float* __restrict__ Ctmp, float scale,
       int M, int N, int K, int lda, int ldb, int ldc) {
 
-    TORCH_UNUSED(scale);
+    UNUSED(scale);
 
     constexpr int BLOCK_N = block_size_n();
     at::native::cpublas::brgemm(
@@ -487,7 +489,7 @@ void bmm_kernel_impl(
     alignas(64) scalar_t Btmp[BLOCK_N * BLOCK_K];
 
     for (int i = begin; i < end; ++i) {
-      TORCH_UNUSED(i);
+      UNUSED(i);
       int mb_start = mb * BLOCK_M;
       int mb_size = std::min(M - mb_start, BLOCK_M);
       int nb_start = nb * BLOCK_N;
@@ -520,7 +522,7 @@ void bmm_kernel_impl(
 
 } // anonymous namespace
 
-at::Tensor convert_weight_packed(at::Tensor& weight) {
+at::Tensor convert_weight_packed_fp8(at::Tensor& weight) {
   // weight : [E, OC, IC]
   //     w1 : [E, 2N,  K]
   //     w2 : [E,  K,  N]
@@ -544,16 +546,16 @@ at::Tensor convert_weight_packed(at::Tensor& weight) {
   TORCH_CHECK(st == at::kBFloat16 || st == at::kHalf || st == at::kFloat8_e4m3fn,
       "expect weight to be bfloat16, float16 or float8_e4m3fn.");
 
-  CPU_DISPATCH_FLOAT_TYPES(st, [&] {
-    const scalar_t* w_data = weight.data_ptr<scalar_t>();
-    scalar_t* packed_data = packed_weight.data_ptr<scalar_t>();
+  CPU_DISPATCH_PACKED_TYPES(st, [&] {
+    const packed_t* w_data = weight.data_ptr<packed_t>();
+    packed_t* packed_data = packed_weight.data_ptr<packed_t>();
 
     // parallel on {E}
     at::parallel_for(0, E, 0, [&](int begin, int end) {
       for (int e = begin; e < end; ++e) {
         for (int n = 0; n < OC; n += BLOCK_N) {
           int n_size = std::min(BLOCK_N, OC - n);
-          pack_vnni<scalar_t>(
+          pack_vnni<packed_t>(
               packed_data + e * stride + n * IC,
               w_data + e * stride + n * IC,
               n_size,
@@ -573,7 +575,7 @@ at::Tensor convert_weight_packed(at::Tensor& weight) {
 void fp8_scaled_mm_cpu(at::Tensor& out, at::Tensor& mat1, at::Tensor& mat2, bool is_vnni,
     std::optional<at::Tensor>& scale) {
 
-  auto packed_w = is_vnni ? mat2 : convert_weight_packed(mat2);
+  auto packed_w = is_vnni ? mat2 : convert_weight_packed_fp8(mat2);
 
   // input and out could be non-contiguous
   // weight needs to be contiguous in [OC, IC] order
