@@ -26,21 +26,22 @@ static void initialize_e4m3_to_16bit_tables() {
 }
 
 template <typename scalar_t>
-inline void copy_add_stub(scalar_t* __restrict__ out, const float* __restrict__ input, const float* __restrict__ bias, int64_t size) {
+inline void copy_add_mul_stub(scalar_t* __restrict__ out, const float* __restrict__ input, const float* __restrict__ bias, int64_t size, float scale) {
   using bVec = at::vec::Vectorized<scalar_t>;
   using fVec = at::vec::Vectorized<float>;
   constexpr int kVecSize = bVec::size();
+  const fVec vscale = fVec(scale);
 
   int64_t d;
   #pragma GCC unroll 4
   for (d = 0; d <= size - kVecSize; d += kVecSize) {
-    fVec data0 = fVec::loadu(input + d) + fVec::loadu(bias + d);
-    fVec data1 = fVec::loadu(input + d + fVec::size()) + fVec::loadu(bias + d + fVec::size());
+    fVec data0 = fVec::loadu(input + d) * vscale + fVec::loadu(bias + d);
+    fVec data1 = fVec::loadu(input + d + fVec::size()) * vscale + fVec::loadu(bias + d + fVec::size());
     bVec out_vec = convert_from_float_ext<scalar_t>(data0, data1);
     out_vec.store(out + d);
   }
   for (; d < size; ++d) {
-    out[d] = static_cast<scalar_t>(input[d] + bias[d]);
+    out[d] = static_cast<scalar_t>(input[d] * scale + bias[d]);
   }
 }
 
@@ -135,8 +136,7 @@ struct brgemm<scalar_t, scalar_t, has_bias> {
     // copy from Ctmp to C
     for (int m = 0; m < M; ++m) {
       if constexpr (has_bias) {
-        // TODO: fix has_bias with scale: copy_add_mul_stub??
-        copy_add_stub(C + m * ldc, Ctmp + m * BLOCK_N, bias, N);
+        copy_add_mul_stub(C + m * ldc, Ctmp + m * BLOCK_N, bias, N, scales2);
       } else {
         copy_mul_stub(C + m * ldc, Ctmp + m * BLOCK_N, N, scales2);
 
@@ -185,9 +185,7 @@ struct brgemm<at::BFloat16, at::Float8_e4m3fn, has_bias> {
     // TODO: scales is a ptr now instead of a scalar
     for (int m = 0; m < M; ++m) {
       if constexpr (has_bias) {
-        // TODO: fix has_bias with scale: copy_add_mul_stub??
-        
-        copy_add_stub(C + m * ldc, Ctmp + m * BLOCK_N, bias, N);
+        copy_add_mul_stub(C + m * ldc, Ctmp + m * BLOCK_N, bias, N, scales2);
       } else {
         copy_mul_stub(C + m * ldc, Ctmp + m * BLOCK_N, N, scales2);
       }      
@@ -353,9 +351,6 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, float scales2,
     bias_data = bias.value().data_ptr<float>();
   }  
     
-  std::cout << "my w: " << mat2 << "\n";
-  std::cout << "my packed_w: " << packed_w << "\n";
-
   CPU_DISPATCH_PACKED_FLOAT_TYPES(out_dtype, packed_w.scalar_type(), "fp8_scaled_mm_kernel_impl", [&] {
     
     initialize_e4m3_to_16bit_tables<scalar_t>();
@@ -373,8 +368,6 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, float scales2,
         block_size_K);
   });
 
-
-  // TODO: fix me
   return out;
 
 }
