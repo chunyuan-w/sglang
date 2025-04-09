@@ -77,7 +77,7 @@ inline void unpack_B(
   const uint8_t* b_ptr = reinterpret_cast<const uint8_t*>(packed_B);
   const __m512 vd = _mm512_set1_ps(scale);
 
-  std::cout << "scale in unpack_B:" << scale << ": done\n";
+//   std::cout << "scale in unpack_B:" << scale << ": done\n";
     
 
   for (int k = 0; k < K2; ++k) {
@@ -160,8 +160,8 @@ struct brgemm<at::BFloat16, at::Float8_e4m3fn, has_bias> {
       int ldc,
       int block_size_K) {
     
-    printf("my in apply\n");
-    std::cout << "has_bias:" << has_bias << "\n";
+    // printf("my in apply\n");
+    // std::cout << "has_bias:" << has_bias << "\n";
 
     constexpr int BLOCK_N = block_size_n();
 
@@ -175,7 +175,7 @@ struct brgemm<at::BFloat16, at::Float8_e4m3fn, has_bias> {
       
       // TODO: check the index compute here
       int idx = (k / BLOCK_K) / (block_size_K / BLOCK_K);
-      std::cout << "scale idx before unpack_B: " << idx << " k:" << k << " block_size_K:" << block_size_K << " BLOCK_K:" << BLOCK_K << "\n";
+    //   std::cout << "scale idx before unpack_B: " << idx << " k:" << k << " block_size_K:" << block_size_K << " BLOCK_K:" << BLOCK_K << "\n";
       unpack_B(Btmp, B + k * ldb, N, kb_size, ldb, ldb_tmp, scales2[idx]);
 
       // TODO: mul scales here on Btmp?
@@ -197,7 +197,7 @@ struct brgemm<at::BFloat16, at::Float8_e4m3fn, has_bias> {
       }      
     }
 
-    std::cout << "C: " << C[0] << "\n";
+    // std::cout << "C: " << C[0] << "\n";
 
   }
 };
@@ -249,9 +249,9 @@ void fp8_scaled_mm_kernel_impl(
   const int64_t MB = div_up(M, BLOCK_M);
   const int64_t NB = div_up(N, BLOCK_N);
 
-    std::cout << "BLOCK_M: " << BLOCK_M << " M: " << M << "\n";
-    std::cout << "BLOCK_N: " << BLOCK_N << " N: " << N << "\n";
-    std::cout << "MB: " << MB << " NB: " << NB << "\n";
+    // std::cout << "BLOCK_M: " << BLOCK_M << " M: " << M << "\n";
+    // std::cout << "BLOCK_N: " << BLOCK_N << " N: " << N << "\n";
+    // std::cout << "MB: " << MB << " NB: " << NB << "\n";
 
 
   const int64_t scale_size_N = div_up(N, block_size_N);
@@ -278,9 +278,9 @@ void fp8_scaled_mm_kernel_impl(
         UNUSED(i);
         // TODO: check the index compute here
         const float* scale_ptr = scales2 + nb / (block_size_N / BLOCK_N) * scale_size_K;
-        std::cout << "nb: " << nb << " block_size_N: " << block_size_N << " scale_size_K:" << scale_size_K << "\n";
+        // std::cout << "nb: " << nb << " block_size_N: " << block_size_N << " scale_size_K:" << scale_size_K << "\n";
         
-        printf("scale ptr idx: %d\n", nb / (block_size_N / BLOCK_N) * scale_size_K);
+        // printf("scale ptr idx: %d\n", nb / (block_size_N / BLOCK_N) * scale_size_K);
 
         int64_t mb_start = mb * BLOCK_M;
         int64_t mb_size = std::min(M - mb_start, BLOCK_M);
@@ -332,7 +332,7 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, at::Tensor& sca
   TORCH_CHECK(scales2.scalar_type() == at::kFloat,
       "fp8_scaled_mm_cpu: expect scales2 to be float32.");
   
-  std::cout << "scales2:" << scales2 << "\n";
+//   std::cout << "scales2:" << scales2 << "\n";
 
   int64_t M = mat1.size(0);
   int64_t N = mat2.size(0);
@@ -353,7 +353,7 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, at::Tensor& sca
   constexpr int64_t BLOCK_N = block_size_n();
   TORCH_CHECK(block_size_N >= BLOCK_N, "expect block_size_N >= BLOCK_N");
   
-  std::cout << "block_size_K:" << block_size_K << "BLOCK_K:" << BLOCK_K << "\n";
+//   std::cout << "block_size_K:" << block_size_K << "BLOCK_K:" << BLOCK_K << "\n";
   TORCH_CHECK(block_size_K >= BLOCK_K, "expect block_size_K >= BLOCK_K");
 
   TORCH_CHECK(mat1.scalar_type() == out_dtype,
