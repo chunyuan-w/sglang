@@ -26,7 +26,7 @@ static void initialize_e4m3_to_16bit_tables() {
 }
 
 template <typename scalar_t>
-inline void copy_add_mul_stub(scalar_t* __restrict__ out, const float* __restrict__ input, const float* __restrict__ bias, int64_t size, const float* __restrict__ scale) {
+inline void copy_add_mul_stub(scalar_t* __restrict__ out, const float* __restrict__ input, const float* __restrict__ bias, int64_t size, float scale) {
   using bVec = at::vec::Vectorized<scalar_t>;
   using fVec = at::vec::Vectorized<float>;
   constexpr int kVecSize = bVec::size();
@@ -50,7 +50,7 @@ inline void copy_mul_stub(
     scalar_t* __restrict__ out,
     const float* __restrict__ input,
     int size,
-    const float* __restrict__ scale) {
+    float scale) {
   using bVec = at::vec::Vectorized<scalar_t>;
   using fVec = at::vec::Vectorized<float>;
   constexpr int kVecSize = bVec::size();
@@ -120,7 +120,7 @@ struct brgemm<scalar_t, scalar_t, has_bias> {
       scalar_t* __restrict__ Btmp,
       float* __restrict__ Ctmp,
       const float* __restrict__ bias,
-      const float* __restrict__ scales2,
+      float scales2,
       int M,
       int N,
       int K,
@@ -154,7 +154,7 @@ struct brgemm<at::BFloat16, at::Float8_e4m3fn, has_bias> {
       at::BFloat16* __restrict__ Btmp,
       float* __restrict__ Ctmp,
       const float* __restrict__ bias,
-      const float* __restrict__ scales2,
+      float scales2,
       int M,
       int N,
       int K,
@@ -175,21 +175,18 @@ struct brgemm<at::BFloat16, at::Float8_e4m3fn, has_bias> {
       int kb_size = std::min(BLOCK_K, K - k);
       unpack_B(Btmp, B + k * ldb, N, kb_size, ldb, ldb_tmp);
 
-      // TODO: mul scales here on Btmp?
-
       const bool add_C = (k != 0);
       at::native::cpublas::brgemm(
           M, N, kb_size, lda, ldb_tmp, BLOCK_N, add_C, A + k, Btmp, Ctmp);
     }
+    std::cout << "Ctmp: " << Ctmp[0] << "\n";
 
     // copy from Ctmp to C and mul scale
     // TODO: scales is a ptr now instead of a scalar
     for (int m = 0; m < M; ++m) {
       if constexpr (has_bias) {
-        // change to copy_add_stub after mul scales on Btmp?
         copy_add_mul_stub(C + m * ldc, Ctmp + m * BLOCK_N, bias, N, scales2);
       } else {
-        // change to copy_stub after mul scales on Btmp?
         copy_mul_stub(C + m * ldc, Ctmp + m * BLOCK_N, N, scales2);
       }      
     }
@@ -206,7 +203,7 @@ void tinygemm_kernel(
     scalar_t* __restrict__ C,
     scalar_t* __restrict__ Btmp,
     float* __restrict__ Ctmp,
-    const float* __restrict__ scales2,
+    float scales2,
     const float* __restrict__ bias,
     int64_t M,
     int64_t N,
@@ -232,7 +229,7 @@ void fp8_scaled_mm_kernel_impl(
     scalar_t* __restrict__ out,
     const scalar_t* __restrict__ mat1,
     const packed_t* __restrict__ mat2,
-    const float* __restrict__ scales2,
+    float scales2,
     const float* __restrict__ bias,
     int64_t M,
     int64_t N,
@@ -264,7 +261,7 @@ void fp8_scaled_mm_kernel_impl(
       alignas(64) scalar_t Btmp[BLOCK_N * BLOCK_K];
       
       // TODO: fix scale index for blockwise quant
-      const float* scale_ptr = scales2 + div_up(nb * BLOCK_N, block_size_N) * scale_size_K;
+    //   const float* scale_ptr = scales2 + div_up(nb * BLOCK_N, block_size_N) * scale_size_K;
 
       for (int64_t i = begin; i < end; ++i) {
         UNUSED(i);
@@ -279,8 +276,8 @@ void fp8_scaled_mm_kernel_impl(
             /*   C */ out + mb_start * N + nb_start,
             /* Btmp*/ Btmp,
             /* Ctmp*/ Ctmp,
-            /*scale*/ scale_ptr,
-            // /*scale*/ scales2,
+            // /*scale*/ scale_ptr,
+            /*scale*/ scales2,
             /* bias*/ bias + nb_start,
             /*   M */ mb_size,
             /*   N */ nb_size,
@@ -304,7 +301,7 @@ void fp8_scaled_mm_kernel_impl(
 
 } // anonymous namespace
 
-at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, at::Tensor& scales2,
+at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, float scales2,
     std::vector<int64_t> block_size, std::optional<at::Tensor>& bias, 
     at::ScalarType out_dtype, bool is_vnni) {
   RECORD_FUNCTION("sgl-kernel::fp8_scaled_mm_cpu", std::vector<c10::IValue>({mat1, mat2, scales2, block_size, bias}));
@@ -313,9 +310,9 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, at::Tensor& sca
   
   CHECK_LAST_DIM_CONTIGUOUS_INPUT(mat1);
   CHECK_INPUT(mat2);
-  CHECK_INPUT(scales2);
-  TORCH_CHECK(scales2.scalar_type() == at::kFloat,
-      "fp8_scaled_mm_cpu: expect scales2 to be float32.");
+//   CHECK_INPUT(scales2);
+//   TORCH_CHECK(scales2.scalar_type() == at::kFloat,
+    //   "fp8_scaled_mm_cpu: expect scales2 to be float32.");
   
   int64_t M = mat1.size(0);
   int64_t N = mat2.size(0);
