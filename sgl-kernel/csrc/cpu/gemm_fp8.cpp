@@ -4,27 +4,6 @@
 
 namespace {
 
-// global float8 LUT
-alignas(64) static uint16_t e4m3_to_16bit[256];
-
-template <typename T>
-static void initialize_e4m3_to_16bit_tables() {
-  // run only once
-  static bool initialized_16bit = false;
-  if (!initialized_16bit) {
-    std::cout << "\n@@@@ doing lut init ..." << std::endl;
-    for (uint8_t u8 = 0; u8 < 256; ++u8) {
-      auto value = static_cast<T>(c10::bit_cast<c10::Float8_e4m3fn>(u8));
-      uint16_t value_bits = c10::bit_cast<uint16_t>(value);
-      e4m3_to_16bit[u8] = value_bits;
-      if (u8 == 255) {
-        break;
-      }
-    }
-    initialized_16bit = true;
-  }
-}
-
 template <typename scalar_t>
 inline void copy_stub(scalar_t* __restrict__ out, const float* __restrict__ input, int64_t size) {
   using bVec = at::vec::Vectorized<scalar_t>;
@@ -332,7 +311,7 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, at::Tensor& sca
   TORCH_CHECK(scales2.scalar_type() == at::kFloat,
       "fp8_scaled_mm_cpu: expect scales2 to be float32.");
   
-//   std::cout << "scales2:" << scales2 << "\n";
+  // std::cout << "my in fp8 gemm:" << scales2 << "\n";
 
   int64_t M = mat1.size(0);
   int64_t N = mat2.size(0);
@@ -378,9 +357,6 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, at::Tensor& sca
   }  
     
   CPU_DISPATCH_PACKED_FLOAT_TYPES(out_dtype, packed_w.scalar_type(), "fp8_scaled_mm_kernel_impl", [&] {
-    
-    initialize_e4m3_to_16bit_tables<scalar_t>();
-    
     fp8_scaled_mm_kernel_impl<scalar_t, packed_t>(
         out.data_ptr<scalar_t>(),
         mat1.data_ptr<scalar_t>(),
