@@ -51,6 +51,11 @@ from sglang.srt.utils import (
     print_warning_once,
     set_weight_attrs,
 )
+from sglang.srt.layers.moe.fused_moe_native import moe_forward_native
+from sglang.srt.cpu_utils import _process_weight_after_loading, cpu_has_amx_support
+
+if cpu_has_amx_support():
+    import sgl_kernel.cpu
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
@@ -401,6 +406,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
         if self.block_quant:
 
+            # TODO: check layer.weight is N, K or K, N
             return sgl_kernel.cpu.fp8_scaled_mm(
                 x, layer.weight, layer.weight_scale_inv, self.quant_config.weight_block_size, bias, x.dtype, is_vnni=True
             )
@@ -635,6 +641,8 @@ class Fp8MoEMethod:
             layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer: Module) -> None:
+        # TODO: for MoE, pack weight here?
+        
         if get_bool_env_var("USE_INT4_WEIGHT"):
             self.process_weights_hip_int4(layer)
             return
@@ -883,7 +891,6 @@ class Fp8MoEMethod:
 
         # Expert selection
 
-        breakpoint()
         return moe_forward_native(
             layer,
             x,
