@@ -253,7 +253,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 layer.w2_weight,
                 topk_weights,
                 topk_ids,
-                inplace=False, # See [Note] inplace should be False in fused_experts.
+                True,  # inplace
             )
         else:
             return moe_forward_native(
