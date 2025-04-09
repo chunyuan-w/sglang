@@ -79,31 +79,18 @@ inline void unpack_B(
   // [K/2, N, 2]
   const int K2 = K >> 1;
   const int ldb2 = ldb; // ldb * 2 >> 1;
-  const uint16_t* b_ptr = reinterpret_cast<const uint16_t*>(packed_B);
+  const uint8_t* b_ptr = reinterpret_cast<const uint8_t*>(packed_B);
 
-  const __m512i mask = _mm512_set1_epi32(0xFFFF);
-
-#pragma GCC unroll 4
   for (int k = 0; k < K2; ++k) {
-    for (int n = 0; n < N; n += 32) {
-      __m512i b8 = _mm512_loadu_si512(b_ptr + k * ldb2 + n);
-      __m512i idx0 = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(b8));
-      __m512i idx1 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(b8, 1));
-      __m512i idx2 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(b8, 2));
-      __m512i idx3 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(b8, 3));
+    for (int n = 0; n < N * 2; n += 32) {
+        // Load 32 bytes of FP8
+        __m256i v_fp8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b_ptr + k * ldb2 * 2 + n));
+        
+        // Convert to 32 BF16 values
+        __m512bh v_bf16 = cvt_e4m3_bf16_intrinsic_without_denorm(v_fp8);
 
-      __m512i b16_0 = _mm512_i32gather_epi32(idx0, e4m3_to_16bit, 2);
-      __m512i b16_1 = _mm512_i32gather_epi32(idx1, e4m3_to_16bit, 2);
-      __m512i b16_2 = _mm512_i32gather_epi32(idx2, e4m3_to_16bit, 2);
-      __m512i b16_3 = _mm512_i32gather_epi32(idx3, e4m3_to_16bit, 2);
-
-      __m512i b16_02 = _mm512_or_epi32(
-          _mm512_slli_epi32(b16_2, 16), _mm512_and_epi32(b16_0, mask));
-      __m512i b16_13 = _mm512_or_epi32(
-          _mm512_slli_epi32(b16_3, 16), _mm512_and_epi32(b16_1, mask));
-
-      _mm512_storeu_si512(Btmp + k * ldb_tmp * 2 + n * 2 + 0, b16_02);
-      _mm512_storeu_si512(Btmp + k * ldb_tmp * 2 + n * 2 + 32, b16_13);
+        // Store to Btmp (no need for bit manipulation now)
+        _mm512_storeu_si512(Btmp + k * ldb_tmp * 2 + n, (__m512i)v_bf16);
     }
   }
 }
