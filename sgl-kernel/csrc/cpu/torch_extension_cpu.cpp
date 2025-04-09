@@ -63,7 +63,7 @@ at::Tensor int8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2,
     std::optional<at::Tensor>& bias, at::ScalarType out_dtype, bool is_vnni);
 
 at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2,
-    float scales2, std::vector<int64_t> block_size, 
+    at::Tensor& scales2, std::vector<int64_t> block_size, 
     std::optional<at::Tensor>& bias, at::ScalarType out_dtype, bool is_vnni);
 
 // quant + igemm
