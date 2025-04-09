@@ -69,6 +69,7 @@ def moe_forward_native(
     activation: str = "silu",
     inplace: bool = True,
     no_combine: bool = False,    
+    weight_block_size=None,
 ) -> torch.Tensor:
 
     topk_weights, topk_ids = select_experts(
@@ -113,6 +114,7 @@ def moe_forward_native(
         layer_w13_weight = layer.w13_weight[i]
         layer_w2_weight = layer.w2_weight[i]
 
+        # TODO: check if weight is packed and change to fp8 gemm for the below 2 linear
         gate_up = F.linear(tokens_for_this_expert, layer_w13_weight)
         gate_up = act(gate_up)
         expert_out = F.linear(gate_up, layer_w2_weight)

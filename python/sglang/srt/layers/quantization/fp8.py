@@ -169,7 +169,9 @@ class Fp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
-        self.cutlass_fp8_supported = cutlass_fp8_supported()
+        # TODO: temporarily set cutlass_fp8_supported directly to False here
+        # self.cutlass_fp8_supported = cutlass_fp8_supported()
+        self.cutlass_fp8_supported = False
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
@@ -284,6 +286,10 @@ class Fp8LinearMethod(LinearMethodBase):
                 layer.register_parameter("input_scale", None)
 
     def process_weights_after_loading(self, layer: Module) -> None:
+        # TODO: add prepack
+        _process_weight_after_loading(layer, ["weight"])
+        return
+        
         # Block quant doesn't need to process weights after loading
         if self.block_quant:
             # If ROCm, normalize the weights and scales to e4m3fnuz
@@ -394,14 +400,20 @@ class Fp8LinearMethod(LinearMethodBase):
             )
 
         if self.block_quant:
-            return apply_w8a8_block_fp8_linear(
-                input=x,
-                weight=layer.weight,
-                block_size=self.quant_config.weight_block_size,
-                weight_scale=layer.weight_scale_inv,
-                input_scale=None,
-                bias=bias,
+
+            return sgl_kernel.cpu.fp8_scaled_mm(
+                x, layer.weight, layer.weight_scale_inv, self.quant_config.weight_block_size, bias, x.dtype, is_vnni=True
             )
+            
+            # TODO: add prepack and switch to fp8_gemm
+            # return apply_w8a8_block_fp8_linear(
+            #     input=x,
+            #     weight=layer.weight,
+            #     block_size=self.quant_config.weight_block_size,
+            #     weight_scale=layer.weight_scale_inv,
+            #     input_scale=None,
+            #     bias=bias,
+            # )
 
         return apply_fp8_linear(
             input=x,
@@ -870,6 +882,26 @@ class Fp8MoEMethod:
         from sglang.srt.layers.moe.topk import select_experts
 
         # Expert selection
+
+        breakpoint()
+        return moe_forward_native(
+            layer,
+            x,
+            use_grouped_topk,
+            top_k,
+            router_logits,
+            renormalize,
+            topk_group,
+            num_expert_group,
+            custom_routing_function,
+            correction_bias,
+            activation,
+            inplace,
+            no_combine,
+            self.quant_config.weight_block_size,
+        )
+
+        
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
