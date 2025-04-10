@@ -252,22 +252,22 @@ void fp8_scaled_mm_kernel_impl(
         int64_t nb_size = std::min(N - nb_start, BLOCK_N);
 
         tinygemm_kernel<scalar_t, packed_t, has_bias>(
-            /*   A */ mat1 + mb_start * mat1_strideM,
-            /*   B */ mat2 + nb_start * K /* nb * BLOCK_N * K */,
-            /*   C */ out + mb_start * out_strideM + nb_start,
-            /* Btmp*/ Btmp,
-            /* Ctmp*/ Ctmp,
-            /*scale*/ scale_ptr,
-            /* bias*/ bias + nb_start,
-            /*   M */ mb_size,
-            /*   N */ nb_size,
-            /*   K */ K,
-            /* lda */ mat1_strideM,
-            /* ldb */ nb_size,
-            /* ldc */ out_strideM,
-            /* brg */ use_brgemm,
-            /* blocks_k_per_group */ blocks_k_per_group,
-            /* block_size_K */ block_size_K);
+            /*   A                  */ mat1 + mb_start * mat1_strideM,
+            /*   B                  */ mat2 + nb_start * K, // nb * BLOCK_N * K
+            /*   C                  */ out + mb_start * out_strideM + nb_start,
+            /*   Btmp               */ Btmp,
+            /*   Ctmp               */ Ctmp,
+            /*   scale              */ scale_ptr,
+            /*   bias               */ bias + nb_start,
+            /*   M                  */ mb_size,
+            /*   N                  */ nb_size,
+            /*   K                  */ K,
+            /*   lda                */ mat1_strideM,
+            /*   ldb                */ nb_size,
+            /*   ldc                */ out_strideM,
+            /*   brg                */ use_brgemm,
+            /*   blocks_k_per_group */ blocks_k_per_group,
+            /*   block_size_K       */ block_size_K);
 
         // move to the next index
         data_index_step(mb, MB, nb, NB);
