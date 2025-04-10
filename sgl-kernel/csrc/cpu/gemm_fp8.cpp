@@ -53,25 +53,35 @@ inline void unpack_B(
   // [K/2, N, 2]
   const int K2 = K >> 1;
   const int ldb2 = ldb; // ldb * 2 >> 1;
-  const uint8_t* b_ptr = reinterpret_cast<const uint8_t*>(packed_B);
+  const uint16_t* b_ptr = reinterpret_cast<const uint16_t*>(packed_B);
   const __m512 vd = _mm512_set1_ps(scale);
 
   for (int k = 0; k < K2; ++k) {
-    for (int n = 0; n < N * 2; n += 32) {
-        // Convert FP8 to BF16
-        // TODO: should we add an API to convert to FP32 here for better perf?
-        __m256i v_fp8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b_ptr + k * ldb2 * 2 + n));
-        __m512bh v_bf16 = cvt_e4m3_bf16_intrinsic_without_denorm(v_fp8);
+    for (int n = 0; n < N; n += 64) {
+        __m512i b8 = _mm512_loadu_si512(b_ptr + k * ldb2 + n);
+
+        __m256i b8_0 = _mm512_extracti32x8_epi32(b8, 0);
+        __m256i b8_1 = _mm512_extracti32x8_epi32(b8, 1);
+
+        __m512bh bf16_0 = cvt_e4m3_bf16_intrinsic_without_denorm(b8_0);
+        __m512bh bf16_1 = cvt_e4m3_bf16_intrinsic_without_denorm(b8_1);
 
         // Apply scale
-        __m512 va0 = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32((__m512i)v_bf16, 0));
-        __m512 va1 = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32((__m512i)v_bf16, 1));
-        va0 = _mm512_mul_ps(va0, vd);
-        va1 = _mm512_mul_ps(va1, vd);
-        v_bf16 = _mm512_cvtne2ps_pbh(va1, va0);
+        __m512 f0_lo = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32((__m512i)bf16_0, 0));
+        __m512 f0_hi = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32((__m512i)bf16_0, 1));
+        __m512 f1_lo = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32((__m512i)bf16_1, 0));
+        __m512 f1_hi = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32((__m512i)bf16_1, 1));
 
-        // Store to Btmp (no need for bit manipulation now)
-        _mm512_storeu_si512(Btmp + k * ldb_tmp * 2 + n, (__m512i)v_bf16);
+        f0_lo = _mm512_mul_ps(f0_lo, vd);
+        f0_hi = _mm512_mul_ps(f0_hi, vd);
+        f1_lo = _mm512_mul_ps(f1_lo, vd);
+        f1_hi = _mm512_mul_ps(f1_hi, vd);
+
+        bf16_0 = _mm512_cvtne2ps_pbh(f0_hi, f0_lo);
+        bf16_1 = _mm512_cvtne2ps_pbh(f1_hi, f1_lo);
+
+        _mm512_storeu_si512(Btmp + k * ldb_tmp * 2 + n * 2 + 0, (__m512i)bf16_0);
+        _mm512_storeu_si512(Btmp + k * ldb_tmp * 2 + n * 2 + 32, (__m512i)bf16_1);
     }
   }
 }
@@ -189,11 +199,11 @@ struct tinygemm_kernel_nn<at::BFloat16, at::Float8_e4m3fn, has_bias, BLOCK_M, BL
     const int ldb2 = ldb; // ldb * 2 >> 1;
     
     
-    std::cout << "lda: " << lda << " lda2: " << lda2 << " ldb:" << ldb << " BLOCK_N: " << BLOCK_N << "\n";
+    // std::cout << "lda: " << lda << " lda2: " << lda2 << " ldb:" << ldb << " BLOCK_N: " << BLOCK_N << "\n";
     
     const float* a_ptr = reinterpret_cast<const float*>(A);
     
-    // TODO: use uint16_t??
+    // TODO: use uint16_t like in unpack_B
     // const uint16_t* b_ptr = reinterpret_cast<const uint16_t*>(B);
     const uint8_t* b_ptr = reinterpret_cast<const uint8_t*>(B);
 
@@ -233,7 +243,7 @@ struct tinygemm_kernel_nn<at::BFloat16, at::Float8_e4m3fn, has_bias, BLOCK_M, BL
     };
     
     
-    std::cout << "K: " << K << " K2:" << K2 << "\n";
+    // std::cout << "K: " << K << " K2:" << K2 << "\n";
   
     for (int k = 0; k < K2; ++k) {
       Unroll<ROWS * COLS>{}(compute, k);
