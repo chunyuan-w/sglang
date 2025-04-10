@@ -209,6 +209,8 @@ void fp8_scaled_mm_kernel_impl(
     int64_t M,
     int64_t N,
     int64_t K,
+    int64_t mat1_strideM,
+    int64_t out_strideM,
     int64_t block_size_N,
     int64_t block_size_K) {
 
@@ -250,9 +252,9 @@ void fp8_scaled_mm_kernel_impl(
         int64_t nb_size = std::min(N - nb_start, BLOCK_N);
 
         tinygemm_kernel<scalar_t, packed_t, has_bias>(
-            /*   A */ mat1 + mb_start * K,
+            /*   A */ mat1 + mb_start * mat1_strideM,
             /*   B */ mat2 + nb_start * K /* nb * BLOCK_N * K */,
-            /*   C */ out + mb_start * N + nb_start,
+            /*   C */ out + mb_start * out_strideM + nb_start,
             /* Btmp*/ Btmp,
             /* Ctmp*/ Ctmp,
             /*scale*/ scale_ptr,
@@ -260,9 +262,9 @@ void fp8_scaled_mm_kernel_impl(
             /*   M */ mb_size,
             /*   N */ nb_size,
             /*   K */ K,
-            /* lda */ K,
+            /* lda */ mat1_strideM,
             /* ldb */ nb_size,
-            /* ldc */ N,
+            /* ldc */ out_strideM,
             /* brg */ use_brgemm,
             /* blocks_k_per_group */ blocks_k_per_group,
             /* block_size_K */ block_size_K);
@@ -325,10 +327,9 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, at::Tensor& sca
       "fp8_scaled_mm_cpu: expect scales to be float32.");
   auto out = at::empty({M, N}, mat1.options().dtype(out_dtype));
 
-  // TODO: do we need to support strides?
   // strides
-//   int64_t mat1_strideM = mat1.stride(0);
-//   int64_t out_strideM = out.stride(0);
+  int64_t mat1_strideM = mat1.stride(0);
+  int64_t out_strideM = out.stride(0);
 
   // TODO: seems the current code already supports it?
 //   TORCH_CHECK(N % block_size_N == 0, "unsupported block_size_N");
@@ -351,6 +352,8 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, at::Tensor& sca
         M,
         N,
         K,
+        mat1_strideM,
+        out_strideM,
         block_size_N,
         block_size_K);
   });
