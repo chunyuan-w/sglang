@@ -80,7 +80,7 @@ template <typename scalar_t, typename packed_t, bool has_bias, int BLOCK_M, int 
 struct tinygemm_kernel_nn {
   static inline void apply(
       const scalar_t* __restrict__ A, const packed_t* __restrict__ B, scalar_t* __restrict__ C,
-      const float* __restrict__ bias, const float* __restrict__ scale, int K, int lda, int ldb, int ldc, int64_t blocks_k_per_group) {
+      const float* __restrict__ bias, const float* __restrict__ scale, int K, int lda, int ldb, int ldc, int64_t blocks_k_per_group, int64_t block_size_K) {
     TORCH_CHECK(false, "tinygemm_kernel_nn: scalar path not implemented!");
   }
 };
@@ -90,7 +90,7 @@ template <bool has_bias, int BLOCK_M, int BLOCK_N>
 struct tinygemm_kernel_nn<at::BFloat16, at::BFloat16, has_bias, BLOCK_M, BLOCK_N> {
   static inline void apply(
       const at::BFloat16* __restrict__ A, const at::BFloat16* __restrict__ B, at::BFloat16* __restrict__ C,
-      const float* __restrict__ bias, const float* __restrict__ scale, int K, int lda, int ldb, int ldc, int64_t blocks_k_per_group) {
+      const float* __restrict__ bias, const float* __restrict__ scale, int K, int lda, int ldb, int ldc, int64_t blocks_k_per_group, int64_t block_size_K) {
 
     constexpr int ROWS = BLOCK_M;
     constexpr int COLS = BLOCK_N / 16;
@@ -162,7 +162,7 @@ template <bool has_bias, int BLOCK_M, int BLOCK_N>
 struct tinygemm_kernel_nn<at::BFloat16, at::Float8_e4m3fn, has_bias, BLOCK_M, BLOCK_N> {
   static inline void apply(
       const at::BFloat16* __restrict__ A, const at::Float8_e4m3fn* __restrict__ B, at::BFloat16* __restrict__ C,
-      const float* __restrict__ bias, const float* __restrict__ scale, int K, int lda, int ldb, int ldc, int64_t blocks_k_per_group) {
+      const float* __restrict__ bias, const float* __restrict__ scale, int K, int lda, int ldb, int ldc, int64_t blocks_k_per_group, int64_t block_size_K) {
 
     constexpr int ROWS = BLOCK_M;
     constexpr int COLS = BLOCK_N / 16;
@@ -202,9 +202,12 @@ struct tinygemm_kernel_nn<at::BFloat16, at::Float8_e4m3fn, has_bias, BLOCK_M, BL
       constexpr int col = i % COLS;
 
       // TODO: fix idx here
-      int idx = (k / BLOCK_K) / blocks_k_per_group;
-      std::cout << "idx: " << idx << " k: " << k << " K:" << K << " scale:" << scale[idx] << "\n";
+      // TODO: which is our asumption of scale block size for non-brg path? Add more checks
+      int idx = k * 2 / block_size_K;
       const __m512 vd = _mm512_set1_ps(scale[idx]);
+
+      // std::cout << "idx: " << idx << " k: " << k << " K:" << K << " scale:" << scale[idx] << "\n";
+
 
       if constexpr (col == 0) {
         va = (__m512bh)(_mm512_set1_ps(a_ptr[row * lda2 + k]));
@@ -261,7 +264,7 @@ struct tinygemm_kernel_nn<at::BFloat16, at::Float8_e4m3fn, has_bias, BLOCK_M, BL
 #define LAUNCH_TINYGEMM_KERNEL_NN(MB_SIZE, NB_SIZE)                          \
     tinygemm_kernel_nn<scalar_t, packed_t, has_bias, MB_SIZE, NB_SIZE>::apply(         \
         A + mb_start * lda, B + nb_start * 2, C + mb_start * ldc + nb_start, \
-        has_bias ? bias + nb_start : nullptr, scale, K, lda, ldb, ldc, blocks_k_per_group);
+        has_bias ? bias + nb_start : nullptr, scale, K, lda, ldb, ldc, blocks_k_per_group, block_size_K);
 
 template <typename scalar_t, typename packed_t, bool has_bias>
 struct brgemm {};
@@ -363,7 +366,8 @@ void tinygemm_kernel(
     int64_t ldb,
     int64_t ldc,
     bool brg,
-    int64_t blocks_k_per_group) {
+    int64_t blocks_k_per_group,
+    int64_t block_size_K) {
 
   if (brg) {
     brgemm<scalar_t, packed_t, has_bias>::apply(
@@ -476,7 +480,8 @@ void fp8_scaled_mm_kernel_impl(
             /* ldb */ nb_size,
             /* ldc */ N,
             /* brg */ use_brgemm,
-            /* blocks_k_per_group */ blocks_k_per_group);
+            /* blocks_k_per_group */ blocks_k_per_group,
+            /* block_size_K */ block_size_K);
 
         // move to the next index
         data_index_step(mb, MB, nb, NB);
