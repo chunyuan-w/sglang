@@ -56,26 +56,18 @@ inline void unpack_B(
   const uint8_t* b_ptr = reinterpret_cast<const uint8_t*>(packed_B);
   const __m512 vd = _mm512_set1_ps(scale);
 
-//   std::cout << "scale in unpack_B:" << scale << ": done\n";
-    
-
   for (int k = 0; k < K2; ++k) {
     for (int n = 0; n < N * 2; n += 32) {
-        // Load 32 bytes of FP8
+        // Convert FP8 to BF16
+        // TODO: should we add an API to convert to FP32 here for better perf?
         __m256i v_fp8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b_ptr + k * ldb2 * 2 + n));
-        
-        // Convert to 32 BF16 values
         __m512bh v_bf16 = cvt_e4m3_bf16_intrinsic_without_denorm(v_fp8);
 
         // Apply scale
-        // TODO: optimize it
         __m512 va0 = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32((__m512i)v_bf16, 0));
         __m512 va1 = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32((__m512i)v_bf16, 1));
-
         va0 = _mm512_mul_ps(va0, vd);
         va1 = _mm512_mul_ps(va1, vd);
-
-        // Convert back to BF16 (16-bit format)
         v_bf16 = _mm512_cvtne2ps_pbh(va1, va0);
 
         // Store to Btmp (no need for bit manipulation now)
@@ -103,7 +95,7 @@ struct brgemm<scalar_t, scalar_t, has_bias> {
       int lda,
       int ldb,
       int ldc,
-      int block_size_K) {
+      int64_t blocks_k_per_group) {
     UNUSED(scales2);
 
     constexpr int BLOCK_N = block_size_n();
@@ -137,11 +129,7 @@ struct brgemm<at::BFloat16, at::Float8_e4m3fn, has_bias> {
       int lda,
       int ldb,
       int ldc,
-      int block_size_K) {
-    
-    // printf("my in apply\n");
-    // std::cout << "has_bias:" << has_bias << "\n";
-
+      int64_t blocks_k_per_group) {
     constexpr int BLOCK_N = block_size_n();
 
     // [BLOCK_K, BLOCK_N] -> [BLOCK_K / 2, BLOCK_N * 2]
@@ -151,33 +139,24 @@ struct brgemm<at::BFloat16, at::Float8_e4m3fn, has_bias> {
     for (int k = 0; k < K; k += BLOCK_K) {
       int kb_size = std::min(BLOCK_K, K - k);
       
-      
       // TODO: check the index compute here
-      int idx = (k / BLOCK_K) / (block_size_K / BLOCK_K);
+      int idx = (k / BLOCK_K) / blocks_k_per_group;
     //   std::cout << "scale idx before unpack_B: " << idx << " k:" << k << " block_size_K:" << block_size_K << " BLOCK_K:" << BLOCK_K << "\n";
       unpack_B(Btmp, B + k * ldb, N, kb_size, ldb, ldb_tmp, scales2[idx]);
-
-      // TODO: mul scales here on Btmp?
 
       const bool add_C = (k != 0);
       at::native::cpublas::brgemm(
           M, N, kb_size, lda, ldb_tmp, BLOCK_N, add_C, A + k, Btmp, Ctmp);
     }
 
-    // copy from Ctmp to C and mul scale
-    // TODO: scales is a ptr now instead of a scalar
+    // copy from Ctmp to C
     for (int m = 0; m < M; ++m) {
       if constexpr (has_bias) {
-        // change to copy_add_stub after mul scales on Btmp?
         copy_add_stub(C + m * ldc, Ctmp + m * BLOCK_N, bias, N);
       } else {
-        // change to copy_stub after mul scales on Btmp?
         copy_stub(C + m * ldc, Ctmp + m * BLOCK_N, N);
       }      
     }
-
-    // std::cout << "C: " << C[0] << "\n";
-
   }
 };
 
@@ -197,11 +176,11 @@ void tinygemm_kernel(
     int64_t ldb,
     int64_t ldc,
     bool brg,
-    int block_size_K) {
+    int64_t blocks_k_per_group) {
 
   if (brg) {
     brgemm<scalar_t, packed_t, has_bias>::apply(
-        A, B, C, Btmp, Ctmp, bias, scales2, M, N, K, lda, ldb, ldc, block_size_K);
+        A, B, C, Btmp, Ctmp, bias, scales2, M, N, K, lda, ldb, ldc, blocks_k_per_group);
     return;
   }
 
@@ -232,9 +211,12 @@ void fp8_scaled_mm_kernel_impl(
     // std::cout << "BLOCK_N: " << BLOCK_N << " N: " << N << "\n";
     // std::cout << "MB: " << MB << " NB: " << NB << "\n";
 
-
+  // TODO: should we use div_up?
   const int64_t scale_size_N = div_up(N, block_size_N);
   const int64_t scale_size_K = div_up(K, block_size_K);
+
+  const int64_t blocks_n_per_group = block_size_N / BLOCK_N;
+  const int64_t blocks_k_per_group = block_size_K / BLOCK_K;
 
   // use avx512-bf16 when a) M is small; b) dtype is bfloat16, otherwise use amx
   // TODO: support use_brgemm = false;
@@ -252,11 +234,10 @@ void fp8_scaled_mm_kernel_impl(
       // for brgemm when mat2 is float8_e4m3
       alignas(64) scalar_t Btmp[BLOCK_N * BLOCK_K];
       
-
       for (int64_t i = begin; i < end; ++i) {
         UNUSED(i);
         // TODO: check the index compute here
-        const float* scale_ptr = scales2 + nb / (block_size_N / BLOCK_N) * scale_size_K;
+        const float* scale_ptr = scales2 + (nb / blocks_n_per_group) * scale_size_K;
         // std::cout << "nb: " << nb << " block_size_N: " << block_size_N << " scale_size_K:" << scale_size_K << "\n";
         
         // printf("scale ptr idx: %d\n", nb / (block_size_N / BLOCK_N) * scale_size_K);
@@ -273,7 +254,6 @@ void fp8_scaled_mm_kernel_impl(
             /* Btmp*/ Btmp,
             /* Ctmp*/ Ctmp,
             /*scale*/ scale_ptr,
-            // /*scale*/ scales2,
             /* bias*/ bias + nb_start,
             /*   M */ mb_size,
             /*   N */ nb_size,
@@ -282,7 +262,7 @@ void fp8_scaled_mm_kernel_impl(
             /* ldb */ nb_size,
             /* ldc */ N,
             /* brg */ use_brgemm,
-            /* block_size_K */ block_size_K);
+            /* blocks_k_per_group */ blocks_k_per_group);
 
         // move to the next index
         data_index_step(mb, MB, nb, NB);
@@ -311,12 +291,9 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, at::Tensor& sca
   TORCH_CHECK(scales2.scalar_type() == at::kFloat,
       "fp8_scaled_mm_cpu: expect scales2 to be float32.");
   
-  // std::cout << "my in fp8 gemm:" << scales2 << "\n";
-
   int64_t M = mat1.size(0);
   int64_t N = mat2.size(0);
   int64_t K = mat2.size(1);
-  
   
   CHECK_EQ(mat1.size(1), K);
   CHECK_DIM(2, mat1);
@@ -331,12 +308,19 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, at::Tensor& sca
 
   constexpr int64_t BLOCK_N = block_size_n();
   TORCH_CHECK(block_size_N >= BLOCK_N, "expect block_size_N >= BLOCK_N");
-  
-//   std::cout << "block_size_K:" << block_size_K << "BLOCK_K:" << BLOCK_K << "\n";
   TORCH_CHECK(block_size_K >= BLOCK_K, "expect block_size_K >= BLOCK_K");
+  // TODO: check numel of scales
+  // CHECK_EQ(scales2.numel(), N);
 
-  TORCH_CHECK(mat1.scalar_type() == out_dtype,
-      "fp8_scaled_mm_cpu: expect A has same dtype with out_dtype.");  
+  const auto st = mat1.scalar_type();
+  TORCH_CHECK(st == at::kBFloat16 || st == at::kHalf,
+      "fp8_scaled_mm_cpu: expect A to be bfloat16 or half.");
+  TORCH_CHECK(st == out_dtype,
+      "fp8_scaled_mm_cpu: expect A has same dtype with out_dtype.");
+  TORCH_CHECK(mat2.scalar_type() == at::kFloat8_e4m3fn,
+      "fp8_scaled_mm_cpu: expect mat2 to be fp8_e4m3.");
+  TORCH_CHECK(scales2.scalar_type() == at::kFloat,
+      "fp8_scaled_mm_cpu: expect scales to be float32.");
   auto out = at::empty({M, N}, mat1.options().dtype(out_dtype));
   
   // TODO: do we need to support strides?
@@ -350,7 +334,6 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, at::Tensor& sca
 
   const bool has_bias = bias.has_value();
   const float* bias_data = nullptr;
-  
   if (has_bias) {
     CHECK_EQ(bias.value().size(0), N);
     bias_data = bias.value().data_ptr<float>();
