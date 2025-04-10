@@ -76,21 +76,21 @@ inline void unpack_B(
   }
 }
 
-template <typename scalar_t, typename packed_t, int BLOCK_M, int BLOCK_N>
+template <typename scalar_t, typename packed_t, bool has_bias, int BLOCK_M, int BLOCK_N>
 struct tinygemm_kernel_nn {
   static inline void apply(
       const scalar_t* __restrict__ A, const packed_t* __restrict__ B, scalar_t* __restrict__ C,
-      const float* __restrict__ scale, int K, int lda, int ldb, int ldc) {
+      const float* __restrict__ bias, const float* __restrict__ scale, int K, int lda, int ldb, int ldc, int64_t blocks_k_per_group) {
     TORCH_CHECK(false, "tinygemm_kernel_nn: scalar path not implemented!");
   }
 };
 
 #if defined(CPU_CAPABILITY_AVX512)
-template <int BLOCK_M, int BLOCK_N>
-struct tinygemm_kernel_nn<at::BFloat16, at::BFloat16, BLOCK_M, BLOCK_N> {
+template <bool has_bias, int BLOCK_M, int BLOCK_N>
+struct tinygemm_kernel_nn<at::BFloat16, at::BFloat16, has_bias, BLOCK_M, BLOCK_N> {
   static inline void apply(
       const at::BFloat16* __restrict__ A, const at::BFloat16* __restrict__ B, at::BFloat16* __restrict__ C,
-      const float* __restrict__ scale, int K, int lda, int ldb, int ldc) {
+      const float* __restrict__ bias, const float* __restrict__ scale, int K, int lda, int ldb, int ldc, int64_t blocks_k_per_group) {
 
     constexpr int ROWS = BLOCK_M;
     constexpr int COLS = BLOCK_N / 16;
@@ -103,7 +103,12 @@ struct tinygemm_kernel_nn<at::BFloat16, at::BFloat16, BLOCK_M, BLOCK_N> {
     __m512 vc[ROWS * COLS];
 
     auto loadc = [&](auto i) {
-      vc[i] = _mm512_set1_ps(0.f);
+      constexpr int col = i % COLS;
+      if constexpr (has_bias) {
+        vc[i] = _mm512_loadu_ps(bias + col * 16);
+      } else {
+        vc[i] = _mm512_set1_ps(0.f);
+      }
     };
     Unroll<ROWS * COLS>{}(loadc);
 
@@ -153,31 +158,11 @@ struct tinygemm_kernel_nn<at::BFloat16, at::BFloat16, BLOCK_M, BLOCK_N> {
   }
 };
 
-void print_16x16(const __m256i x) {
-  at::BFloat16 a[16];
-  _mm256_storeu_si256((__m256i *)a, x);
-
-  for (int i = 0; i < 16; i++){
-    std::cout << a[i] << " ";
-  }
-  std::cout << std::endl;
-}
-
-void print_32x16(const __m512i x) {
-  at::BFloat16 a[32];
-  _mm512_storeu_si512((__m512i *)a, x);
-
-  for (int i = 0; i < 32; i++){
-    std::cout << a[i] << " ";
-  }
-  std::cout << std::endl;
-}
-
-template <int BLOCK_M, int BLOCK_N>
-struct tinygemm_kernel_nn<at::BFloat16, at::Float8_e4m3fn, BLOCK_M, BLOCK_N> {
+template <bool has_bias, int BLOCK_M, int BLOCK_N>
+struct tinygemm_kernel_nn<at::BFloat16, at::Float8_e4m3fn, has_bias, BLOCK_M, BLOCK_N> {
   static inline void apply(
       const at::BFloat16* __restrict__ A, const at::Float8_e4m3fn* __restrict__ B, at::BFloat16* __restrict__ C,
-      const float* __restrict__ scale, int K, int lda, int ldb, int ldc) {
+      const float* __restrict__ bias, const float* __restrict__ scale, int K, int lda, int ldb, int ldc, int64_t blocks_k_per_group) {
 
     constexpr int ROWS = BLOCK_M;
     constexpr int COLS = BLOCK_N / 16;
@@ -189,50 +174,64 @@ struct tinygemm_kernel_nn<at::BFloat16, at::Float8_e4m3fn, BLOCK_M, BLOCK_N> {
     __m512bh vb[COLS];
     __m512 vc[ROWS * COLS];
 
-    
-    const __m512 vscale = _mm512_set1_ps(scale);
-    const __m512i mask = _mm512_set1_epi32(0xFFFF);
-
     auto loadc = [&](auto i) {
-      vc[i] = _mm512_set1_ps(0.f);
+      constexpr int col = i % COLS;
+      if constexpr (has_bias) {
+        vc[i] = _mm512_loadu_ps(bias + col * 16);
+      } else {
+        vc[i] = _mm512_set1_ps(0.f);
+      }
     };
     Unroll<ROWS * COLS>{}(loadc);
 
     const int K2 = K >> 1;
     const int lda2 = lda >> 1;
     const int ldb2 = ldb; // ldb * 2 >> 1;
+    
+    
+    std::cout << "lda: " << lda << " lda2: " << lda2 << " ldb:" << ldb << " BLOCK_N: " << BLOCK_N << "\n";
+    
     const float* a_ptr = reinterpret_cast<const float*>(A);
-    const uint16_t* b_ptr = reinterpret_cast<const uint16_t*>(B);
+    
+    // TODO: use uint16_t??
+    // const uint16_t* b_ptr = reinterpret_cast<const uint16_t*>(B);
+    const uint8_t* b_ptr = reinterpret_cast<const uint8_t*>(B);
 
     auto compute = [&](auto i, int k) {
       constexpr int row = i / COLS;
       constexpr int col = i % COLS;
 
+      // TODO: fix idx here
+      int idx = (k / BLOCK_K) / blocks_k_per_group;
+      std::cout << "idx: " << idx << " k: " << k << " K:" << K << " scale:" << scale[idx] << "\n";
+      const __m512 vd = _mm512_set1_ps(scale[idx]);
+
       if constexpr (col == 0) {
         va = (__m512bh)(_mm512_set1_ps(a_ptr[row * lda2 + k]));
       }
       if constexpr (row == 0) {
-        if constexpr (col % 2 == 0) {
-          __m512i b8 = _mm512_loadu_si512(b_ptr + k * ldb2 + col * 16);
-          if constexpr (PREFETCH_SIZE_K > 0) {
-            _mm_prefetch(b_ptr + (k + PREFETCH_SIZE_K) * ldb2 + col * 16, _MM_HINT_T0);
-          }
-          __m512i idx0 = _mm512_cvtepu8_epi32(   _mm512_castsi512_si128(b8));
-          __m512i idx1 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(b8, 1));
-          __m512i idx2 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(b8, 2));
-          __m512i idx3 = _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(b8, 3));
+        __m256i v_fp8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b_ptr + k * ldb2 * 2 + col * 16 * 2));
+        
+        // TODO: check the prefetch here
+        if constexpr (PREFETCH_SIZE_K > 0) {
+          _mm_prefetch(b_ptr + (k + PREFETCH_SIZE_K) * ldb2 * 2 + col * 16 * 2, _MM_HINT_T0);
+        }        
+        
+        vb[col] = cvt_e4m3_bf16_intrinsic_without_denorm(v_fp8);
 
-          __m512i b16_0 = _mm512_i32gather_epi32(idx0, e4m3_to_16bit, 2);
-          __m512i b16_1 = _mm512_i32gather_epi32(idx1, e4m3_to_16bit, 2);
-          __m512i b16_2 = _mm512_i32gather_epi32(idx2, e4m3_to_16bit, 2);
-          __m512i b16_3 = _mm512_i32gather_epi32(idx3, e4m3_to_16bit, 2);
-
-          vb[col + 0] = (__m512bh)(_mm512_or_epi32(_mm512_slli_epi32(b16_2, 16), _mm512_and_epi32(b16_0, mask)));
-          vb[col + 1] = (__m512bh)(_mm512_or_epi32(_mm512_slli_epi32(b16_3, 16), _mm512_and_epi32(b16_1, mask)));
-        }
+        // Apply scale
+        __m512 va0 = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32((__m512i)vb[col], 0));
+        __m512 va1 = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32((__m512i)vb[col], 1));
+        va0 = _mm512_mul_ps(va0, vd);
+        va1 = _mm512_mul_ps(va1, vd);
+        vb[col] = _mm512_cvtne2ps_pbh(va1, va0);
       }
       vc[i] = _mm512_dpbf16_ps(vc[i], va, vb[col]);
     };
+    
+    
+    std::cout << "K: " << K << " K2:" << K2 << "\n";
+  
     for (int k = 0; k < K2; ++k) {
       Unroll<ROWS * COLS>{}(compute, k);
     }
@@ -241,12 +240,17 @@ struct tinygemm_kernel_nn<at::BFloat16, at::Float8_e4m3fn, BLOCK_M, BLOCK_N> {
       constexpr int row = i / COLS;
       constexpr int col = i % COLS;
       // for COLS = 2, 4 use 512bit store
-      if constexpr (col % 2 == 0) {
-        __m512 vc0 = _mm512_mul_ps(vc[row * COLS + col + 0], vscale);
-        __m512 vc1 = _mm512_mul_ps(vc[row * COLS + col + 1], vscale);
-        _mm512_storeu_si512(
-            reinterpret_cast<__m512i*>((C + row * ldc + col * 16)),
-            (__m512i)(_mm512_cvtne2ps_pbh(vc1, vc0)));
+      // for COLS = 1, 3 use 256bit store
+      if constexpr (COLS % 2 == 0) {
+        if constexpr (col % 2 == 0) {
+          _mm512_storeu_si512(
+              reinterpret_cast<__m512i*>((C + row * ldc + col * 16)),
+              (__m512i)(_mm512_cvtne2ps_pbh(vc[row * COLS + col + 1], vc[row * COLS + col])));
+        }
+      } else {
+        _mm256_storeu_si256(
+            reinterpret_cast<__m256i*>(C + row * ldc + col * 16),
+            (__m256i)(_mm512_cvtneps_pbh(vc[i])));
       }
     };
     Unroll<ROWS * COLS>{}(storec);
@@ -255,9 +259,9 @@ struct tinygemm_kernel_nn<at::BFloat16, at::Float8_e4m3fn, BLOCK_M, BLOCK_N> {
 #endif
 
 #define LAUNCH_TINYGEMM_KERNEL_NN(MB_SIZE, NB_SIZE)                          \
-    tinygemm_kernel_nn<scalar_t, packed_t, MB_SIZE, NB_SIZE>::apply(         \
+    tinygemm_kernel_nn<scalar_t, packed_t, has_bias, MB_SIZE, NB_SIZE>::apply(         \
         A + mb_start * lda, B + nb_start * 2, C + mb_start * ldc + nb_start, \
-        scale, K, lda, ldb, ldc);
+        has_bias ? bias + nb_start : nullptr, scale, K, lda, ldb, ldc, blocks_k_per_group);
 
 template <typename scalar_t, typename packed_t, bool has_bias>
 struct brgemm {};
@@ -271,7 +275,7 @@ struct brgemm<scalar_t, scalar_t, has_bias> {
       scalar_t* __restrict__ Btmp,
       float* __restrict__ Ctmp,
       const float* __restrict__ bias,
-      const float* __restrict__ scales2,
+      const float* __restrict__ scale,
       int M,
       int N,
       int K,
@@ -279,7 +283,7 @@ struct brgemm<scalar_t, scalar_t, has_bias> {
       int ldb,
       int ldc,
       int64_t blocks_k_per_group) {
-    UNUSED(scales2);
+    UNUSED(scale);
 
     constexpr int BLOCK_N = block_size_n();
     at::native::cpublas::brgemm(
@@ -305,7 +309,7 @@ struct brgemm<at::BFloat16, at::Float8_e4m3fn, has_bias> {
       at::BFloat16* __restrict__ Btmp,
       float* __restrict__ Ctmp,
       const float* __restrict__ bias,
-      const float* __restrict__ scales2,
+      const float* __restrict__ scale,
       int M,
       int N,
       int K,
@@ -325,7 +329,7 @@ struct brgemm<at::BFloat16, at::Float8_e4m3fn, has_bias> {
       // TODO: check the index compute here
       int idx = (k / BLOCK_K) / blocks_k_per_group;
     //   std::cout << "scale idx before unpack_B: " << idx << " k:" << k << " block_size_K:" << block_size_K << " BLOCK_K:" << BLOCK_K << "\n";
-      unpack_B(Btmp, B + k * ldb, N, kb_size, ldb, ldb_tmp, scales2[idx]);
+      unpack_B(Btmp, B + k * ldb, N, kb_size, ldb, ldb_tmp, scale[idx]);
 
       const bool add_C = (k != 0);
       at::native::cpublas::brgemm(
