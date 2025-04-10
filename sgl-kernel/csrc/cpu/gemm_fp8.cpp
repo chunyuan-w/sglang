@@ -149,9 +149,7 @@ struct brgemm<at::BFloat16, at::Float8_e4m3fn, has_bias> {
     for (int k = 0; k < K; k += BLOCK_K) {
       int kb_size = std::min(BLOCK_K, K - k);
 
-      // TODO: check the index compute here
       int idx = (k / BLOCK_K) / blocks_k_per_group;
-    //   std::cout << "scale idx before unpack_B: " << idx << " k:" << k << " block_size_K:" << block_size_K << " BLOCK_K:" << BLOCK_K << "\n";
       unpack_B(Btmp, B + k * ldb, N, kb_size, ldb, ldb_tmp, scale[idx]);
 
       const bool add_C = (k != 0);
@@ -243,7 +241,6 @@ void fp8_scaled_mm_kernel_impl(
 
       for (int64_t i = begin; i < end; ++i) {
         UNUSED(i);
-        // TODO: check the index compute here
         const float* scale_ptr = scales2 + (nb / blocks_n_per_group) * scale_size_K;
 
         int64_t mb_start = mb * BLOCK_M;
@@ -311,10 +308,10 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, at::Tensor& sca
   int64_t block_size_K = block_size[1];
 
   constexpr int64_t BLOCK_N = block_size_n();
-  TORCH_CHECK(block_size_N >= BLOCK_N, "expect block_size_N >= BLOCK_N");
-  TORCH_CHECK(block_size_K >= BLOCK_K, "expect block_size_K >= BLOCK_K");
-  // TODO: check numel of scales
-  // CHECK_EQ(scales2.numel(), N);
+  TORCH_CHECK(block_size_N >= BLOCK_N, "fp8_scaled_mm_cpu: expect block_size_N >= BLOCK_N");
+  TORCH_CHECK(block_size_K >= BLOCK_K, "fp8_scaled_mm_cpu: expect block_size_K >= BLOCK_K");
+  CHECK_EQ(scales2.size(0), div_up(N, block_size_N));
+  CHECK_EQ(scales2.size(1), div_up(K, block_size_K));
 
   const auto st = mat1.scalar_type();
   TORCH_CHECK(st == at::kBFloat16 || st == at::kHalf,
