@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ATen/native/CPUBlas.h>
+
 #include "common.h"
 
 // amx-bf16
@@ -31,6 +32,12 @@ inline bool can_use_brgemm<at::Half>(int M) {
 template <>
 inline bool can_use_brgemm<int8_t>(int M) {
   return false;
+}
+
+// TODO: add brgemm=false support for fp8
+template <>
+inline bool can_use_brgemm<at::Float8_e4m3fn>(int M) {
+  return true;
 }
 
 // work around compiler internal error
