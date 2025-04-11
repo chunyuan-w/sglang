@@ -629,6 +629,9 @@ class DeepseekV2AttentionMLA(nn.Module):
         )
 
         self.qkv_proj_with_rope_is_int8 = None
+        # TODO: this is not working since we still need to support bmm_fp8 after this change
+        # Use --attention-backend torch_native --disable-mla for now
+        self.qkv_proj_with_rope_is_fp8 = None
         if self.q_lora_rank is not None:
             if self.q_a_proj.weight.dtype == torch.int8:
                 assert (
@@ -637,6 +640,13 @@ class DeepseekV2AttentionMLA(nn.Module):
                     == self.kv_a_proj_with_mqa.weight.dtype
                 )
                 self.qkv_proj_with_rope_is_int8 = True
+            if self.q_a_proj.weight.dtype == torch.float8_e4m3fn:
+                assert (
+                    self.q_a_proj.weight.dtype
+                    == self.q_b_proj.weight.dtype
+                    == self.kv_a_proj_with_mqa.weight.dtype
+                )
+                self.qkv_proj_with_rope_is_fp8 = True                
 
         params = MParams()
         params.q_lora_rank = self.q_lora_rank
@@ -692,7 +702,7 @@ class DeepseekV2AttentionMLA(nn.Module):
                 else:
                     return self.forward_absorb(positions, hidden_states, forward_batch)
             else:
-                if self.q_lora_rank is not None and self.use_intel_amx_backend:
+                if self.q_lora_rank is not None and self.use_intel_amx_backend and not self.qkv_proj_with_rope_is_fp8:
                     return self.forward_absorb_fused_mla_rope_cpu(
                         positions, hidden_states, forward_batch
                     )
