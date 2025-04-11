@@ -260,6 +260,20 @@ def int8_scaled_mm(
     )
 
 
+def fp8_scaled_mm(
+    mat1,
+    mat2,
+    scales2,
+    block_size,
+    bias,
+    out_dtype,
+    is_vnni=True,
+):
+    return sgl_kernel.common_ops.fp8_scaled_mm_cpu(
+        mat1, mat2, scales2, block_size, bias, out_dtype, is_vnni
+    )
+
+
 def int8_scaled_mm_with_quant(
     mat1,
     mat2,
