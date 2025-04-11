@@ -239,7 +239,8 @@ class DeepseekV2MoE(nn.Module):
         has_shared_experts = self.n_shared_experts is not None
 
         assert use_intel_amx_backend == down_proj.use_intel_amx_backend
-        if has_shared_experts and use_intel_amx_backend:
+        # if has_shared_experts and use_intel_amx_backend:
+        if False:
             # [Note] inplace should be False in fused_experts.
             # If inplace is True in fused_experts (self.experts), hidden_states will be changed after fused_experts
             # While hidden_states is still needed in shared_expert.
