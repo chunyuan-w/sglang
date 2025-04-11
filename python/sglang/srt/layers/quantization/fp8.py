@@ -28,6 +28,7 @@ from sglang.srt.layers.linear import (
     LinearMethodBase,
     UnquantizedLinearMethod,
 )
+from sglang.srt.layers.moe.fused_moe_native import moe_forward_native
 from sglang.srt.layers.parameter import (
     BlockQuantScaleParameter,
     ModelWeightParameter,
@@ -889,6 +890,24 @@ class Fp8MoEMethod:
         from sglang.srt.layers.moe.topk import select_experts
 
         # Expert selection
+        return moe_forward_native(
+            layer,
+            x,
+            use_grouped_topk,
+            top_k,
+            router_logits,
+            renormalize,
+            topk_group,
+            num_expert_group,
+            custom_routing_function,
+            correction_bias,
+            activation,
+            inplace,
+            no_combine,
+            self.quant_config.weight_block_size,
+        )
+
+        
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
