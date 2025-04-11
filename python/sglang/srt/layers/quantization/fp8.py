@@ -175,9 +175,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
-        # TODO: temporarily set cutlass_fp8_supported directly to False here
-        # self.cutlass_fp8_supported = cutlass_fp8_supported()
-        self.cutlass_fp8_supported = False
+        self.cutlass_fp8_supported = cutlass_fp8_supported()
 
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
@@ -293,8 +291,12 @@ class Fp8LinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: Module) -> None:
         # TODO: add prepack
-        _process_weight_after_loading(layer, ["weight"])
-        return
+        if layer.weight.device.type == "cpu":
+            assert (
+                cpu_has_amx_support()
+            ), "Fp8LinearMethod on CPU requires that CPU has AMX support"            
+            _process_weight_after_loading(layer, ["weight"])
+            return
         
         # Block quant doesn't need to process weights after loading
         if self.block_quant:
@@ -406,20 +408,19 @@ class Fp8LinearMethod(LinearMethodBase):
             )
 
         if self.block_quant:
-
-            # TODO: check layer.weight is N, K or K, N
-            return sgl_kernel.cpu.fp8_scaled_mm(
-                x, layer.weight, layer.weight_scale_inv, self.quant_config.weight_block_size, bias, x.dtype, is_vnni=True
-            )
+            if layer.use_intel_amx_backend:
+                return sgl_kernel.cpu.fp8_scaled_mm(
+                    x, layer.weight, layer.weight_scale_inv, self.quant_config.weight_block_size, bias, x.dtype
+                )
             
-            # return apply_w8a8_block_fp8_linear(
-            #     input=x,
-            #     weight=layer.weight,
-            #     block_size=self.quant_config.weight_block_size,
-            #     weight_scale=layer.weight_scale_inv,
-            #     input_scale=None,
-            #     bias=bias,
-            # )
+            return apply_w8a8_block_fp8_linear(
+                input=x,
+                weight=layer.weight,
+                block_size=self.quant_config.weight_block_size,
+                weight_scale=layer.weight_scale_inv,
+                input_scale=None,
+                bias=bias,
+            )
 
         return apply_fp8_linear(
             input=x,
