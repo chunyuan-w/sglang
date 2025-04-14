@@ -187,10 +187,6 @@ struct tinygemm_kernel_nn<at::BFloat16, at::Float8_e4m3fn, has_bias, BLOCK_M, BL
     __m512bh vb[COLS];
     __m512 vc[ROWS * COLS];
 
-    
-    const __m512 vscale = _mm512_set1_ps(scale);
-    const __m512i mask = _mm512_set1_epi32(0xFFFF);
-
     auto loadc = [&](auto i) {
       constexpr int col = i % COLS;
       if constexpr (has_bias) {
@@ -264,7 +260,7 @@ struct tinygemm_kernel_nn<at::BFloat16, at::Float8_e4m3fn, has_bias, BLOCK_M, BL
 #endif
 
 #define LAUNCH_TINYGEMM_KERNEL_NN(MB_SIZE, NB_SIZE)                          \
-    tinygemm_kernel_nn<scalar_t, packed_t, has_bias, MB_SIZE, NB_SIZE>::apply(         \
+    tinygemm_kernel_nn<scalar_t, at::Float8_e4m3fn, has_bias, MB_SIZE, NB_SIZE>::apply(         \
         A + mb_start * lda, B + nb_start * 2, C + mb_start * ldc + nb_start, \
         has_bias ? bias + nb_start : nullptr, scale, K, lda, ldb, ldc, block_size_K);
 
