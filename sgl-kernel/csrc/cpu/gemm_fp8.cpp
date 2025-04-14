@@ -216,12 +216,12 @@ struct tinygemm_kernel_nn<at::BFloat16, at::Float8_e4m3fn, has_bias, BLOCK_M, BL
       }
       if constexpr (row == 0) {
         __m256i v_fp8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b_ptr + k * ldb2 * 2 + col * 16 * 2));
-        
+
         // TODO: check the prefetch here
         if constexpr (PREFETCH_SIZE_K > 0) {
           _mm_prefetch(b_ptr + (k + PREFETCH_SIZE_K) * ldb2 * 2 + col * 16 * 2, _MM_HINT_T0);
-        }        
-        
+        }
+
         vb[col] = cvt_e4m3_bf16_intrinsic_without_denorm(v_fp8);
 
         // Apply scale
