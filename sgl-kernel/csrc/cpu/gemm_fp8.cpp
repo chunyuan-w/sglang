@@ -93,7 +93,7 @@ template <typename scalar_t, typename packed_t, bool has_bias, int BLOCK_M, int 
 struct tinygemm_kernel_nn {
   static inline void apply(
       const scalar_t* __restrict__ A, const packed_t* __restrict__ B, scalar_t* __restrict__ C,
-      const float* __restrict__ bias, const float* __restrict__ scale, int K, int lda, int ldb, int ldc, int64_t blocks_k_per_group, int64_t block_size_K) {
+      const float* __restrict__ bias, const float* __restrict__ scale, int K, int lda, int ldb, int ldc, int64_t block_size_K) {
     TORCH_CHECK(false, "tinygemm_kernel_nn: scalar path not implemented!");
   }
 };
@@ -103,7 +103,7 @@ template <bool has_bias, int BLOCK_M, int BLOCK_N>
 struct tinygemm_kernel_nn<at::BFloat16, at::BFloat16, has_bias, BLOCK_M, BLOCK_N> {
   static inline void apply(
       const at::BFloat16* __restrict__ A, const at::BFloat16* __restrict__ B, at::BFloat16* __restrict__ C,
-      const float* __restrict__ bias, const float* __restrict__ scale, int K, int lda, int ldb, int ldc, int64_t blocks_k_per_group, int64_t block_size_K) {
+      const float* __restrict__ bias, const float* __restrict__ scale, int K, int lda, int ldb, int ldc, int64_t block_size_K) {
 
     constexpr int ROWS = BLOCK_M;
     constexpr int COLS = BLOCK_N / 16;
@@ -175,7 +175,7 @@ template <bool has_bias, int BLOCK_M, int BLOCK_N>
 struct tinygemm_kernel_nn<at::BFloat16, at::Float8_e4m3fn, has_bias, BLOCK_M, BLOCK_N> {
   static inline void apply(
       const at::BFloat16* __restrict__ A, const at::Float8_e4m3fn* __restrict__ B, at::BFloat16* __restrict__ C,
-      const float* __restrict__ bias, const float* __restrict__ scale, int K, int lda, int ldb, int ldc, int64_t blocks_k_per_group, int64_t block_size_K) {
+      const float* __restrict__ bias, const float* __restrict__ scale, int K, int lda, int ldb, int ldc, int64_t block_size_K) {
 
     constexpr int ROWS = BLOCK_M;
     constexpr int COLS = BLOCK_N / 16;
@@ -266,7 +266,7 @@ struct tinygemm_kernel_nn<at::BFloat16, at::Float8_e4m3fn, has_bias, BLOCK_M, BL
 #define LAUNCH_TINYGEMM_KERNEL_NN(MB_SIZE, NB_SIZE)                          \
     tinygemm_kernel_nn<scalar_t, packed_t, has_bias, MB_SIZE, NB_SIZE>::apply(         \
         A + mb_start * lda, B + nb_start * 2, C + mb_start * ldc + nb_start, \
-        has_bias ? bias + nb_start : nullptr, scale, K, lda, ldb, ldc, blocks_k_per_group, block_size_K);
+        has_bias ? bias + nb_start : nullptr, scale, K, lda, ldb, ldc, block_size_K);
 
 template <typename scalar_t, typename packed_t, bool has_bias>
 struct brgemm {
