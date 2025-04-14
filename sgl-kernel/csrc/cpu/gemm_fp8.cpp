@@ -201,8 +201,7 @@ struct tinygemm_kernel_nn<at::BFloat16, at::Float8_e4m3fn, has_bias, BLOCK_M, BL
     const int lda2 = lda >> 1;
     const int ldb2 = ldb; // ldb * 2 >> 1;
     const float* a_ptr = reinterpret_cast<const float*>(A);
-    // const uint16_t* b_ptr = reinterpret_cast<const uint16_t*>(B);
-    const uint8_t* b_ptr = reinterpret_cast<const uint8_t*>(B);
+    const uint16_t* b_ptr = reinterpret_cast<const uint16_t*>(B);
 
     auto compute = [&](auto i, int k) {
       constexpr int row = i / COLS;
@@ -215,21 +214,33 @@ struct tinygemm_kernel_nn<at::BFloat16, at::Float8_e4m3fn, has_bias, BLOCK_M, BL
         va = (__m512bh)(_mm512_set1_ps(a_ptr[row * lda2 + k]));
       }
       if constexpr (row == 0) {
-        __m256i v_fp8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(b_ptr + k * ldb2 * 2 + col * 16 * 2));
 
-        // TODO: check the prefetch here
-        if constexpr (PREFETCH_SIZE_K > 0) {
-          _mm_prefetch(b_ptr + (k + PREFETCH_SIZE_K) * ldb2 * 2 + col * 16 * 2, _MM_HINT_T0);
+        if constexpr (col % 2 == 0) {
+          __m512i b8 = _mm512_loadu_si512(b_ptr + k * ldb2 + col * 16);
+          if constexpr (PREFETCH_SIZE_K > 0) {
+            _mm_prefetch(b_ptr + (k + PREFETCH_SIZE_K) * ldb2 + col * 16, _MM_HINT_T0);
+          }
+
+          __m256i b8_0 = _mm512_extracti32x8_epi32(b8, 0);
+          __m256i b8_1 = _mm512_extracti32x8_epi32(b8, 1);
+
+          __m512bh bf16_0 = CVT_FP8_TO_BF16(b8_0);
+          __m512bh bf16_1 = CVT_FP8_TO_BF16(b8_1);
+
+          // Apply scale
+          __m512 f0_lo = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32((__m512i)bf16_0, 0));
+          __m512 f0_hi = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32((__m512i)bf16_0, 1));
+          __m512 f1_lo = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32((__m512i)bf16_1, 0));
+          __m512 f1_hi = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32((__m512i)bf16_1, 1));
+
+          f0_lo = _mm512_mul_ps(f0_lo, vd);
+          f0_hi = _mm512_mul_ps(f0_hi, vd);
+          f1_lo = _mm512_mul_ps(f1_lo, vd);
+          f1_hi = _mm512_mul_ps(f1_hi, vd);
+
+          vb[col + 0] = _mm512_cvtne2ps_pbh(f0_hi, f0_lo);
+          vb[col + 1] = _mm512_cvtne2ps_pbh(f1_hi, f1_lo);
         }
-
-        vb[col] = cvt_e4m3_bf16_intrinsic_without_denorm(v_fp8);
-
-        // Apply scale
-        __m512 va0 = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32((__m512i)vb[col], 0));
-        __m512 va1 = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32((__m512i)vb[col], 1));
-        va0 = _mm512_mul_ps(va0, vd);
-        va1 = _mm512_mul_ps(va1, vd);
-        vb[col] = _mm512_cvtne2ps_pbh(va1, va0);
       }
       vc[i] = _mm512_dpbf16_ps(vc[i], va, vb[col]);
     };
