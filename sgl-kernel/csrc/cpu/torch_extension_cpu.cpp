@@ -47,6 +47,11 @@ void extend_attention_cpu(at::Tensor& q_extend, at::Tensor& k_extend, at::Tensor
     at::Tensor& extend_seq_lens, at::Tensor& extend_start_loc,
     int64_t max_len_extend, double sm_scale, double logit_cap);
 
+at::Tensor forward_absorb_cpu(at::Tensor& query, at::Tensor& k_cache, at::Tensor& v_cache,
+    at::Tensor& key, at::Tensor& value, at::Tensor& loc, at::Tensor& attn_logits,
+    at::Tensor& req_to_token, at::Tensor& req_pool_indices, at::Tensor& seq_lens,
+    double sm_scale, double logit_cap);
+
 // weight prepack
 at::Tensor convert_weight_packed(at::Tensor& weight);
 
@@ -148,6 +153,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   // extend
   m.def("extend_attention_cpu", &extend_attention_cpu, "Attention extend for CPU");
+
+  // fused forward_absorb
+  m.def("forward_absorb_cpu", &forward_absorb_cpu, "fused forward_absorb for intel AMX");
 
   // weight prepack
   m.def("convert_weight_packed", &convert_weight_packed, "prepack weight to vnni format for intel AMX");
