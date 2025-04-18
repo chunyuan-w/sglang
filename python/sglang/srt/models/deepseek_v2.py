@@ -865,7 +865,24 @@ class DeepseekV2AttentionMLA(nn.Module):
         q_input[..., self.kv_lora_rank :] = q_pe
         k_input[..., self.kv_lora_rank :] = k_pe
 
-        attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
+        # attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
+        
+        attn_output = sgl_kernel.common_ops.forward_absorb_cpu(
+            q_input,
+            forward_batch.token_to_kv_pool.get_key_buffer(self.attn_mqa.layer_id),
+            forward_batch.token_to_kv_pool.get_value_buffer(self.attn_mqa.layer_id),
+            k_input,
+            v_input,
+            forward_batch.out_cache_loc,
+            forward_batch.attn_backend.forward_metadata[0], # attn_logits
+            forward_batch.req_to_token_pool.req_to_token,
+            forward_batch.req_pool_indices,
+            forward_batch.seq_lens,
+            self.attn_mqa.scaling,
+            self.attn_mqa.logit_cap,
+        )        
+        
+        
         attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
 
         if self.w_vc.dtype == torch.float8_e4m3fnuz:
