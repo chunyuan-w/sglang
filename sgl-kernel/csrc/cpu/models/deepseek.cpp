@@ -101,6 +101,9 @@ at::Tensor forward_absorb_cpu(
 
     std::optional<std::vector<int64_t>> o_proj_block_size) {
 
+  // TODO: update shape args
+  RECORD_FUNCTION("sgl-kernel::forward_absorb_cpu", std::vector<c10::IValue>({hidden_states, o_proj_weight}));  
+
   at::Tensor query, key, value;
   std::tie(query, key, value) = qkv_proj_with_rope(
     hidden_states,
