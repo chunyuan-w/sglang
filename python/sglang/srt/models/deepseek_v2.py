@@ -865,88 +865,41 @@ class DeepseekV2AttentionMLA(nn.Module):
         q_input[..., self.kv_lora_rank :] = q_pe
         k_input[..., self.kv_lora_rank :] = k_pe
 
-        # attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
-        # breakpoint()
-        assert k_input is not None
-        assert v_input is not None
-        
-        # TODO: add FP8 support?
-        assert self.w_vc.dtype not in [torch.float8_e4m3fnuz, torch.float8_e4m3fn]
-        output = sgl_kernel.common_ops.forward_absorb_cpu(
-            q_input,
-            forward_batch.token_to_kv_pool.get_key_buffer(self.attn_mqa.layer_id),
-            forward_batch.token_to_kv_pool.get_value_buffer(self.attn_mqa.layer_id),
-            k_input,
-            v_input,
-            forward_batch.out_cache_loc,
-            forward_batch.attn_backend.forward_metadata[0], # attn_logits
-            forward_batch.req_to_token_pool.req_to_token,
-            forward_batch.req_pool_indices,
-            forward_batch.seq_lens,
-            self.w_vc,
-            self.attn_mqa.scaling,
-            self.attn_mqa.logit_cap,
-            self.attn_mqa.tp_k_head_num,
-            self.attn_mqa.qk_head_dim,
-            self.attn_mqa.tp_v_head_num,
-            self.attn_mqa.v_head_dim,
-            self.attn_mqa.tp_q_head_num,
-            self.num_local_heads,
-            self.kv_lora_rank,
-            True, # is_vnni
-            None, # scale # TODO: how about fp8 scale?
-        )        
-        
-        # attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
+        attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
+        attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
 
-        # See [Note] Align shapes of bmm inputs.
-        # B = self.w_vc.size(0)
-        # N = self.w_vc.size(1)
-        # M = attn_output.size(0)
-        # output = torch.empty([M, int(B * N)], dtype=attn_output.dtype)
-        
-        # attn_bmm_output = output.view([M, B, N]).transpose_(0, 1)
-        # sgl_kernel.cpu.bmm(
-        #     attn_bmm_output, attn_output.transpose(0, 1), self.w_vc
-        # )
-        
-        attn_output = output
-
-
-        # if self.w_vc.dtype == torch.float8_e4m3fnuz:
-        #     # TODO(kernel): add bmm_fp8 for torch.float8_e4m3fnuz
-        #     attn_bmm_output = torch.bmm(
-        #         attn_output.to(torch.bfloat16).transpose(0, 1),
-        #         self.w_vc.to(torch.bfloat16) * self.w_scale,
-        #     )
-        # elif self.w_vc.dtype == torch.float8_e4m3fn:
-        #     attn_output_val, attn_output_scale = input_to_float8(
-        #         attn_output.transpose(0, 1), torch.float8_e4m3fn
-        #     )
-        #     attn_bmm_output = bmm_fp8(
-        #         attn_output_val,
-        #         self.w_vc,
-        #         attn_output_scale,
-        #         self.w_scale,
-        #         torch.bfloat16,
-        #     )
-        # else:
-        #     if self.use_intel_amx_backend:
-        #         # See [Note] Align shapes of bmm inputs.
-        #         B = self.w_vc.size(0)
-        #         N = self.w_vc.size(1)
-        #         M = attn_output.size(0)
-        #         output = torch.empty([M, int(B * N)], dtype=attn_output.dtype)
-        #         attn_bmm_output = output.view([M, B, N]).transpose_(0, 1)
-        #         sgl_kernel.cpu.bmm(
-        #             attn_bmm_output, attn_output.transpose(0, 1), self.w_vc
-        #         )
-        #         attn_output = output
-        #     else:
-        #         attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
-        #         attn_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
-        
-        
+        if self.w_vc.dtype == torch.float8_e4m3fnuz:
+            # TODO(kernel): add bmm_fp8 for torch.float8_e4m3fnuz
+            attn_bmm_output = torch.bmm(
+                attn_output.to(torch.bfloat16).transpose(0, 1),
+                self.w_vc.to(torch.bfloat16) * self.w_scale,
+            )
+        elif self.w_vc.dtype == torch.float8_e4m3fn:
+            attn_output_val, attn_output_scale = input_to_float8(
+                attn_output.transpose(0, 1), torch.float8_e4m3fn
+            )
+            attn_bmm_output = bmm_fp8(
+                attn_output_val,
+                self.w_vc,
+                attn_output_scale,
+                self.w_scale,
+                torch.bfloat16,
+            )
+        else:
+            if self.use_intel_amx_backend:
+                # See [Note] Align shapes of bmm inputs.
+                B = self.w_vc.size(0)
+                N = self.w_vc.size(1)
+                M = attn_output.size(0)
+                output = torch.empty([M, int(B * N)], dtype=attn_output.dtype)
+                attn_bmm_output = output.view([M, B, N]).transpose_(0, 1)
+                sgl_kernel.cpu.bmm(
+                    attn_bmm_output, attn_output.transpose(0, 1), self.w_vc
+                )
+                attn_output = output
+            else:
+                attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
+                attn_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
         output, _ = self.o_proj(attn_output)
 
         return output
