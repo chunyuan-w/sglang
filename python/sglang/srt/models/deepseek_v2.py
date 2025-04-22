@@ -887,9 +887,11 @@ class DeepseekV2AttentionMLA(nn.Module):
             self.attn_mqa.tp_v_head_num,
             self.attn_mqa.v_head_dim,
             self.attn_mqa.tp_q_head_num,
+            self.num_local_heads,
+            self.kv_lora_rank,
         )        
         
-        attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
+        # attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
 
         if self.w_vc.dtype == torch.float8_e4m3fnuz:
             # TODO(kernel): add bmm_fp8 for torch.float8_e4m3fnuz
@@ -1130,9 +1132,11 @@ class DeepseekV2AttentionMLA(nn.Module):
             self.attn_mqa.tp_v_head_num,
             self.attn_mqa.v_head_dim,
             self.attn_mqa.tp_q_head_num,
+            params.num_local_heads,
+            params.kv_lora_rank,
         )    
 
-        attn_output = attn_output.view(-1, params.num_local_heads, params.kv_lora_rank)
+        # attn_output = attn_output.view(-1, params.num_local_heads, params.kv_lora_rank)
 
         w_vc = self.w_vc
         w_scale = self.w_scale

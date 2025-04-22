@@ -54,7 +54,9 @@ at::Tensor forward_absorb_cpu(at::Tensor& query, at::Tensor& k_cache, at::Tensor
     int qk_head_dim,
     int tp_v_head_num,
     int v_head_dim,
-    int tp_q_head_num);
+    int tp_q_head_num,
+    int num_local_heads,
+    int kv_lora_rank);
 
 // weight prepack
 at::Tensor convert_weight_packed(at::Tensor& weight);

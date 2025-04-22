@@ -20,7 +20,9 @@ at::Tensor forward_absorb_cpu(
     int qk_head_dim,
     int tp_v_head_num,
     int v_head_dim,
-    int tp_q_head_num) {
+    int tp_q_head_num,
+    int num_local_heads,
+    int kv_lora_rank) {
   // TODO: allocate o in cpp or in python?
   
 // TODO: is the below code needed for R1?
@@ -62,5 +64,7 @@ at::Tensor forward_absorb_cpu(
     sm_scale,
     logit_cap);
 
+  // attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
+  o = o.view({-1, num_local_heads, kv_lora_rank});
   return o;
 }
