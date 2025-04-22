@@ -925,7 +925,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             self.o_proj_is_int8,
             self.o_proj_is_fp8,
             attn_output.dtype,
-            self.o_proj.weight_scale if self.self.o_proj_is_int8 else self.o_proj.weight_scale_inv if self.o_proj_is_fp8 else None,
+            self.o_proj.weight_scale if self.o_proj_is_int8 else self.o_proj.weight_scale_inv if self.o_proj_is_fp8 else None,
             self.o_proj_weight_block_size,
             True, # is_wnni
         )

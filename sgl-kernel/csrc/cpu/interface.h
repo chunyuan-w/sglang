@@ -35,4 +35,8 @@ at::Tensor weight_packed_linear(at::Tensor& mat1, at::Tensor& mat2,
 at::Tensor int8_scaled_mm_with_quant(at::Tensor& mat1, at::Tensor& mat2, at::Tensor& scales2,
     std::optional<at::Tensor>& bias, at::ScalarType out_dtype, bool is_vnni);
 
+at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, at::Tensor& scales2,
+    std::vector<int64_t> block_size, std::optional<at::Tensor>& bias,
+    at::ScalarType out_dtype, bool is_vnni);
+
 void shm_allreduce(at::Tensor& data, c10::intrusive_ptr<c10d::ProcessGroup> process_group, py::object op);    

@@ -144,7 +144,10 @@ at::Tensor row_parallel_linear_forward(
       mat1, mat2, scales2.value(), bias, out_dtype, is_vnni // TODO: add mat.dtype as an input param?
     );
   } else if (use_fp8_w8a16) {
-    // TODO: add FP8
+    // TODO: check scales2 and block_size has value
+    output_parallel = fp8_scaled_mm_cpu(
+      mat1, mat2, scales2.value(), block_size.value(), bias, out_dtype, is_vnni
+    );
   } else {
     output_parallel = weight_packed_linear(mat1, mat2, bias, is_vnni);
   }
