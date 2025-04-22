@@ -718,6 +718,32 @@ class DeepseekV2AttentionMLA(nn.Module):
         params.qkv_proj_with_rope_is_int8 = self.qkv_proj_with_rope_is_int8
         params.num_local_heads = self.num_local_heads
         params.kv_lora_rank = self.kv_lora_rank
+
+        params.attn_mqa_layer_id = self.attn_mqa.layer_id
+
+        params.attn_mqa_scaling = self.attn_mqa.scaling
+        params.attn_mqa_logit_cap = self.attn_mqa.logit_cap
+        params.attn_mqa_tp_k_head_num = self.attn_mqa.tp_k_head_num
+        params.attn_mqa_qk_head_dim = self.attn_mqa.qk_head_dim
+        params.attn_mqa_tp_v_head_num = self.attn_mqa.tp_v_head_num
+        params.attn_mqa_v_head_dim = self.attn_mqa.v_head_dim
+        params.attn_mqa_tp_q_head_num = self.attn_mqa.tp_q_head_num
+
+        params.o_proj_tp_size = self.o_proj.tp_size
+        params.o_proj_is_int8 = self.o_proj_is_int8
+        params.o_proj_is_fp8 = self.o_proj_is_fp8
+        params.o_proj_weight_block_size = self.o_proj_weight_block_size
+        params.o_proj_scale = (
+            self.o_proj.weight_scale
+            if params.o_proj_is_int8
+            else self.o_proj.weight_scale_inv if params.o_proj_is_fp8 else None
+        )
+        params.device_group = (
+            get_tp_group().device_group if params.o_proj_tp_size > 1 else None
+        )
+        params.reduce_op = (
+            torch.distributed.ReduceOp.SUM if params.o_proj_tp_size > 1 else None
+        )
         self.params = params
 
     def forward(
@@ -1103,8 +1129,8 @@ class DeepseekV2AttentionMLA(nn.Module):
             params.kv_a_layernorm.weight,
             positions,
             params.rotary_emb.cos_sin_cache,
-            forward_batch.token_to_kv_pool.get_key_buffer(self.attn_mqa.layer_id),
-            forward_batch.token_to_kv_pool.get_value_buffer(self.attn_mqa.layer_id),
+            forward_batch.token_to_kv_pool.get_key_buffer(params.attn_mqa_layer_id),
+            forward_batch.token_to_kv_pool.get_value_buffer(params.attn_mqa_layer_id),
             forward_batch.out_cache_loc,
             forward_batch.attn_backend.forward_metadata[0],  # attn_logits
             forward_batch.req_to_token_pool.req_to_token,
@@ -1115,36 +1141,40 @@ class DeepseekV2AttentionMLA(nn.Module):
             None,  # TODO: bias is always None in o_proj
             params.kv_a_layernorm.variance_epsilon,
             params.qkv_proj_with_rope_is_int8,
-            self.attn_mqa.scaling,
-            self.attn_mqa.logit_cap,
-            self.attn_mqa.tp_k_head_num,
-            self.attn_mqa.qk_head_dim,
-            self.attn_mqa.tp_v_head_num,
-            self.attn_mqa.v_head_dim,
-            self.attn_mqa.tp_q_head_num,
+            params.attn_mqa_scaling,
+            params.attn_mqa_logit_cap,
+            params.attn_mqa_tp_k_head_num,
+            params.attn_mqa_qk_head_dim,
+            params.attn_mqa_tp_v_head_num,
+            params.attn_mqa_v_head_dim,
+            params.attn_mqa_tp_q_head_num,
             params.num_local_heads,
             params.kv_lora_rank,
-            self.o_proj.tp_size,
-            self.o_proj_is_int8,
-            self.o_proj_is_fp8,
+            params.o_proj_tp_size,
+            params.o_proj_is_int8,
+            params.o_proj_is_fp8,
             hidden_states.dtype,  # TODO: should be attn_output.dtype. Is it same as hidden_states.dtype?
-            (
-                self.o_proj.weight_scale
-                if self.o_proj_is_int8
-                else self.o_proj.weight_scale_inv if self.o_proj_is_fp8 else None
-            ),
+            params.o_proj_scale,
             True,  # is_vnni
-            params.q_a_proj.weight_scale if params.qkv_proj_with_rope_is_int8 else None,
-            params.q_b_proj.weight_scale if params.qkv_proj_with_rope_is_int8 else None,
+            (
+                params.q_a_proj.weight_scale
+                if params.qkv_proj_with_rope_is_int8
+                else None
+            ),  # TODO: cache weight_scale in params
+            (
+                params.q_b_proj.weight_scale
+                if params.qkv_proj_with_rope_is_int8
+                else None
+            ),  # TODO: cache weight_scale in params
             (
                 params.kv_a_proj_with_mqa.weight_scale
                 if params.qkv_proj_with_rope_is_int8
                 else None
-            ),
+            ),  # TODO: cache weight_scale in params
             None,  # bmm_scale # TODO: how about fp8 scale?
-            get_tp_group().device_group if self.o_proj.tp_size > 1 else None,
-            torch.distributed.ReduceOp.SUM if self.o_proj.tp_size > 1 else None,
-            self.o_proj_weight_block_size,
+            params.device_group,
+            params.reduce_op,
+            params.o_proj_weight_block_size,
         )
 
         return output
