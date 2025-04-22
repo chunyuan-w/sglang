@@ -50,13 +50,16 @@ void extend_attention_cpu(at::Tensor& q_extend, at::Tensor& k_extend, at::Tensor
 at::Tensor forward_absorb_cpu(at::Tensor& query, at::Tensor& k_cache, at::Tensor& v_cache,
     at::Tensor& key, at::Tensor& value, at::Tensor& loc, at::Tensor& attn_logits,
     at::Tensor& req_to_token, at::Tensor& req_pool_indices, at::Tensor& seq_lens,
+    at::Tensor& w_vc,
     double sm_scale, double logit_cap, int tp_k_head_num,
     int qk_head_dim,
     int tp_v_head_num,
     int v_head_dim,
     int tp_q_head_num,
     int num_local_heads,
-    int kv_lora_rank);
+    int kv_lora_rank,
+    bool is_vnni,
+    std::optional<at::Tensor>& scale);
 
 // weight prepack
 at::Tensor convert_weight_packed(at::Tensor& weight);

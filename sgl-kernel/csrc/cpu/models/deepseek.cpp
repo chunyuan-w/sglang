@@ -14,6 +14,7 @@ at::Tensor forward_absorb_cpu(
     at::Tensor& req_to_token,
     at::Tensor& req_pool_indices,
     at::Tensor& seq_lens,
+    at::Tensor& w_vc,
     double sm_scale,
     double logit_cap,
     int tp_k_head_num,
@@ -22,7 +23,9 @@ at::Tensor forward_absorb_cpu(
     int v_head_dim,
     int tp_q_head_num,
     int num_local_heads,
-    int kv_lora_rank) {
+    int kv_lora_rank,
+    bool is_vnni,
+    std::optional<at::Tensor>& scale) {
   // TODO: allocate o in cpp or in python?
   
 // TODO: is the below code needed for R1?
@@ -40,14 +43,14 @@ at::Tensor forward_absorb_cpu(
     // else:
     //     o = torch.empty_like(q)
   query= query.reshape({-1, tp_q_head_num * qk_head_dim});
-  at::Tensor o;
+  at::Tensor attn_output;
   if (qk_head_dim != v_head_dim) {
-      o = at::empty({query.size(0), tp_q_head_num * v_head_dim}, query.options());
+      attn_output = at::empty({query.size(0), tp_q_head_num * v_head_dim}, query.options());
   } else {
-      o = at::empty_like(query);
+      attn_output = at::empty_like(query);
   }
   auto query_3d = query.view({-1, tp_q_head_num, qk_head_dim});
-  auto o_3d = o.view({-1, tp_q_head_num, v_head_dim});
+  auto o_3d = attn_output.view({-1, tp_q_head_num, v_head_dim});
 
   decode_attention_cpu(
     query_3d,
@@ -65,6 +68,17 @@ at::Tensor forward_absorb_cpu(
     logit_cap);
 
   // attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
-  o = o.view({-1, num_local_heads, kv_lora_rank});
-  return o;
+  attn_output = attn_output.view({-1, num_local_heads, kv_lora_rank});
+  int64_t B = w_vc.sizes()[0];
+  int64_t N = w_vc.sizes()[1];
+  int64_t M = attn_output.sizes()[0];
+  
+  at::Tensor output = at::empty({M, B * N}, attn_output.options());
+  at::Tensor attn_bmm_output = output.view({M, B, N}).transpose_(0, 1);
+  
+  attn_output = attn_output.transpose(0, 1);
+  // TODO: is_vnni: set it as an arg to this OP
+  bmm_cpu(attn_bmm_output, attn_output, w_vc, is_vnni, scale);
+
+  return output;
 }
