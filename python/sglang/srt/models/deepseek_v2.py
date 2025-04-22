@@ -618,8 +618,9 @@ class DeepseekV2AttentionMLA(nn.Module):
                 self.o_proj_is_int8 = True
             if self.o_proj.weight.dtype == torch.float8_e4m3fn:
                 self.o_proj_is_fp8 = True
-                self.o_proj_weight_block_size = self.o_proj.quant_method.quant_config.weight_block_size
-                  
+                self.o_proj_weight_block_size = (
+                    self.o_proj.quant_method.quant_config.weight_block_size
+                )
 
         self.kv_a_proj_with_mqa = ReplicatedLinear(
             self.hidden_size,
@@ -913,21 +914,25 @@ class DeepseekV2AttentionMLA(nn.Module):
             else:
                 attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
                 attn_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
-        
+
         # output, _ = self.o_proj(attn_output)
         output = sgl_kernel.common_ops.row_parallel_linear_forward(
             attn_output,
             self.o_proj.weight,
-            None, # TODO: bias is always None in o_proj
+            None,  # TODO: bias is always None in o_proj
             self.o_proj.tp_size,
             get_tp_group().device_group if self.o_proj.tp_size > 1 else None,
             torch.distributed.ReduceOp.SUM if self.o_proj.tp_size > 1 else None,
             self.o_proj_is_int8,
             self.o_proj_is_fp8,
             attn_output.dtype,
-            self.o_proj.weight_scale if self.o_proj_is_int8 else self.o_proj.weight_scale_inv if self.o_proj_is_fp8 else None,
+            (
+                self.o_proj.weight_scale
+                if self.o_proj_is_int8
+                else self.o_proj.weight_scale_inv if self.o_proj_is_fp8 else None
+            ),
             self.o_proj_weight_block_size,
-            True, # is_wnni
+            True,  # is_wnni
         )
 
         return output
@@ -1085,40 +1090,9 @@ class DeepseekV2AttentionMLA(nn.Module):
         assert (
             params.q_lora_rank is not None and self.use_intel_amx_backend
         ), "forward_absorb_fused_mla_rope_cpu requires q_lora_rank is not None and use_intel_amx_backend"
-        # q_input, k_input, v_input = sgl_kernel.cpu.qkv_proj_with_rope(
-        #     hidden_states,
-        #     params.q_a_proj.weight,
-        #     params.q_b_proj.weight,
-        #     params.kv_a_proj_with_mqa.weight,
-        #     self.w_kc,
-        #     params.q_a_layernorm.weight,
-        #     params.kv_a_layernorm.weight,
-        #     positions,
-        #     params.rotary_emb.cos_sin_cache,
-        #     params.kv_a_layernorm.variance_epsilon,
-        #     use_int8_w8a8=params.qkv_proj_with_rope_is_int8,
-        #     q_a_proj_scale=(
-        #         params.q_a_proj.weight_scale
-        #         if params.qkv_proj_with_rope_is_int8
-        #         else None
-        #     ),
-        #     q_b_proj_scale=(
-        #         params.q_b_proj.weight_scale
-        #         if params.qkv_proj_with_rope_is_int8
-        #         else None
-        #     ),
-        #     kv_a_proj_scale=(
-        #         params.kv_a_proj_with_mqa.weight_scale
-        #         if params.qkv_proj_with_rope_is_int8
-        #         else None
-        #     ),
-        # )
-        
-        # attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
-        # assert k_input is not None
-        # assert v_input is not None
+
         # TODO: add FP8 support?
-        assert self.w_vc.dtype not in [torch.float8_e4m3fnuz, torch.float8_e4m3fn]        
+        assert self.w_vc.dtype not in [torch.float8_e4m3fnuz, torch.float8_e4m3fn]
         output = sgl_kernel.common_ops.forward_absorb_cpu(
             hidden_states,
             params.q_a_proj.weight,
@@ -1129,25 +1103,18 @@ class DeepseekV2AttentionMLA(nn.Module):
             params.kv_a_layernorm.weight,
             positions,
             params.rotary_emb.cos_sin_cache,
-
-            # q_input,
             forward_batch.token_to_kv_pool.get_key_buffer(self.attn_mqa.layer_id),
             forward_batch.token_to_kv_pool.get_value_buffer(self.attn_mqa.layer_id),
-            # k_input,
-            # v_input,
             forward_batch.out_cache_loc,
-            forward_batch.attn_backend.forward_metadata[0], # attn_logits
+            forward_batch.attn_backend.forward_metadata[0],  # attn_logits
             forward_batch.req_to_token_pool.req_to_token,
             forward_batch.req_pool_indices,
             forward_batch.seq_lens,
             self.w_vc,
-            
             self.o_proj.weight,
-            None, # TODO: bias is always None in o_proj            
-            
+            None,  # TODO: bias is always None in o_proj
             params.kv_a_layernorm.variance_epsilon,
-            params.qkv_proj_with_rope_is_int8,            
-            
+            params.qkv_proj_with_rope_is_int8,
             self.attn_mqa.scaling,
             self.attn_mqa.logit_cap,
             self.attn_mqa.tp_k_head_num,
@@ -1157,47 +1124,28 @@ class DeepseekV2AttentionMLA(nn.Module):
             self.attn_mqa.tp_q_head_num,
             params.num_local_heads,
             params.kv_lora_rank,
-            
-            
             self.o_proj.tp_size,
             self.o_proj_is_int8,
-            self.o_proj_is_fp8,            
-            hidden_states.dtype, # TODO: should be attn_output.dtype. Is it same as hidden_states.dtype?
-            self.o_proj.weight_scale if self.o_proj_is_int8 else self.o_proj.weight_scale_inv if self.o_proj_is_fp8 else None,
-            
-            
-            True, # is_vnni
-            params.q_a_proj.weight_scale
-            if params.qkv_proj_with_rope_is_int8
-            else None,
-            params.q_b_proj.weight_scale
-            if params.qkv_proj_with_rope_is_int8
-            else None,
-            params.kv_a_proj_with_mqa.weight_scale
-            if params.qkv_proj_with_rope_is_int8
-            else None,            
-            None, # bmm_scale # TODO: how about fp8 scale?            
+            self.o_proj_is_fp8,
+            hidden_states.dtype,  # TODO: should be attn_output.dtype. Is it same as hidden_states.dtype?
+            (
+                self.o_proj.weight_scale
+                if self.o_proj_is_int8
+                else self.o_proj.weight_scale_inv if self.o_proj_is_fp8 else None
+            ),
+            True,  # is_vnni
+            params.q_a_proj.weight_scale if params.qkv_proj_with_rope_is_int8 else None,
+            params.q_b_proj.weight_scale if params.qkv_proj_with_rope_is_int8 else None,
+            (
+                params.kv_a_proj_with_mqa.weight_scale
+                if params.qkv_proj_with_rope_is_int8
+                else None
+            ),
+            None,  # bmm_scale # TODO: how about fp8 scale?
             get_tp_group().device_group if self.o_proj.tp_size > 1 else None,
             torch.distributed.ReduceOp.SUM if self.o_proj.tp_size > 1 else None,
-            self.o_proj_weight_block_size,         
-        )    
-
-        # attn_output = output
-
-        # output = sgl_kernel.common_ops.row_parallel_linear_forward(
-        #     attn_output,
-        #     self.o_proj.weight,
-        #     None, # TODO: bias is always None in o_proj
-        #     self.o_proj.tp_size,
-        #     get_tp_group().device_group if self.o_proj.tp_size > 1 else None,
-        #     torch.distributed.ReduceOp.SUM if self.o_proj.tp_size > 1 else None,
-        #     self.o_proj_is_int8,
-        #     self.o_proj_is_fp8,
-        #     attn_output.dtype,
-        #     self.o_proj.weight_scale if self.o_proj_is_int8 else self.o_proj.weight_scale_inv if self.o_proj_is_fp8 else None,
-        #     self.o_proj_weight_block_size,
-        #     True, # is_wnni
-        # )
+            self.o_proj_weight_block_size,
+        )
 
         return output
 
