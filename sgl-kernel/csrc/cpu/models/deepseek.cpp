@@ -1,6 +1,8 @@
 #include "../common.h"
 #include "../vec.h"
 #include "../interface.h"
+#include <pybind11/pybind11.h>
+#include <ATen/record_function.h>
 
 at::Tensor forward_absorb_cpu(
     at::Tensor& hidden_states,
@@ -113,4 +115,30 @@ at::Tensor forward_absorb_cpu(
   bmm_cpu(attn_bmm_output, attn_output, w_vc, is_vnni, scale);
 
   return output;
+}
+
+// TODO: make process_group and op optional
+// TODO: add FP8 and INT8
+at::Tensor row_parallel_linear_forward(
+  at::Tensor& mat1, at::Tensor& mat2, std::optional<at::Tensor>& bias,
+  int tp_size,
+  std::optional<c10::intrusive_ptr<c10d::ProcessGroup>> process_group,
+  std::optional<py::object> op,
+
+  bool is_vnni) {
+  
+  // TODO: check bias is None or support bias add
+
+  // # Only fuse bias add into GEMM for rank 0 (this ensures that
+  // # bias will not get added more than once in TP>1 case)
+  // bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias  
+  
+  at::Tensor output_parallel = weight_packed_linear(mat1, mat2, bias, is_vnni);
+
+  if (tp_size > 1) {
+    // TODO: assert pg and op has value
+    shm_allreduce(output_parallel, process_group.value(), op.value());
+  }
+
+  return output_parallel;
 }

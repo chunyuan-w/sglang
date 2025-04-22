@@ -1,6 +1,8 @@
 #pragma once
 
 #include <ATen/ATen.h>
+#include <torch/extension.h>
+#include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 
 void decode_attention_cpu(at::Tensor& query, at::Tensor& k_cache, at::Tensor& v_cache, at::Tensor& output,
     at::Tensor& key, at::Tensor& value, at::Tensor& loc, at::Tensor& attn_logits,
@@ -26,3 +28,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qkv_proj_with_rope(
     std::optional<at::Tensor>& q_b_proj_scale,
     std::optional<at::Tensor>& kv_a_proj_scale,
     bool is_vnni);
+
+at::Tensor weight_packed_linear(at::Tensor& mat1, at::Tensor& mat2,
+    std::optional<at::Tensor>& bias, bool is_vnni);
+
+void shm_allreduce(at::Tensor& data, c10::intrusive_ptr<c10d::ProcessGroup> process_group, py::object op);    

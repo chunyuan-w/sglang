@@ -607,6 +607,9 @@ class DeepseekV2AttentionMLA(nn.Module):
                 quant_config=quant_config,
                 prefix=add_prefix("o_proj", prefix),
             )
+            assert self.o_proj.input_is_parallel
+            assert self.o_proj.bias is None
+            assert self.o_proj.reduce_results            
 
         self.kv_a_proj_with_mqa = ReplicatedLinear(
             self.hidden_size,
@@ -900,7 +903,17 @@ class DeepseekV2AttentionMLA(nn.Module):
             else:
                 attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
                 attn_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
-        output, _ = self.o_proj(attn_output)
+        
+        # output, _ = self.o_proj(attn_output)
+        output = sgl_kernel.common_ops.row_parallel_linear_forward(
+            attn_output,
+            self.o_proj.weight,
+            None, # TODO: bias is always None in o_proj
+            self.o_proj.tp_size,
+            get_tp_group().device_group if self.o_proj.tp_size > 1 else None,
+            torch.distributed.ReduceOp.SUM if self.o_proj.tp_size > 1 else None,
+            True, # is_wnni
+        )
 
         return output
 
