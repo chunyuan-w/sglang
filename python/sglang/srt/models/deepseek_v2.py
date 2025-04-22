@@ -866,7 +866,9 @@ class DeepseekV2AttentionMLA(nn.Module):
         k_input[..., self.kv_lora_rank :] = k_pe
 
         # attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
-        
+        # breakpoint()
+        assert k_input is not None
+        assert v_input is not None
         attn_output = sgl_kernel.common_ops.forward_absorb_cpu(
             q_input,
             forward_batch.token_to_kv_pool.get_key_buffer(self.attn_mqa.layer_id),
@@ -880,6 +882,11 @@ class DeepseekV2AttentionMLA(nn.Module):
             forward_batch.seq_lens,
             self.attn_mqa.scaling,
             self.attn_mqa.logit_cap,
+            self.attn_mqa.tp_k_head_num,
+            self.attn_mqa.qk_head_dim,
+            self.attn_mqa.tp_v_head_num,
+            self.attn_mqa.v_head_dim,
+            self.attn_mqa.tp_q_head_num,
         )        
         
         
@@ -1105,7 +1112,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         breakpoint()
         # attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
 
-        import sgl_kernel
+        # import sgl_kernel
 
         attn_output = sgl_kernel.common_ops.forward_absorb_cpu(
             q_input,
