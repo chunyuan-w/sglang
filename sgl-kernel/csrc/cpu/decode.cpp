@@ -1,5 +1,6 @@
 #include "common.h"
 #include "vec.h"
+#include "interface.h"
 
 namespace {
 

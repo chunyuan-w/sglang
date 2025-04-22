@@ -1,5 +1,6 @@
 #include "../common.h"
 #include "../vec.h"
+#include "../interface.h"
 
 at::Tensor forward_absorb_cpu(
     at::Tensor& query,
