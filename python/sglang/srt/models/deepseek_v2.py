@@ -1104,7 +1104,41 @@ class DeepseekV2AttentionMLA(nn.Module):
         assert (
             params.q_lora_rank is not None and self.use_intel_amx_backend
         ), "forward_absorb_fused_mla_rope_cpu requires q_lora_rank is not None and use_intel_amx_backend"
-        q_input, k_input, v_input = sgl_kernel.cpu.qkv_proj_with_rope(
+        # q_input, k_input, v_input = sgl_kernel.cpu.qkv_proj_with_rope(
+        #     hidden_states,
+        #     params.q_a_proj.weight,
+        #     params.q_b_proj.weight,
+        #     params.kv_a_proj_with_mqa.weight,
+        #     self.w_kc,
+        #     params.q_a_layernorm.weight,
+        #     params.kv_a_layernorm.weight,
+        #     positions,
+        #     params.rotary_emb.cos_sin_cache,
+        #     params.kv_a_layernorm.variance_epsilon,
+        #     use_int8_w8a8=params.qkv_proj_with_rope_is_int8,
+        #     q_a_proj_scale=(
+        #         params.q_a_proj.weight_scale
+        #         if params.qkv_proj_with_rope_is_int8
+        #         else None
+        #     ),
+        #     q_b_proj_scale=(
+        #         params.q_b_proj.weight_scale
+        #         if params.qkv_proj_with_rope_is_int8
+        #         else None
+        #     ),
+        #     kv_a_proj_scale=(
+        #         params.kv_a_proj_with_mqa.weight_scale
+        #         if params.qkv_proj_with_rope_is_int8
+        #         else None
+        #     ),
+        # )
+        
+        # attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
+        # assert k_input is not None
+        # assert v_input is not None
+        # TODO: add FP8 support?
+        assert self.w_vc.dtype not in [torch.float8_e4m3fnuz, torch.float8_e4m3fn]        
+        output = sgl_kernel.common_ops.forward_absorb_cpu(
             hidden_states,
             params.q_a_proj.weight,
             params.q_b_proj.weight,
@@ -1114,42 +1148,22 @@ class DeepseekV2AttentionMLA(nn.Module):
             params.kv_a_layernorm.weight,
             positions,
             params.rotary_emb.cos_sin_cache,
-            params.kv_a_layernorm.variance_epsilon,
-            use_int8_w8a8=params.qkv_proj_with_rope_is_int8,
-            q_a_proj_scale=(
-                params.q_a_proj.weight_scale
-                if params.qkv_proj_with_rope_is_int8
-                else None
-            ),
-            q_b_proj_scale=(
-                params.q_b_proj.weight_scale
-                if params.qkv_proj_with_rope_is_int8
-                else None
-            ),
-            kv_a_proj_scale=(
-                params.kv_a_proj_with_mqa.weight_scale
-                if params.qkv_proj_with_rope_is_int8
-                else None
-            ),
-        )
-        
-        # attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
-        assert k_input is not None
-        assert v_input is not None
-        # TODO: add FP8 support?
-        assert self.w_vc.dtype not in [torch.float8_e4m3fnuz, torch.float8_e4m3fn]        
-        output = sgl_kernel.common_ops.forward_absorb_cpu(
-            q_input,
+
+            # q_input,
             forward_batch.token_to_kv_pool.get_key_buffer(self.attn_mqa.layer_id),
             forward_batch.token_to_kv_pool.get_value_buffer(self.attn_mqa.layer_id),
-            k_input,
-            v_input,
+            # k_input,
+            # v_input,
             forward_batch.out_cache_loc,
             forward_batch.attn_backend.forward_metadata[0], # attn_logits
             forward_batch.req_to_token_pool.req_to_token,
             forward_batch.req_pool_indices,
             forward_batch.seq_lens,
             self.w_vc,
+            
+            params.kv_a_layernorm.variance_epsilon,
+            params.qkv_proj_with_rope_is_int8,            
+            
             self.attn_mqa.scaling,
             self.attn_mqa.logit_cap,
             self.attn_mqa.tp_k_head_num,
@@ -1160,6 +1174,15 @@ class DeepseekV2AttentionMLA(nn.Module):
             params.num_local_heads,
             params.kv_lora_rank,
             True, # is_vnni
+            params.q_a_proj.weight_scale
+            if params.qkv_proj_with_rope_is_int8
+            else None,
+            params.q_b_proj.weight_scale
+            if params.qkv_proj_with_rope_is_int8
+            else None,
+            params.kv_a_proj_with_mqa.weight_scale
+            if params.qkv_proj_with_rope_is_int8
+            else None,            
             None, # scale # TODO: how about fp8 scale?            
         )    
 

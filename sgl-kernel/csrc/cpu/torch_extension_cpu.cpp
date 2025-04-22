@@ -47,11 +47,32 @@ void extend_attention_cpu(at::Tensor& q_extend, at::Tensor& k_extend, at::Tensor
     at::Tensor& extend_seq_lens, at::Tensor& extend_start_loc,
     int64_t max_len_extend, double sm_scale, double logit_cap);
 
-at::Tensor forward_absorb_cpu(at::Tensor& query, at::Tensor& k_cache, at::Tensor& v_cache,
-    at::Tensor& key, at::Tensor& value, at::Tensor& loc, at::Tensor& attn_logits,
-    at::Tensor& req_to_token, at::Tensor& req_pool_indices, at::Tensor& seq_lens,
+at::Tensor forward_absorb_cpu(
+    at::Tensor& hidden_states,
+    at::Tensor& q_a_proj_weight,
+    at::Tensor& q_b_proj_weight,
+    at::Tensor& kv_a_proj_weight,
+    at::Tensor& w_kc,
+    at::Tensor& q_a_layernorm_weight,
+    at::Tensor& kv_a_layernorm_weight,
+    at::Tensor& positions,
+    at::Tensor& cos_sin_cache,    
+    
+    at::Tensor& k_cache,
+    at::Tensor& v_cache,
+    at::Tensor& loc,
+    at::Tensor& attn_logits,
+    at::Tensor& req_to_token,
+    at::Tensor& req_pool_indices,
+    at::Tensor& seq_lens,
     at::Tensor& w_vc,
-    double sm_scale, double logit_cap, int tp_k_head_num,
+    
+    double eps,
+    bool use_int8_w8a8,    
+    
+    double sm_scale,
+    double logit_cap,
+    int tp_k_head_num,
     int qk_head_dim,
     int tp_v_head_num,
     int v_head_dim,
@@ -59,6 +80,9 @@ at::Tensor forward_absorb_cpu(at::Tensor& query, at::Tensor& k_cache, at::Tensor
     int num_local_heads,
     int kv_lora_rank,
     bool is_vnni,
+    std::optional<at::Tensor>& q_a_proj_scale,
+    std::optional<at::Tensor>& q_b_proj_scale,
+    std::optional<at::Tensor>& kv_a_proj_scale,    
     std::optional<at::Tensor>& scale);
 
 // weight prepack
