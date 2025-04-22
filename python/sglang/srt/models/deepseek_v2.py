@@ -709,10 +709,17 @@ class DeepseekV2AttentionMLA(nn.Module):
         params = MParams()
         params.q_lora_rank = self.q_lora_rank
         if params.q_lora_rank is not None:
+            # TODO: only cache weight instead of modules. We need to cache weight after weight packing
             params.q_a_proj = self.q_a_proj
             params.q_b_proj = self.q_b_proj
             params.q_a_layernorm = self.q_a_layernorm
+            
+            params.q_a_proj_weight_scale = params.q_a_proj.weight_scale if self.qkv_proj_with_rope_is_int8 else None
+            params.q_b_proj_weight_scale = params.q_b_proj.weight_scale if self.qkv_proj_with_rope_is_int8 else None
+            
         params.kv_a_proj_with_mqa = self.kv_a_proj_with_mqa
+        params.kv_a_proj_with_mqa_weight_scale = params.kv_a_proj_with_mqa.weight_scale if self.qkv_proj_with_rope_is_int8 else None
+
         params.kv_a_layernorm = self.kv_a_layernorm
         params.rotary_emb = self.rotary_emb
         params.qkv_proj_with_rope_is_int8 = self.qkv_proj_with_rope_is_int8
@@ -1156,21 +1163,9 @@ class DeepseekV2AttentionMLA(nn.Module):
             hidden_states.dtype,  # TODO: should be attn_output.dtype. Is it same as hidden_states.dtype?
             params.o_proj_scale,
             True,  # is_vnni
-            (
-                params.q_a_proj.weight_scale
-                if params.qkv_proj_with_rope_is_int8
-                else None
-            ),  # TODO: cache weight_scale in params
-            (
-                params.q_b_proj.weight_scale
-                if params.qkv_proj_with_rope_is_int8
-                else None
-            ),  # TODO: cache weight_scale in params
-            (
-                params.kv_a_proj_with_mqa.weight_scale
-                if params.qkv_proj_with_rope_is_int8
-                else None
-            ),  # TODO: cache weight_scale in params
+            params.q_a_proj_weight_scale,
+            params.q_b_proj_weight_scale,
+            params.kv_a_proj_with_mqa_weight_scale,
             None,  # bmm_scale # TODO: how about fp8 scale?
             params.device_group,
             params.reduce_op,
