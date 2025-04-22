@@ -39,4 +39,4 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, at::Tensor& sca
     std::vector<int64_t> block_size, std::optional<at::Tensor>& bias,
     at::ScalarType out_dtype, bool is_vnni);
 
-void shm_allreduce(at::Tensor& data, c10::intrusive_ptr<c10d::ProcessGroup> process_group, py::object op);    
+void shm_allreduce(at::Tensor& data, c10::intrusive_ptr<c10d::ProcessGroup> process_group, py::object op);

@@ -16,13 +16,13 @@ at::Tensor row_parallel_linear_forward(
   std::optional<at::Tensor>& scales2,
   std::optional<std::vector<int64_t>> block_size,
   bool is_vnni) {
-  
+
   // TODO: check bias is None or support bias add
 
   // # Only fuse bias add into GEMM for rank 0 (this ensures that
   // # bias will not get added more than once in TP>1 case)
-  // bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias  
-  
+  // bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+
   at::Tensor output_parallel;
   if (use_int8_w8a8) {
     // TODO: check scales2 has value
@@ -55,8 +55,8 @@ at::Tensor forward_absorb_cpu(
     at::Tensor& q_a_layernorm_weight,
     at::Tensor& kv_a_layernorm_weight,
     at::Tensor& positions,
-    at::Tensor& cos_sin_cache,    
-    
+    at::Tensor& cos_sin_cache,
+
     at::Tensor& k_cache,
     at::Tensor& v_cache,
     at::Tensor& loc,
@@ -65,14 +65,14 @@ at::Tensor forward_absorb_cpu(
     at::Tensor& req_pool_indices,
     at::Tensor& seq_lens,
     at::Tensor& w_vc,
-    
+
     at::Tensor& o_proj_weight,
     std::optional<at::Tensor>& o_proj_bias,
 
 
     double eps,
-    bool use_int8_w8a8,    
-    
+    bool use_int8_w8a8,
+
     double sm_scale,
     double logit_cap,
     int tp_k_head_num,
@@ -82,18 +82,18 @@ at::Tensor forward_absorb_cpu(
     int tp_q_head_num,
     int num_local_heads,
     int kv_lora_rank,
-    
-    int tp_size,    
+
+    int tp_size,
 
     bool o_proj_use_int8_w8a8,
     bool o_proj_use_fp8_w8a16,
     at::ScalarType o_proj_out_dtype,
-    std::optional<at::Tensor>& o_proj_scales2,    
-    
+    std::optional<at::Tensor>& o_proj_scales2,
+
     bool is_vnni,
     std::optional<at::Tensor>& q_a_proj_scale,
     std::optional<at::Tensor>& q_b_proj_scale,
-    std::optional<at::Tensor>& kv_a_proj_scale,    
+    std::optional<at::Tensor>& kv_a_proj_scale,
     std::optional<at::Tensor>& bmm_scale,
 
     std::optional<c10::intrusive_ptr<c10d::ProcessGroup>> process_group,
@@ -120,7 +120,7 @@ at::Tensor forward_absorb_cpu(
     is_vnni);
 
   // TODO: allocate o in cpp or in python?
-  
+
 // TODO: is the below code needed for R1?
 //   if k is not None:
 //     // For cross-layer sharing, kv can be None
@@ -165,10 +165,10 @@ at::Tensor forward_absorb_cpu(
   int64_t B = w_vc.sizes()[0];
   int64_t N = w_vc.sizes()[1];
   int64_t M = attn_output.sizes()[0];
-  
+
   at::Tensor output = at::empty({M, B * N}, attn_output.options());
   at::Tensor attn_bmm_output = output.view({M, B, N}).transpose_(0, 1);
-  
+
   attn_output = attn_output.transpose(0, 1);
   // TODO: is_vnni: set it as an arg to this OP
   bmm_cpu(attn_bmm_output, attn_output, w_vc, is_vnni, bmm_scale);
