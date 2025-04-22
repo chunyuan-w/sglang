@@ -4,6 +4,48 @@
 #include <pybind11/pybind11.h>
 #include <ATen/record_function.h>
 
+at::Tensor row_parallel_linear_forward(
+  at::Tensor& mat1, at::Tensor& mat2,
+  std::optional<at::Tensor>& bias,
+  int tp_size,
+  std::optional<c10::intrusive_ptr<c10d::ProcessGroup>> process_group,
+  std::optional<py::object> op,
+  bool use_int8_w8a8,
+  bool use_fp8_w8a16,
+  at::ScalarType out_dtype,
+  std::optional<at::Tensor>& scales2,
+  std::optional<std::vector<int64_t>> block_size,
+  bool is_vnni) {
+  
+  // TODO: check bias is None or support bias add
+
+  // # Only fuse bias add into GEMM for rank 0 (this ensures that
+  // # bias will not get added more than once in TP>1 case)
+  // bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias  
+  
+  at::Tensor output_parallel;
+  if (use_int8_w8a8) {
+    // TODO: check scales2 has value
+    output_parallel = int8_scaled_mm_with_quant(
+      mat1, mat2, scales2.value(), bias, out_dtype, is_vnni // TODO: add mat.dtype as an input param?
+    );
+  } else if (use_fp8_w8a16) {
+    // TODO: check scales2 and block_size has value
+    output_parallel = fp8_scaled_mm_cpu(
+      mat1, mat2, scales2.value(), block_size.value(), bias, out_dtype, is_vnni
+    );
+  } else {
+    output_parallel = weight_packed_linear(mat1, mat2, bias, is_vnni);
+  }
+
+  if (tp_size > 1) {
+    // TODO: assert pg and op has value
+    shm_allreduce(output_parallel, process_group.value(), op.value());
+  }
+
+  return output_parallel;
+}
+
 at::Tensor forward_absorb_cpu(
     at::Tensor& hidden_states,
     at::Tensor& q_a_proj_weight,
@@ -24,6 +66,10 @@ at::Tensor forward_absorb_cpu(
     at::Tensor& seq_lens,
     at::Tensor& w_vc,
     
+    at::Tensor& o_proj_weight,
+    std::optional<at::Tensor>& o_proj_bias,
+
+
     double eps,
     bool use_int8_w8a8,    
     
@@ -36,11 +82,24 @@ at::Tensor forward_absorb_cpu(
     int tp_q_head_num,
     int num_local_heads,
     int kv_lora_rank,
+    
+    int tp_size,    
+
+    bool o_proj_use_int8_w8a8,
+    bool o_proj_use_fp8_w8a16,
+    at::ScalarType o_proj_out_dtype,
+    std::optional<at::Tensor>& o_proj_scales2,    
+    
     bool is_vnni,
     std::optional<at::Tensor>& q_a_proj_scale,
     std::optional<at::Tensor>& q_b_proj_scale,
     std::optional<at::Tensor>& kv_a_proj_scale,    
-    std::optional<at::Tensor>& scale) {
+    std::optional<at::Tensor>& bmm_scale,
+
+    std::optional<c10::intrusive_ptr<c10d::ProcessGroup>> process_group,
+    std::optional<py::object> op,
+
+    std::optional<std::vector<int64_t>> o_proj_block_size) {
 
   at::Tensor query, key, value;
   std::tie(query, key, value) = qkv_proj_with_rope(
@@ -112,50 +171,19 @@ at::Tensor forward_absorb_cpu(
   
   attn_output = attn_output.transpose(0, 1);
   // TODO: is_vnni: set it as an arg to this OP
-  bmm_cpu(attn_bmm_output, attn_output, w_vc, is_vnni, scale);
+  bmm_cpu(attn_bmm_output, attn_output, w_vc, is_vnni, bmm_scale);
 
-  return output;
-}
-
-// TODO: make process_group and op optional
-at::Tensor row_parallel_linear_forward(
-  at::Tensor& mat1, at::Tensor& mat2,
-  std::optional<at::Tensor>& bias,
-  int tp_size,
-  std::optional<c10::intrusive_ptr<c10d::ProcessGroup>> process_group,
-  std::optional<py::object> op,
-  bool use_int8_w8a8,
-  bool use_fp8_w8a16,
-  at::ScalarType out_dtype,
-  std::optional<at::Tensor>& scales2,
-  std::optional<std::vector<int64_t>> block_size,
-  bool is_vnni) {
-  
-  // TODO: check bias is None or support bias add
-
-  // # Only fuse bias add into GEMM for rank 0 (this ensures that
-  // # bias will not get added more than once in TP>1 case)
-  // bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias  
-  
-  at::Tensor output_parallel;
-  if (use_int8_w8a8) {
-    // TODO: check scales2 has value
-    output_parallel = int8_scaled_mm_with_quant(
-      mat1, mat2, scales2.value(), bias, out_dtype, is_vnni // TODO: add mat.dtype as an input param?
-    );
-  } else if (use_fp8_w8a16) {
-    // TODO: check scales2 and block_size has value
-    output_parallel = fp8_scaled_mm_cpu(
-      mat1, mat2, scales2.value(), block_size.value(), bias, out_dtype, is_vnni
-    );
-  } else {
-    output_parallel = weight_packed_linear(mat1, mat2, bias, is_vnni);
-  }
-
-  if (tp_size > 1) {
-    // TODO: assert pg and op has value
-    shm_allreduce(output_parallel, process_group.value(), op.value());
-  }
-
-  return output_parallel;
+  return row_parallel_linear_forward(
+    output,
+    o_proj_weight,
+    o_proj_bias,
+    tp_size,
+    process_group,
+    op,
+    o_proj_use_int8_w8a8,
+    o_proj_use_fp8_w8a16,
+    o_proj_out_dtype,
+    o_proj_scales2,
+    o_proj_block_size,
+    is_vnni);
 }

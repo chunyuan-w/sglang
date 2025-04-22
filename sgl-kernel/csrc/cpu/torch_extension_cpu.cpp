@@ -67,6 +67,10 @@ at::Tensor forward_absorb_cpu(
     at::Tensor& seq_lens,
     at::Tensor& w_vc,
     
+    at::Tensor& o_proj_weight,
+    std::optional<at::Tensor>& o_proj_bias,
+
+
     double eps,
     bool use_int8_w8a8,    
     
@@ -79,11 +83,24 @@ at::Tensor forward_absorb_cpu(
     int tp_q_head_num,
     int num_local_heads,
     int kv_lora_rank,
+    
+    int tp_size,    
+
+    bool o_proj_use_int8_w8a8,
+    bool o_proj_use_fp8_w8a16,
+    at::ScalarType o_proj_out_dtype,
+    std::optional<at::Tensor>& o_proj_scales2,    
+    
     bool is_vnni,
     std::optional<at::Tensor>& q_a_proj_scale,
     std::optional<at::Tensor>& q_b_proj_scale,
     std::optional<at::Tensor>& kv_a_proj_scale,    
-    std::optional<at::Tensor>& scale);
+    std::optional<at::Tensor>& bmm_scale,
+
+    std::optional<c10::intrusive_ptr<c10d::ProcessGroup>> process_group,
+    std::optional<py::object> op,
+
+    std::optional<std::vector<int64_t>> o_proj_block_size);
 
 // weight prepack
 at::Tensor convert_weight_packed(at::Tensor& weight);

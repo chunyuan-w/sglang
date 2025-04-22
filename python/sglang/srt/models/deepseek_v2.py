@@ -1142,6 +1142,9 @@ class DeepseekV2AttentionMLA(nn.Module):
             forward_batch.seq_lens,
             self.w_vc,
             
+            self.o_proj.weight,
+            None, # TODO: bias is always None in o_proj            
+            
             params.kv_a_layernorm.variance_epsilon,
             params.qkv_proj_with_rope_is_int8,            
             
@@ -1154,6 +1157,15 @@ class DeepseekV2AttentionMLA(nn.Module):
             self.attn_mqa.tp_q_head_num,
             params.num_local_heads,
             params.kv_lora_rank,
+            
+            
+            self.o_proj.tp_size,
+            self.o_proj_is_int8,
+            self.o_proj_is_fp8,            
+            hidden_states.dtype, # TODO: should be attn_output.dtype. Is it same as hidden_states.dtype?
+            self.o_proj.weight_scale if self.o_proj_is_int8 else self.o_proj.weight_scale_inv if self.o_proj_is_fp8 else None,
+            
+            
             True, # is_vnni
             params.q_a_proj.weight_scale
             if params.qkv_proj_with_rope_is_int8
@@ -1164,61 +1176,28 @@ class DeepseekV2AttentionMLA(nn.Module):
             params.kv_a_proj_with_mqa.weight_scale
             if params.qkv_proj_with_rope_is_int8
             else None,            
-            None, # scale # TODO: how about fp8 scale?            
-        )    
-
-        # attn_output = attn_output.view(-1, params.num_local_heads, params.kv_lora_rank)
-        
-        attn_output = output
-        
-        
-        # w_vc = self.w_vc
-        # w_scale = self.w_scale
-        # if w_vc.dtype == torch.float8_e4m3fnuz:
-        #     # TODO(kernel): add bmm_fp8 for torch.float8_e4m3fnuz
-        #     attn_bmm_output = torch.bmm(
-        #         attn_output.to(torch.bfloat16).transpose(0, 1),
-        #         w_vc.to(torch.bfloat16) * w_scale,
-        #     )
-        # elif w_vc.dtype == torch.float8_e4m3fn:
-        #     attn_output_val, attn_output_scale = input_to_float8(
-        #         attn_output.transpose(0, 1), torch.float8_e4m3fn
-        #     )
-        #     attn_bmm_output = bmm_fp8(
-        #         attn_output_val,
-        #         w_vc,
-        #         attn_output_scale,
-        #         w_scale,
-        #         torch.bfloat16,
-        #     )
-        # else:
-        #     # See [Note] Align shapes of bmm inputs.
-        #     B = w_vc.size(0)
-        #     N = w_vc.size(1)
-        #     M = attn_output.size(0)
-        #     output = torch.empty([M, int(B * N)], dtype=attn_output.dtype)
-        #     attn_bmm_output = output.view([M, B, N]).transpose_(0, 1)
-        #     sgl_kernel.cpu.bmm(attn_bmm_output, attn_output.transpose(0, 1), w_vc)
-        #     attn_output = output
-        
-        
-        # output, _ = self.o_proj(attn_output)
-
-
-        output = sgl_kernel.common_ops.row_parallel_linear_forward(
-            attn_output,
-            self.o_proj.weight,
-            None, # TODO: bias is always None in o_proj
-            self.o_proj.tp_size,
+            None, # bmm_scale # TODO: how about fp8 scale?            
             get_tp_group().device_group if self.o_proj.tp_size > 1 else None,
             torch.distributed.ReduceOp.SUM if self.o_proj.tp_size > 1 else None,
-            self.o_proj_is_int8,
-            self.o_proj_is_fp8,
-            attn_output.dtype,
-            self.o_proj.weight_scale if self.o_proj_is_int8 else self.o_proj.weight_scale_inv if self.o_proj_is_fp8 else None,
-            self.o_proj_weight_block_size,
-            True, # is_wnni
-        )
+            self.o_proj_weight_block_size,         
+        )    
+
+        # attn_output = output
+
+        # output = sgl_kernel.common_ops.row_parallel_linear_forward(
+        #     attn_output,
+        #     self.o_proj.weight,
+        #     None, # TODO: bias is always None in o_proj
+        #     self.o_proj.tp_size,
+        #     get_tp_group().device_group if self.o_proj.tp_size > 1 else None,
+        #     torch.distributed.ReduceOp.SUM if self.o_proj.tp_size > 1 else None,
+        #     self.o_proj_is_int8,
+        #     self.o_proj_is_fp8,
+        #     attn_output.dtype,
+        #     self.o_proj.weight_scale if self.o_proj_is_int8 else self.o_proj.weight_scale_inv if self.o_proj_is_fp8 else None,
+        #     self.o_proj_weight_block_size,
+        #     True, # is_wnni
+        # )
 
         return output
 
