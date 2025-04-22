@@ -32,4 +32,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qkv_proj_with_rope(
 at::Tensor weight_packed_linear(at::Tensor& mat1, at::Tensor& mat2,
     std::optional<at::Tensor>& bias, bool is_vnni);
 
+at::Tensor int8_scaled_mm_with_quant(at::Tensor& mat1, at::Tensor& mat2, at::Tensor& scales2,
+    std::optional<at::Tensor>& bias, at::ScalarType out_dtype, bool is_vnni);
+
 void shm_allreduce(at::Tensor& data, c10::intrusive_ptr<c10d::ProcessGroup> process_group, py::object op);    

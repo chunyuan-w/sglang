@@ -525,6 +525,10 @@ class DeepseekV2AttentionMLA(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
+        self.o_proj_is_int8 = None
+        self.o_proj_is_fp8 = None
+        self.o_proj_weight_block_size = None
+
         if use_dp:
             # For data parallel attention
             if self.q_lora_rank is not None:
@@ -609,7 +613,13 @@ class DeepseekV2AttentionMLA(nn.Module):
             )
             assert self.o_proj.input_is_parallel
             assert self.o_proj.bias is None
-            assert self.o_proj.reduce_results            
+            assert self.o_proj.reduce_results
+            if self.o_proj.weight.dtype == torch.int8:
+                self.o_proj_is_int8 = True
+            if self.o_proj.weight.dtype == torch.float8_e4m3fn:
+                self.o_proj_is_fp8 = True
+                self.o_proj_weight_block_size = self.o_proj.quant_method.quant_config.weight_block_size
+                  
 
         self.kv_a_proj_with_mqa = ReplicatedLinear(
             self.hidden_size,
@@ -912,6 +922,11 @@ class DeepseekV2AttentionMLA(nn.Module):
             self.o_proj.tp_size,
             get_tp_group().device_group if self.o_proj.tp_size > 1 else None,
             torch.distributed.ReduceOp.SUM if self.o_proj.tp_size > 1 else None,
+            self.o_proj_is_int8,
+            self.o_proj_is_fp8,
+            attn_output.dtype,
+            self.o_proj.weight_scale if self.self.o_proj_is_int8 else self.o_proj.weight_scale_inv if self.o_proj_is_fp8 else None,
+            self.o_proj_weight_block_size,
             True, # is_wnni
         )
 
@@ -1185,7 +1200,25 @@ class DeepseekV2AttentionMLA(nn.Module):
         #     attn_bmm_output = output.view([M, B, N]).transpose_(0, 1)
         #     sgl_kernel.cpu.bmm(attn_bmm_output, attn_output.transpose(0, 1), w_vc)
         #     attn_output = output
-        output, _ = self.o_proj(attn_output)
+        
+        
+        # output, _ = self.o_proj(attn_output)
+
+
+        output = sgl_kernel.common_ops.row_parallel_linear_forward(
+            attn_output,
+            self.o_proj.weight,
+            None, # TODO: bias is always None in o_proj
+            self.o_proj.tp_size,
+            get_tp_group().device_group if self.o_proj.tp_size > 1 else None,
+            torch.distributed.ReduceOp.SUM if self.o_proj.tp_size > 1 else None,
+            self.o_proj_is_int8,
+            self.o_proj_is_fp8,
+            attn_output.dtype,
+            self.o_proj.weight_scale if self.o_proj_is_int8 else self.o_proj.weight_scale_inv if self.o_proj_is_fp8 else None,
+            self.o_proj_weight_block_size,
+            True, # is_wnni
+        )
 
         return output
 

@@ -114,6 +114,11 @@ at::Tensor row_parallel_linear_forward(
   at::Tensor& mat1, at::Tensor& mat2, std::optional<at::Tensor>& bias,
   int tp_size,
   std::optional<c10::intrusive_ptr<c10d::ProcessGroup>> process_group, std::optional<py::object> op,
+  bool use_int8_w8a8,
+  bool use_fp8_w8a16,
+  at::ScalarType out_dtype,
+  std::optional<at::Tensor>& scales2,
+  std::optional<std::vector<int64_t>> block_size,
   bool is_vnni);
 
 // bmm

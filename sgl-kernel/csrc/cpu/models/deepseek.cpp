@@ -118,13 +118,17 @@ at::Tensor forward_absorb_cpu(
 }
 
 // TODO: make process_group and op optional
-// TODO: add FP8 and INT8
 at::Tensor row_parallel_linear_forward(
-  at::Tensor& mat1, at::Tensor& mat2, std::optional<at::Tensor>& bias,
+  at::Tensor& mat1, at::Tensor& mat2,
+  std::optional<at::Tensor>& bias,
   int tp_size,
   std::optional<c10::intrusive_ptr<c10d::ProcessGroup>> process_group,
   std::optional<py::object> op,
-
+  bool use_int8_w8a8,
+  bool use_fp8_w8a16,
+  at::ScalarType out_dtype,
+  std::optional<at::Tensor>& scales2,
+  std::optional<std::vector<int64_t>> block_size,
   bool is_vnni) {
   
   // TODO: check bias is None or support bias add
@@ -133,7 +137,17 @@ at::Tensor row_parallel_linear_forward(
   // # bias will not get added more than once in TP>1 case)
   // bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias  
   
-  at::Tensor output_parallel = weight_packed_linear(mat1, mat2, bias, is_vnni);
+  at::Tensor output_parallel;
+  if (use_int8_w8a8) {
+    // TODO: check scales2 has value
+    output_parallel = int8_scaled_mm_with_quant(
+      mat1, mat2, scales2.value(), bias, out_dtype, is_vnni // TODO: add mat.dtype as an input param?
+    );
+  } else if (use_fp8_w8a16) {
+    // TODO: add FP8
+  } else {
+    output_parallel = weight_packed_linear(mat1, mat2, bias, is_vnni);
+  }
 
   if (tp_size > 1) {
     // TODO: assert pg and op has value
