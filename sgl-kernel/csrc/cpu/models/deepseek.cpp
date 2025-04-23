@@ -6,18 +6,19 @@
 
 // This function implements the forward function of sglang/python/sglang/srt/layers/linear.py:RowParallelLinear
 at::Tensor row_parallel_linear_forward(
-  at::Tensor& mat1, at::Tensor& mat2,
-  std::optional<at::Tensor>& bias,
-  int tp_size,
-  int tp_rank,
-  std::optional<c10::intrusive_ptr<c10d::ProcessGroup>> process_group,
-  std::optional<py::object> op,
-  bool use_int8_w8a8,
-  bool use_fp8_w8a16,
-  at::ScalarType out_dtype,
-  std::optional<at::Tensor>& scales2,
-  std::optional<std::vector<int64_t>> block_size,
-  bool is_vnni) {
+    at::Tensor& mat1, at::Tensor& mat2,
+    std::optional<at::Tensor>& bias,
+    int tp_size,
+    int tp_rank,
+    std::optional<c10::intrusive_ptr<c10d::ProcessGroup>> process_group,
+    std::optional<py::object> op,
+    bool use_int8_w8a8,
+    bool use_fp8_w8a16,
+    at::ScalarType out_dtype,
+    std::optional<at::Tensor>& scales2,
+    std::optional<std::vector<int64_t>> block_size,
+    bool is_vnni) {
+  RECORD_FUNCTION("sgl-kernel::row_parallel_linear_forward", std::vector<c10::IValue>({mat1, mat2}));
   // # Only fuse bias add into GEMM for rank 0 (this ensures that
   // # bias will not get added more than once in TP>1 case)
   const bool has_bias = bias.has_value();
@@ -29,15 +30,11 @@ at::Tensor row_parallel_linear_forward(
   at::Tensor output_parallel;
   if (use_int8_w8a8) {
     TORCH_CHECK(scales2.has_value(), "missing scales2 for int8 w8a8 row_parallel_linear_forward");
-    output_parallel = int8_scaled_mm_with_quant(
-      mat1, mat2, scales2.value(), bias, out_dtype, is_vnni // TODO: add mat.dtype as an input param?
-    );
+    output_parallel = int8_scaled_mm_with_quant(mat1, mat2, scales2.value(), bias, out_dtype, is_vnni);
   } else if (use_fp8_w8a16) {
     TORCH_CHECK(scales2.has_value(), "missing scales2 for fp8 w8a16 row_parallel_linear_forward");
     TORCH_CHECK(block_size.has_value(), "missing block_size for fp8 w8a16 row_parallel_linear_forward");
-    output_parallel = fp8_scaled_mm_cpu(
-      mat1, mat2, scales2.value(), block_size.value(), bias, out_dtype, is_vnni
-    );
+    output_parallel = fp8_scaled_mm_cpu(mat1, mat2, scales2.value(), block_size.value(), bias, out_dtype, is_vnni);
   } else {
     output_parallel = weight_packed_linear(mat1, mat2, bias, is_vnni);
   }
@@ -96,8 +93,7 @@ at::Tensor forward_absorb_cpu(
     std::optional<py::object> op, // o_proj
     std::optional<std::vector<int64_t>> o_proj_block_size, // o_proj
     bool is_vnni  // qkv_proj_with_rope, bmm, o_proj
-    ) {
-
+) {
   RECORD_FUNCTION("sgl-kernel::forward_absorb_cpu", std::vector<c10::IValue>({
     hidden_states, q_a_proj_weight, q_b_proj_weight, kv_a_proj_weight, w_kc,
     q_a_layernorm_weight, kv_a_layernorm_weight, positions, cos_sin_cache,

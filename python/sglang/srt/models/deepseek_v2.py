@@ -805,9 +805,9 @@ class DeepseekV2AttentionMLA(nn.Module):
                 if (
                     self.q_lora_rank is not None
                     and self.use_intel_amx_backend
-                    and not self.qkv_proj_with_rope_is_fp8  # TODO: remove this when forward_absorb_fused_mla_rope_cpu is ready
+                    and not self.qkv_proj_with_rope_is_fp8  # TODO: remove this when forward_absorb_fused_cpu is ready
                 ):
-                    return self.forward_absorb_fused_mla_rope_cpu(
+                    return self.forward_absorb_fused_cpu(
                         positions, hidden_states, forward_batch
                     )
                 else:
@@ -1103,7 +1103,7 @@ class DeepseekV2AttentionMLA(nn.Module):
 
         return output
 
-    def forward_absorb_fused_mla_rope_cpu(
+    def forward_absorb_fused_cpu(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
@@ -1112,7 +1112,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         params = self.params
         assert (
             params.q_lora_rank is not None and self.use_intel_amx_backend
-        ), "forward_absorb_fused_mla_rope_cpu requires q_lora_rank is not None and use_intel_amx_backend"
+        ), "forward_absorb_fused_cpu requires q_lora_rank is not None and use_intel_amx_backend"
 
         # TODO: add FP8 support
         assert self.w_vc.dtype not in [torch.float8_e4m3fnuz, torch.float8_e4m3fn]
