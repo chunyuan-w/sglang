@@ -5,6 +5,9 @@
 // we use 4x32 for BLOCK_M
 #define BLOCK_SIZE_M_SCALE 4
 
+// we use 4x32 for BLOCK_M
+#define BLOCK_SIZE_M_SCALE 4
+
 namespace {
 
 template <typename scalar_t>
