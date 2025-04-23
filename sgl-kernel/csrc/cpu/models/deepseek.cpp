@@ -4,10 +4,12 @@
 #include <pybind11/pybind11.h>
 #include <ATen/record_function.h>
 
+// This function implements the forward function of sglang/python/sglang/srt/layers/linear.py:RowParallelLinear
 at::Tensor row_parallel_linear_forward(
   at::Tensor& mat1, at::Tensor& mat2,
   std::optional<at::Tensor>& bias,
   int tp_size,
+  int tp_rank,
   std::optional<c10::intrusive_ptr<c10d::ProcessGroup>> process_group,
   std::optional<py::object> op,
   bool use_int8_w8a8,
@@ -16,12 +18,14 @@ at::Tensor row_parallel_linear_forward(
   std::optional<at::Tensor>& scales2,
   std::optional<std::vector<int64_t>> block_size,
   bool is_vnni) {
-
-  // TODO: check bias is None or support bias add
-
   // # Only fuse bias add into GEMM for rank 0 (this ensures that
   // # bias will not get added more than once in TP>1 case)
   // bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+  const bool has_bias = bias.has_value();
+  const float* bias_data = nullptr;
+  if (tp_rank == 0 && has_bias) {
+    bias_data = bias.value().data_ptr<float>();
+  }
 
   at::Tensor output_parallel;
   if (use_int8_w8a8) {
@@ -84,6 +88,7 @@ at::Tensor forward_absorb_cpu(
     int kv_lora_rank,
 
     int tp_size,
+    int tp_rank,
 
     bool o_proj_use_int8_w8a8,
     bool o_proj_use_fp8_w8a16,
@@ -182,6 +187,7 @@ at::Tensor forward_absorb_cpu(
     o_proj_weight,
     o_proj_bias,
     tp_size,
+    tp_rank,
     process_group,
     op,
     o_proj_use_int8_w8a8,

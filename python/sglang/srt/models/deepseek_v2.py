@@ -612,7 +612,6 @@ class DeepseekV2AttentionMLA(nn.Module):
                 prefix=add_prefix("o_proj", prefix),
             )
             assert self.o_proj.input_is_parallel
-            assert self.o_proj.bias is None
             assert self.o_proj.reduce_results
             if self.o_proj.weight.dtype == torch.int8:
                 self.o_proj_is_int8 = True
@@ -734,6 +733,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         params.attn_mqa_tp_q_head_num = self.attn_mqa.tp_q_head_num
 
         params.o_proj_tp_size = self.o_proj.tp_size
+        params.o_proj_tp_rank = self.o_proj.tp_rank
         params.o_proj_is_int8 = self.o_proj_is_int8
         params.o_proj_is_fp8 = self.o_proj_is_fp8
         params.o_proj_weight_block_size = self.o_proj_weight_block_size
@@ -1123,7 +1123,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             forward_batch.seq_lens,
             self.w_vc,
             self.o_proj.weight,
-            None,  # TODO: bias is always None in o_proj
+            self.o_proj.bias,
             params.kv_a_layernorm.variance_epsilon,
             params.qkv_proj_with_rope_is_int8,
             params.attn_mqa_scaling,
@@ -1136,6 +1136,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             params.num_local_heads,
             params.kv_lora_rank,
             params.o_proj_tp_size,
+            params.o_proj_tp_rank,
             params.o_proj_is_int8,
             params.o_proj_is_fp8,
             hidden_states.dtype,

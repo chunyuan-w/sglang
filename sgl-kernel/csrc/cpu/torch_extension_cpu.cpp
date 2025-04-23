@@ -85,6 +85,7 @@ at::Tensor forward_absorb_cpu(
     int kv_lora_rank,
 
     int tp_size,
+    int tp_rank,
 
     bool o_proj_use_int8_w8a8,
     bool o_proj_use_fp8_w8a16,
