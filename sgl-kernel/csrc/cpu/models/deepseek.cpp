@@ -1,6 +1,6 @@
 #include "../common.h"
 #include "../vec.h"
-#include "../interface.h"
+#include "../ops.h"
 #include <pybind11/pybind11.h>
 #include <ATen/record_function.h>
 

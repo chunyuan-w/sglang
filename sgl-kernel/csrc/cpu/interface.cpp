@@ -2,7 +2,7 @@
 #include <ATen/record_function.h>
 
 #include "shm.h"
-#include "interface.h"
+#include "ops.h"
 
 // Communication settings
 static int world_rank = -1;
