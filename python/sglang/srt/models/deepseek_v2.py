@@ -805,11 +805,17 @@ class DeepseekV2AttentionMLA(nn.Module):
                 if (
                     self.q_lora_rank is not None
                     and self.use_intel_amx_backend
-                    and not self.qkv_proj_with_rope_is_fp8  # TODO: remove this when forward_absorb_fused_cpu is ready
+                    and not self.qkv_proj_with_rope_is_fp8  # TODO: remove this when forward_absorb_decode_fused_cpu is ready
                 ):
-                    return self.forward_absorb_fused_cpu(
-                        positions, hidden_states, forward_batch
-                    )
+                    print(f"my is decode: {forward_batch.forward_mode.is_decode()}", flush=True)
+                    if forward_batch.forward_mode.is_decode():
+                        return self.forward_absorb_decode_fused_cpu(
+                            positions, hidden_states, forward_batch
+                        )
+                    else:
+                        return self.forward_absorb_fused_mla_rope_cpu(
+                            positions, hidden_states, forward_batch
+                        )
                 else:
                     return self.forward_absorb(positions, hidden_states, forward_batch)
 
@@ -1103,7 +1109,7 @@ class DeepseekV2AttentionMLA(nn.Module):
 
         return output
 
-    def forward_absorb_fused_cpu(
+    def forward_absorb_fused_mla_rope_cpu(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
@@ -1112,11 +1118,84 @@ class DeepseekV2AttentionMLA(nn.Module):
         params = self.params
         assert (
             params.q_lora_rank is not None and self.use_intel_amx_backend
-        ), "forward_absorb_fused_cpu requires q_lora_rank is not None and use_intel_amx_backend"
+        ), "forward_absorb_fused_mla_rope_cpu requires q_lora_rank is not None and use_intel_amx_backend"
+        q_input, k_input, v_input = sgl_kernel.cpu.qkv_proj_with_rope(
+            hidden_states,
+            params.q_a_proj.weight,
+            params.q_b_proj.weight,
+            params.kv_a_proj_with_mqa.weight,
+            self.w_kc,
+            params.q_a_layernorm.weight,
+            params.kv_a_layernorm.weight,
+            positions,
+            params.rotary_emb.cos_sin_cache,
+            params.kv_a_layernorm.variance_epsilon,
+            use_int8_w8a8=params.qkv_proj_with_rope_is_int8,
+            q_a_proj_scale=(
+                params.q_a_proj.weight_scale
+                if params.qkv_proj_with_rope_is_int8
+                else None
+            ),
+            q_b_proj_scale=(
+                params.q_b_proj.weight_scale
+                if params.qkv_proj_with_rope_is_int8
+                else None
+            ),
+            kv_a_proj_scale=(
+                params.kv_a_proj_with_mqa.weight_scale
+                if params.qkv_proj_with_rope_is_int8
+                else None
+            ),
+        )
+        attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
+        attn_output = attn_output.view(-1, params.num_local_heads, params.kv_lora_rank)
+
+        w_vc = self.w_vc
+        w_scale = self.w_scale
+        if w_vc.dtype == torch.float8_e4m3fnuz:
+            # TODO(kernel): add bmm_fp8 for torch.float8_e4m3fnuz
+            attn_bmm_output = torch.bmm(
+                attn_output.to(torch.bfloat16).transpose(0, 1),
+                w_vc.to(torch.bfloat16) * w_scale,
+            )
+        elif w_vc.dtype == torch.float8_e4m3fn:
+            attn_output_val, attn_output_scale = input_to_float8(
+                attn_output.transpose(0, 1), torch.float8_e4m3fn
+            )
+            attn_bmm_output = bmm_fp8(
+                attn_output_val,
+                w_vc,
+                attn_output_scale,
+                w_scale,
+                torch.bfloat16,
+            )
+        else:
+            # See [Note] Align shapes of bmm inputs.
+            B = w_vc.size(0)
+            N = w_vc.size(1)
+            M = attn_output.size(0)
+            output = torch.empty([M, int(B * N)], dtype=attn_output.dtype)
+            attn_bmm_output = output.view([M, B, N]).transpose_(0, 1)
+            sgl_kernel.cpu.bmm(attn_bmm_output, attn_output.transpose(0, 1), w_vc)
+            attn_output = output
+        output, _ = self.o_proj(attn_output)
+
+        return output
+
+    def forward_absorb_decode_fused_cpu(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+    ) -> torch.Tensor:
+        params = self.params
+        assert (
+            params.q_lora_rank is not None and self.use_intel_amx_backend
+        ), "forward_absorb_decode_fused_cpu requires q_lora_rank is not None and use_intel_amx_backend"
 
         # TODO: add FP8 support
         assert self.w_vc.dtype not in [torch.float8_e4m3fnuz, torch.float8_e4m3fn]
-        output = sgl_kernel.cpu.forward_absorb(
+        output = sgl_kernel.cpu.forward_absorb_decode_fused(
             hidden_states,
             params.q_a_proj.weight,
             params.q_b_proj.weight,
