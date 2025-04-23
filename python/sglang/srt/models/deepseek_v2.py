@@ -1162,7 +1162,6 @@ class DeepseekV2AttentionMLA(nn.Module):
             params.o_proj_is_fp8,
             hidden_states.dtype,  # TODO: should be attn_output.dtype. Is it same as hidden_states.dtype?
             params.o_proj_scale,
-            True,  # is_vnni
             params.q_a_proj_weight_scale,
             params.q_b_proj_weight_scale,
             params.kv_a_proj_with_mqa_weight_scale,
@@ -1170,6 +1169,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             params.device_group,
             params.reduce_op,
             params.o_proj_weight_block_size,
+            True,  # is_vnni
         )
 
         return output
