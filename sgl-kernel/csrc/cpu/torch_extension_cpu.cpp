@@ -158,6 +158,25 @@ at::Tensor shared_expert_cpu(
     std::optional<at::Tensor>& a2_scale,
     bool is_vnni);
 
+at::Tensor forward_moe_fused_cpu(
+    at::Tensor& hidden_states, // MoEGate
+    at::Tensor& MoEGate_weight, // MoEGate
+    std::optional<at::Tensor>& bias, // MoEGate
+    // at::Tensor& fused_experts_w13_weight,
+    // at::Tensor& fused_experts_w2_weight,
+    // at::Tensor& topk_weights,
+    // at::Tensor& topk_ids,
+    // bool fused_experts_inplace,
+    // bool shared_expert_inplace,
+    // bool fused_experts_use_int8_w8a8,
+    // bool fused_experts_use_fp8_w8a16,
+    // std::optional<at::Tensor>& fused_experts_w1_scale,
+    // std::optional<at::Tensor>& fused_experts_w2_scale,
+    // std::optional<std::vector<int64_t>> fused_experts_block_size,
+    // std::optional<at::Tensor>& fused_experts_a1_scale,
+    // std::optional<at::Tensor>& fused_experts_a2_scale,
+    bool is_vnni);
+
 // weight absorption
 std::tuple<at::Tensor, at::Tensor, at::Tensor> qkv_proj_with_rope( at::Tensor& hidden_states,
     at::Tensor& q_a_proj_weight, at::Tensor& q_b_proj_weight, at::Tensor& kv_a_proj_weight,
@@ -231,6 +250,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   // shared expert
   m.def("shared_expert_cpu", &shared_expert_cpu, "shared expert kernel for CPU");
+  
+  // fused MoE
+  m.def("forward_moe_fused_cpu", &forward_moe_fused_cpu, "fused MoE kernel for CPU");
 
   // all reduce
   m.def("initialize", &initialize, "shared memory initialization for CPU");

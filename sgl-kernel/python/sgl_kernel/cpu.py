@@ -70,6 +70,45 @@ def shared_expert(
     )
 
 
+def forward_moe_fused(
+    hidden_states,
+    MoEGate_weight,
+    MoEGate_bias,
+    # fused_experts_w13_weight,
+    # fused_experts_w2_weight,
+    # topk_weights,
+    # topk_ids,
+    # fused_experts_inplace,
+    # shared_expert_inplace,
+    # fused_experts_use_int8_w8a8,
+    # fused_experts_use_fp8_w8a16,
+    # fused_experts_w1_scale,
+    # fused_experts_w2_scale,
+    # fused_experts_block_size,
+    # fused_experts_a1_scale,
+    # fused_experts_a2_scale,
+    is_vnni=True,
+):
+    return sgl_kernel.common_ops.forward_moe_fused_cpu(
+        hidden_states,
+        MoEGate_weight,
+        MoEGate_bias,
+        # fused_experts_w13_weight,
+        # fused_experts_w2_weight,
+        # topk_weights,
+        # topk_ids,
+        # fused_experts_inplace,
+        # shared_expert_inplace,
+        # fused_experts_use_int8_w8a8,
+        # fused_experts_use_fp8_w8a16,
+        # fused_experts_w1_scale,
+        # fused_experts_w2_scale,
+        # fused_experts_block_size,
+        # fused_experts_a1_scale,
+        # fused_experts_a2_scale,
+        is_vnni,
+    )
+
 def convert_weight_packed(weight):
     return sgl_kernel.common_ops.convert_weight_packed(weight)
 
