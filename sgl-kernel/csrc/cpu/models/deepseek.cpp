@@ -197,3 +197,46 @@ at::Tensor forward_absorb_decode_fused_cpu(
     o_proj_block_size,
     is_vnni);
 }
+
+// This is the fused forward function of sglang/python/sglang/srt/models/deepseek_v2.py:DeepseekV2MoE
+at::Tensor forward_moe_fused_cpu(
+    at::Tensor& hidden_states, // MoEGate
+    at::Tensor& MoEGate_weight, // MoEGate
+    at::Tensor& fused_experts_w13_weight,
+    at::Tensor& fused_experts_w2_weight,
+    at::Tensor& topk_weights,
+    at::Tensor& topk_ids,
+    bool fused_experts_inplace,
+    bool shared_expert_inplace,
+    bool fused_experts_use_int8_w8a8,
+    bool fused_experts_use_fp8_w8a16,
+    std::optional<at::Tensor>& fused_experts_w1_scale,
+    std::optional<at::Tensor>& fused_experts_w2_scale,
+    std::optional<std::vector<int64_t>> fused_experts_block_size,
+    std::optional<at::Tensor>& fused_experts_a1_scale,
+    std::optional<at::Tensor>& fused_experts_a2_scale,
+    bool is_vnni) {
+  // TODO: add more shape args
+  RECORD_FUNCTION("sgl-kernel::forward_moe_fused_cpu", std::vector<c10::IValue>({
+    hidden_states, MoEGate_weight}));
+
+  // stage 1:
+  // num_tokens, hidden_dim = hidden_states.shape
+  // hidden_states = hidden_states.view(-1, hidden_dim)
+  auto sizes = hidden_states.sizes();
+  int64_t num_tokens = sizes[0];
+  int64_t hidden_dim = sizes[1];
+  hidden_states = hidden_states.view({-1, hidden_dim});
+
+  // stage 2:
+  // router_logits = self.gate_impl(hidden_states)
+  // TODO: ensure bias is None
+  auto router_logits = weight_packed_linear(hidden_states, MoEGate_weight, nullptr, is_vnni);
+
+  // stage 3:
+  // fused_experts_out = self.experts_impl(
+  //     hidden_states=hidden_states, router_logits=router_logits
+  // )
+
+  return router_logits
+}
