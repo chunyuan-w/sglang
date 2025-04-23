@@ -807,10 +807,6 @@ class DeepseekV2AttentionMLA(nn.Module):
                     and self.use_intel_amx_backend
                     and not self.qkv_proj_with_rope_is_fp8  # TODO: remove this when forward_absorb_decode_fused_cpu is ready
                 ):
-                    print(
-                        f"my is decode: {forward_batch.forward_mode.is_decode()}",
-                        flush=True,
-                    )
                     if forward_batch.forward_mode.is_decode():
                         return self.forward_absorb_decode_fused_cpu(
                             positions, hidden_states, forward_batch
