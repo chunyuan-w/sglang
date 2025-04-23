@@ -84,13 +84,13 @@ at::Tensor forward_absorb_decode_fused_cpu(
     bool o_proj_use_int8_w8a8, // o_proj
     bool o_proj_use_fp8_w8a16, // o_proj
     at::ScalarType o_proj_out_dtype, // o_proj
-    std::optional<at::Tensor>& o_proj_scales2, // o_proj
     std::optional<at::Tensor>& q_a_proj_scale, // qkv_proj_with_rope
     std::optional<at::Tensor>& q_b_proj_scale, // qkv_proj_with_rope
     std::optional<at::Tensor>& kv_a_proj_scale, // qkv_proj_with_rope
     std::optional<at::Tensor>& bmm_scale, // bmm
     std::optional<c10::intrusive_ptr<c10d::ProcessGroup>> process_group, // o_proj
     std::optional<py::object> op, // o_proj
+    std::optional<at::Tensor>& o_proj_scale, // o_proj
     std::optional<std::vector<int64_t>> o_proj_block_size, // o_proj
     bool is_vnni  // qkv_proj_with_rope, bmm, o_proj
 );

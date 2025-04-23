@@ -1230,13 +1230,13 @@ class DeepseekV2AttentionMLA(nn.Module):
             params.o_proj_is_int8,
             params.o_proj_is_fp8,
             hidden_states.dtype,
-            params.o_proj_scale,
             params.q_a_proj_weight_scale,
             params.q_b_proj_weight_scale,
             params.kv_a_proj_with_mqa_weight_scale,
             None,  # bmm_scale
             params.device_group,
             params.reduce_op,
+            params.o_proj_scale,
             params.o_proj_weight_block_size,
         )
 
