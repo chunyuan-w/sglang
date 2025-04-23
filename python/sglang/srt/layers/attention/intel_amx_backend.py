@@ -90,37 +90,36 @@ class IntelAMXAttnBackend(AttentionBackend):
 
     def forward_decode(
         self,
-        q_tensor: torch.Tensor,
+        q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
         layer: RadixAttention,
         forward_batch: ForwardBatch,
         save_kv_cache=True,
     ):
-        
-        attn_logits, _ = self.forward_metadata # [1, 16, 8, 513]
+        attn_logits, _ = self.forward_metadata
 
-        q_tensor = q_tensor.reshape(-1, layer.tp_q_head_num * layer.qk_head_dim) # [[1, 16, 576]] -> [1, 9216]
+        q = q.reshape(-1, layer.tp_q_head_num * layer.qk_head_dim)
 
-        if layer.qk_head_dim != layer.v_head_dim: # 576, 512
-            o = q_tensor.new_empty((q_tensor.shape[0], layer.tp_q_head_num * layer.v_head_dim)) # [1, 8192 (16 * 512)]
+        if layer.qk_head_dim != layer.v_head_dim:
+            o = q.new_empty((q.shape[0], layer.tp_q_head_num * layer.v_head_dim))
         else:
-            o = torch.empty_like(q_tensor)
+            o = torch.empty_like(q)
 
         self.decode_attention_fwd(
-            q_tensor.view(-1, layer.tp_q_head_num, layer.qk_head_dim), # [1, 16, 576]
-            forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id), # [44438539, 1, 576]
-            forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id), # [44438539, 1, 512]
-            o.view(-1, layer.tp_q_head_num, layer.v_head_dim), # [1, 16, 512]
-            k, # [1, 1, 576]
-            v, # [1, 1, 512]
-            forward_batch.out_cache_loc, # [1]
-            forward_batch.req_to_token_pool.req_to_token, # [4097, 163844]
-            forward_batch.req_pool_indices, # [1]
-            forward_batch.seq_lens, # [1]
-            attn_logits, # [1, 16, 8, 513]
-            layer.scaling, # 0.1147213867929261
-            layer.logit_cap, # 0.0
+            q.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
+            forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id),
+            forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id),
+            o.view(-1, layer.tp_q_head_num, layer.v_head_dim),
+            k,
+            v,
+            forward_batch.out_cache_loc,
+            forward_batch.req_to_token_pool.req_to_token,
+            forward_batch.req_pool_indices,
+            forward_batch.seq_lens,
+            attn_logits,
+            layer.scaling,
+            layer.logit_cap,
         )
 
         return o
