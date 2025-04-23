@@ -126,18 +126,6 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2,
 at::Tensor int8_scaled_mm_with_quant(at::Tensor& mat1, at::Tensor& mat2, at::Tensor& scales2,
     std::optional<at::Tensor>& bias, at::ScalarType out_dtype, bool is_vnni);
 
-// row_parallel_linear
-at::Tensor row_parallel_linear_forward(
-  at::Tensor& mat1, at::Tensor& mat2, std::optional<at::Tensor>& bias,
-  int tp_size,
-  std::optional<c10::intrusive_ptr<c10d::ProcessGroup>> process_group, std::optional<py::object> op,
-  bool use_int8_w8a8,
-  bool use_fp8_w8a16,
-  at::ScalarType out_dtype,
-  std::optional<at::Tensor>& scales2,
-  std::optional<std::vector<int64_t>> block_size,
-  bool is_vnni);
-
 // bmm
 void bmm_cpu(at::Tensor& out, at::Tensor& mat1, at::Tensor& mat2, bool is_vnni,
     std::optional<at::Tensor>& scale);
@@ -236,8 +224,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   // quant + igemm
   m.def("int8_scaled_mm_with_quant", &int8_scaled_mm_with_quant, "fused per row quant and int8 scaled mm for intel AMX");
-
-  m.def("row_parallel_linear_forward", &row_parallel_linear_forward, "row_parallel_linear");
 
   // bmm
   m.def("bmm_cpu", &bmm_cpu, "bmm kernel for intel AMX");

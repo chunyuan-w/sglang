@@ -947,26 +947,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             else:
                 attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
                 attn_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
-
-        # output, _ = self.o_proj(attn_output)
-        output = sgl_kernel.common_ops.row_parallel_linear_forward(
-            attn_output,
-            self.o_proj.weight,
-            None,  # TODO: bias is always None in o_proj
-            self.o_proj.tp_size,
-            get_tp_group().device_group if self.o_proj.tp_size > 1 else None,
-            torch.distributed.ReduceOp.SUM if self.o_proj.tp_size > 1 else None,
-            self.o_proj_is_int8,
-            self.o_proj_is_fp8,
-            attn_output.dtype,
-            (
-                self.o_proj.weight_scale
-                if self.o_proj_is_int8
-                else self.o_proj.weight_scale_inv if self.o_proj_is_fp8 else None
-            ),
-            self.o_proj_weight_block_size,
-            True,  # is_wnni
-        )
+        output, _ = self.o_proj(attn_output)
 
         return output
 
