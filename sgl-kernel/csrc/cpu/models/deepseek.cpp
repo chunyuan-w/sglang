@@ -20,7 +20,6 @@ at::Tensor row_parallel_linear_forward(
   bool is_vnni) {
   // # Only fuse bias add into GEMM for rank 0 (this ensures that
   // # bias will not get added more than once in TP>1 case)
-  // bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
   const bool has_bias = bias.has_value();
   const float* bias_data = nullptr;
   if (tp_rank == 0 && has_bias) {
@@ -29,12 +28,13 @@ at::Tensor row_parallel_linear_forward(
 
   at::Tensor output_parallel;
   if (use_int8_w8a8) {
-    // TODO: check scales2 has value
+    TORCH_CHECK(scales2.has_value(), "missing scales2 for int8 w8a8 row_parallel_linear_forward");
     output_parallel = int8_scaled_mm_with_quant(
       mat1, mat2, scales2.value(), bias, out_dtype, is_vnni // TODO: add mat.dtype as an input param?
     );
   } else if (use_fp8_w8a16) {
-    // TODO: check scales2 and block_size has value
+    TORCH_CHECK(scales2.has_value(), "missing scales2 for fp8 w8a16 row_parallel_linear_forward");
+    TORCH_CHECK(block_size.has_value(), "missing block_size for fp8 w8a16 row_parallel_linear_forward");
     output_parallel = fp8_scaled_mm_cpu(
       mat1, mat2, scales2.value(), block_size.value(), bias, out_dtype, is_vnni
     );
@@ -43,7 +43,8 @@ at::Tensor row_parallel_linear_forward(
   }
 
   if (tp_size > 1) {
-    // TODO: assert pg and op has value
+    TORCH_CHECK(process_group.has_value(), "missing process_group for tp_size > 1 row_parallel_linear_forward");
+    TORCH_CHECK(op.has_value(), "missing reduce op for tp_size > 1 row_parallel_linear_forward");
     shm_allreduce(output_parallel, process_group.value(), op.value());
   }
 
@@ -73,7 +74,6 @@ at::Tensor forward_absorb_cpu(
     at::Tensor& o_proj_weight,
     std::optional<at::Tensor>& o_proj_bias,
 
-
     double eps,
     bool use_int8_w8a8,
 
@@ -95,7 +95,6 @@ at::Tensor forward_absorb_cpu(
     at::ScalarType o_proj_out_dtype,
     std::optional<at::Tensor>& o_proj_scales2,
 
-    
     std::optional<at::Tensor>& q_a_proj_scale,
     std::optional<at::Tensor>& q_b_proj_scale,
     std::optional<at::Tensor>& kv_a_proj_scale,
@@ -107,12 +106,13 @@ at::Tensor forward_absorb_cpu(
     std::optional<std::vector<int64_t>> o_proj_block_size,
     bool is_vnni) {
 
-  RECORD_FUNCTION("sgl-kernel::forward_absorb_fused_cpu", std::vector<c10::IValue>({
+  RECORD_FUNCTION("sgl-kernel::forward_absorb_cpu", std::vector<c10::IValue>({
     hidden_states, q_a_proj_weight, q_b_proj_weight, kv_a_proj_weight, w_kc,
     q_a_layernorm_weight, kv_a_layernorm_weight, positions, cos_sin_cache,
     k_cache, v_cache, loc, attn_logits, req_to_token, req_pool_indices,
     seq_lens, w_vc, o_proj_weight}));
 
+  // stage 1: q_input, k_input, v_input = qkv_proj_with_rope(...)
   at::Tensor query, key, value;
   std::tie(query, key, value) = qkv_proj_with_rope(
     hidden_states,
@@ -131,20 +131,30 @@ at::Tensor forward_absorb_cpu(
     kv_a_proj_scale,
     is_vnni);
 
-// TODO: is the below code needed for R1?
-//   if k is not None:
-//     // For cross-layer sharing, kv can be None
-//     assert v is not None
-//     k = k.view(-1, self.tp_k_head_num, self.qk_head_dim)
-//     v = v.view(-1, self.tp_v_head_num, self.v_head_dim)
+  // stage 2:
+  // attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
+  // attn_output = attn_output.view(-1, params.num_local_heads, params.kv_lora_rank)
+  
+  // stage 2.1:
+  // sglang/python/sglang/srt/layers/radix_attention.py: RadixAttention: forward
+  // For DeepSeek R1, key and value returned from qkv_proj_with_rope is 3D, thus the below code is not needed.
+  //   if k is not None:
+  //     // For cross-layer sharing, kv can be None
+  //     assert v is not None
+  //     k = k.view(-1, self.tp_k_head_num, self.qk_head_dim)
+  //     v = v.view(-1, self.tp_v_head_num, self.v_head_dim)
+  CHECK_DIM(3, key);
+  CHECK_DIM(3, value);
 
+  // stage 2.2:
+  // sglang/python/sglang/srt/layers/attention/intel_amx_backend.py: IntelAMXAttnBackend: forward_decode
+  // q = q.reshape(-1, layer.tp_q_head_num * layer.qk_head_dim)
 
-    // q = q.reshape(-1, layer.tp_q_head_num * layer.qk_head_dim)
-
-    // if layer.qk_head_dim != layer.v_head_dim:
-    //     o = q.new_empty((q.shape[0], layer.tp_q_head_num * layer.v_head_dim))
-    // else:
-    //     o = torch.empty_like(q)
+  // if layer.qk_head_dim != layer.v_head_dim:
+  //     o = q.new_empty((q.shape[0], layer.tp_q_head_num * layer.v_head_dim))
+  // else:
+  //     o = torch.empty_like(q)
+  // self.decode_attention_fwd(...)
   query= query.reshape({-1, tp_q_head_num * qk_head_dim});
   at::Tensor attn_output;
   if (qk_head_dim != v_head_dim) {
@@ -154,7 +164,6 @@ at::Tensor forward_absorb_cpu(
   }
   auto query_3d = query.view({-1, tp_q_head_num, qk_head_dim});
   auto o_3d = attn_output.view({-1, tp_q_head_num, v_head_dim});
-
   decode_attention_cpu(
     query_3d,
     k_cache,
@@ -170,8 +179,10 @@ at::Tensor forward_absorb_cpu(
     sm_scale,
     logit_cap);
 
-  // attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
+  // stage 2.3: attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
   attn_output = attn_output.view({-1, num_local_heads, kv_lora_rank});
+  
+  // stage 3: bmm
   int64_t B = w_vc.sizes()[0];
   int64_t N = w_vc.sizes()[1];
   int64_t M = attn_output.sizes()[0];
@@ -182,6 +193,7 @@ at::Tensor forward_absorb_cpu(
   attn_output = attn_output.transpose(0, 1);
   bmm_cpu(attn_bmm_output, attn_output, w_vc, is_vnni, bmm_scale);
 
+  // stage 4: o_proj
   return row_parallel_linear_forward(
     output,
     o_proj_weight,
