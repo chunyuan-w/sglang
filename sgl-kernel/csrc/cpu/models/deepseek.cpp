@@ -102,8 +102,11 @@ at::Tensor forward_absorb_cpu(
     std::optional<std::vector<int64_t>> o_proj_block_size,
     bool is_vnni) {
 
-  // TODO: update shape args
-  RECORD_FUNCTION("sgl-kernel::forward_absorb_cpu", std::vector<c10::IValue>({hidden_states, o_proj_weight}));  
+  RECORD_FUNCTION("sgl-kernel::forward_absorb_fused_cpu", std::vector<c10::IValue>({
+    hidden_states, q_a_proj_weight, q_b_proj_weight, kv_a_proj_weight, w_kc,
+    q_a_layernorm_weight, kv_a_layernorm_weight, positions, cos_sin_cache,
+    k_cache, v_cache, loc, attn_logits, req_to_token, req_pool_indices,
+    seq_lens, w_vc, o_proj_weight}));
 
   at::Tensor query, key, value;
   std::tie(query, key, value) = qkv_proj_with_rope(
@@ -122,8 +125,6 @@ at::Tensor forward_absorb_cpu(
     q_b_proj_scale,
     kv_a_proj_scale,
     is_vnni);
-
-  // TODO: allocate o in cpp or in python?
 
 // TODO: is the below code needed for R1?
 //   if k is not None:
@@ -174,7 +175,6 @@ at::Tensor forward_absorb_cpu(
   at::Tensor attn_bmm_output = output.view({M, B, N}).transpose_(0, 1);
 
   attn_output = attn_output.transpose(0, 1);
-  // TODO: is_vnni: set it as an arg to this OP
   bmm_cpu(attn_bmm_output, attn_output, w_vc, is_vnni, bmm_scale);
 
   return row_parallel_linear_forward(

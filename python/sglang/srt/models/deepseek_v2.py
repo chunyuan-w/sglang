@@ -713,13 +713,11 @@ class DeepseekV2AttentionMLA(nn.Module):
             params.q_a_proj = self.q_a_proj
             params.q_b_proj = self.q_b_proj
             params.q_a_layernorm = self.q_a_layernorm
-            
             params.q_a_proj_weight_scale = params.q_a_proj.weight_scale if self.qkv_proj_with_rope_is_int8 else None
             params.q_b_proj_weight_scale = params.q_b_proj.weight_scale if self.qkv_proj_with_rope_is_int8 else None
             
         params.kv_a_proj_with_mqa = self.kv_a_proj_with_mqa
         params.kv_a_proj_with_mqa_weight_scale = params.kv_a_proj_with_mqa.weight_scale if self.qkv_proj_with_rope_is_int8 else None
-
         params.kv_a_layernorm = self.kv_a_layernorm
         params.rotary_emb = self.rotary_emb
         params.qkv_proj_with_rope_is_int8 = self.qkv_proj_with_rope_is_int8
@@ -727,7 +725,6 @@ class DeepseekV2AttentionMLA(nn.Module):
         params.kv_lora_rank = self.kv_lora_rank
 
         params.attn_mqa_layer_id = self.attn_mqa.layer_id
-
         params.attn_mqa_scaling = self.attn_mqa.scaling
         params.attn_mqa_logit_cap = self.attn_mqa.logit_cap
         params.attn_mqa_tp_k_head_num = self.attn_mqa.tp_k_head_num
@@ -1141,12 +1138,12 @@ class DeepseekV2AttentionMLA(nn.Module):
             params.o_proj_tp_size,
             params.o_proj_is_int8,
             params.o_proj_is_fp8,
-            hidden_states.dtype,  # TODO: should be attn_output.dtype. Is it same as hidden_states.dtype?
+            hidden_states.dtype,
             params.o_proj_scale,
             params.q_a_proj_weight_scale,
             params.q_b_proj_weight_scale,
             params.kv_a_proj_with_mqa_weight_scale,
-            None,  # bmm_scale # TODO: how about fp8 scale?
+            None,  # bmm_scale
             params.device_group,
             params.reduce_op,
             params.o_proj_weight_block_size,
