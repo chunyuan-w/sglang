@@ -1,6 +1,7 @@
 #include <torch/extension.h>
 #include <ATen/record_function.h>
 
+#include "ops.h"
 #include "shm.h"
 
 // Communication settings

@@ -47,6 +47,62 @@ void extend_attention_cpu(at::Tensor& q_extend, at::Tensor& k_extend, at::Tensor
     at::Tensor& extend_seq_lens, at::Tensor& extend_start_loc,
     int64_t max_len_extend, double sm_scale, double logit_cap);
 
+// fused forward_absorb
+at::Tensor forward_absorb_fused_cpu(
+    at::Tensor& hidden_states,
+    at::Tensor& q_a_proj_weight,
+    at::Tensor& q_b_proj_weight,
+    at::Tensor& kv_a_proj_weight,
+    at::Tensor& w_kc,
+    at::Tensor& q_a_layernorm_weight,
+    at::Tensor& kv_a_layernorm_weight,
+    at::Tensor& positions,
+    at::Tensor& cos_sin_cache,
+
+    at::Tensor& k_cache,
+    at::Tensor& v_cache,
+    at::Tensor& loc,
+    at::Tensor& attn_logits,
+    at::Tensor& req_to_token,
+    at::Tensor& req_pool_indices,
+    at::Tensor& seq_lens,
+    at::Tensor& w_vc,
+
+    at::Tensor& o_proj_weight,
+    std::optional<at::Tensor>& o_proj_bias,
+
+
+    double eps,
+    bool use_int8_w8a8,
+
+    double sm_scale,
+    double logit_cap,
+    int tp_k_head_num,
+    int qk_head_dim,
+    int tp_v_head_num,
+    int v_head_dim,
+    int tp_q_head_num,
+    int num_local_heads,
+    int kv_lora_rank,
+
+    int tp_size,
+
+    bool o_proj_use_int8_w8a8,
+    bool o_proj_use_fp8_w8a16,
+    at::ScalarType o_proj_out_dtype,
+    std::optional<at::Tensor>& o_proj_scales2,
+
+    bool is_vnni,
+    std::optional<at::Tensor>& q_a_proj_scale,
+    std::optional<at::Tensor>& q_b_proj_scale,
+    std::optional<at::Tensor>& kv_a_proj_scale,
+    std::optional<at::Tensor>& bmm_scale,
+
+    std::optional<c10::intrusive_ptr<c10d::ProcessGroup>> process_group,
+    std::optional<py::object> op,
+
+    std::optional<std::vector<int64_t>> o_proj_block_size);
+
 // weight prepack
 at::Tensor convert_weight_packed(at::Tensor& weight);
 
@@ -148,6 +204,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   // extend
   m.def("extend_attention_cpu", &extend_attention_cpu, "Attention extend for CPU");
+
+  // fused forward_absorb
+  m.def("forward_absorb_fused_cpu", &forward_absorb_fused_cpu, "fused forward_absorb for intel AMX");
 
   // weight prepack
   m.def("convert_weight_packed", &convert_weight_packed, "prepack weight to vnni format for intel AMX");
