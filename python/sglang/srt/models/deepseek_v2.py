@@ -196,6 +196,14 @@ class DeepseekV2MoE(nn.Module):
             prefix=add_prefix("experts", prefix),
         )
 
+        self.experts_is_int8 = None
+        self.experts_is_fp8 = None
+        self.experts_w1_scale = None
+        self.experts_w2_scale = None
+        self.experts_a1_scale = None
+        self.experts_a2_scale = None
+        self.experts_weight_block_size = None
+
         # Cache shared_experts and related attributes
         self.shared_experts = None
         self.shared_experts_gate_up_proj = None
@@ -244,6 +252,22 @@ class DeepseekV2MoE(nn.Module):
                 )
 
                 self.shared_experts_is_fp8 = True
+        
+        if self.experts.w13_weight.dtype == torch.int8:
+            assert self.experts.w2_weight.dtype == self.experts.w13_weight.dtype
+            self.experts_is_int8 = True
+            # self.experts_w1_scale = self.experts.w13_weight_scale
+            # self.experts_w2_scale = self.experts.w2_weight_scale
+            # self.experts_a1_scale = self.experts.w13_input_scale
+            # self.experts_a2_scale = self.experts.w2_input_scale
+            
+            
+        if self.experts.w13_weight.dtype == torch.float8_e4m3fn:
+            assert self.experts.w2_weight.dtype == self.experts.w13_weight.dtype
+            self.experts_is_fp8 = True
+            # self.experts_w1_scale = self.experts.w13_weight_scale_inv
+            # self.experts_w2_scale = self.experts.w2_weight_scale_inv            
+            self.experts_weight_block_size = self.experts.quant_method.quant_config.weight_block_size
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # TODO: what check is needed?
@@ -259,24 +283,44 @@ class DeepseekV2MoE(nn.Module):
             return self.forward_normal(hidden_states)
 
     def forward_moe_fused_cpu(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # num_tokens, hidden_dim = hidden_states.shape
+        # TODO: remove this line
+        num_tokens, hidden_dim = hidden_states.shape
         # hidden_states = hidden_states.view(-1, hidden_dim)
         # if self.gate_impl is None:
         #     self.gate_impl = self.gate.forward
         # # router_logits: (num_tokens, n_experts)
         # router_logits = self.gate_impl(hidden_states)
         
-        router_logits = sgl_kernel.cpu.forward_moe_fused(
+        fused_experts_out = sgl_kernel.cpu.forward_moe_fused(
             hidden_states,
             self.gate.weight,
             None, #bias
+            self.experts.w13_weight,
+            self.experts.w2_weight,
+            self.experts.top_k,
+            self.experts.use_grouped_topk,
+            self.experts.renormalize,
+            self.experts_is_int8,
+            self.experts_is_fp8,
+            False, # fused_experts_inplace
+            self.experts.topk_group,
+            self.experts.num_expert_group,
+            self.experts.correction_bias,
+            self.experts.w13_weight_scale if self.experts_is_int8
+            else self.experts.w13_weight_scale_inv if self.experts_is_fp8
+            else None,
+            self.experts.w2_weight_scale if self.experts_is_int8
+            else self.experts.w2_weight_scale_inv if self.experts_is_fp8
+            else None,
+            self.experts.w13_input_scale if self.experts_is_int8 else None,
+            self.experts.w2_input_scale if self.experts_is_int8 else None,
+            self.experts_weight_block_size,
         )
-        # TODO: move select experts into c++
-        if self.experts_impl is None:
-            self.experts_impl = self.experts.forward
-        fused_experts_out = self.experts_impl(
-            hidden_states=hidden_states, router_logits=router_logits
-        )
+        # if self.experts_impl is None:
+        #     self.experts_impl = self.experts.forward
+        # fused_experts_out = self.experts_impl(
+        #     hidden_states=hidden_states, router_logits=router_logits
+        # )
 
         # Use cached attributes instead of dynamic access
         gate_up_proj = self.shared_experts_gate_up_proj

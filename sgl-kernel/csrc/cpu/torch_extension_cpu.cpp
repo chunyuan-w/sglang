@@ -162,19 +162,23 @@ at::Tensor forward_moe_fused_cpu(
     at::Tensor& hidden_states, // MoEGate
     at::Tensor& MoEGate_weight, // MoEGate
     std::optional<at::Tensor>& bias, // MoEGate
-    // at::Tensor& fused_experts_w13_weight,
-    // at::Tensor& fused_experts_w2_weight,
-    // at::Tensor& topk_weights,
-    // at::Tensor& topk_ids,
-    // bool fused_experts_inplace,
+    at::Tensor& fused_experts_w13_weight, // experts
+    at::Tensor& fused_experts_w2_weight, // experts
+    int top_k, // select_experts
+    bool use_grouped_topk, // select_experts
+    bool renormalize, // select_experts
+    bool fused_experts_use_int8_w8a8, // experts
+    bool fused_experts_use_fp8_w8a16, // experts  
+    bool fused_experts_inplace, // experts
     // bool shared_expert_inplace,
-    // bool fused_experts_use_int8_w8a8,
-    // bool fused_experts_use_fp8_w8a16,
-    // std::optional<at::Tensor>& fused_experts_w1_scale,
-    // std::optional<at::Tensor>& fused_experts_w2_scale,
-    // std::optional<std::vector<int64_t>> fused_experts_block_size,
-    // std::optional<at::Tensor>& fused_experts_a1_scale,
-    // std::optional<at::Tensor>& fused_experts_a2_scale,
+    std::optional<int> topk_group, // select_experts
+    std::optional<int> num_expert_group, // select_experts
+    std::optional<at::Tensor>& correction_bias, // select_experts
+    std::optional<at::Tensor>& fused_experts_w1_scale, // experts
+    std::optional<at::Tensor>& fused_experts_w2_scale, // experts
+    std::optional<at::Tensor>& fused_experts_a1_scale, // experts
+    std::optional<at::Tensor>& fused_experts_a2_scale, // experts
+    std::optional<std::vector<int64_t>> fused_experts_block_size, // experts
     bool is_vnni);
 
 // weight absorption

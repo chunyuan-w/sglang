@@ -45,6 +45,39 @@ extern at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, at::Tens
 
 extern void shm_allreduce(at::Tensor& data, c10::intrusive_ptr<c10d::ProcessGroup> process_group, py::object op);
 
+extern std::tuple<at::Tensor, at::Tensor> grouped_topk_cpu(
+    at::Tensor& hidden_states,
+    at::Tensor& gating_output,
+    int64_t topk,
+    bool renormalize,
+    int64_t num_expert_group,
+    int64_t topk_group);
+
+extern std::tuple<at::Tensor, at::Tensor> biased_grouped_topk_cpu(
+    at::Tensor& hidden_states,
+    at::Tensor& gating_output,
+    at::Tensor& correction_bias,
+    int64_t topk,
+    bool renormalize,
+    int64_t num_expert_group,
+    int64_t topk_group);
+
+extern at::Tensor fused_experts_cpu(
+    at::Tensor& hidden_states,
+    at::Tensor& w1,
+    at::Tensor& w2,
+    at::Tensor& topk_weights,
+    at::Tensor& topk_ids,
+    bool inplace,
+    bool use_int8_w8a8,
+    bool use_fp8_w8a16,
+    std::optional<at::Tensor>& w1_scale,
+    std::optional<at::Tensor>& w2_scale,
+    std::optional<std::vector<int64_t>> block_size,
+    std::optional<at::Tensor>& a1_scale,
+    std::optional<at::Tensor>& a2_scale,
+    bool is_vnni);
+
 // This function implements the forward function of sglang/python/sglang/srt/layers/linear.py:RowParallelLinear
 at::Tensor row_parallel_linear_forward(
     at::Tensor& mat1, at::Tensor& mat2,
@@ -248,19 +281,23 @@ at::Tensor forward_moe_fused_cpu(
     at::Tensor& hidden_states, // MoEGate
     at::Tensor& MoEGate_weight, // MoEGate
     std::optional<at::Tensor>& bias, // MoEGate
-    // at::Tensor& fused_experts_w13_weight,
-    // at::Tensor& fused_experts_w2_weight,
-    // at::Tensor& topk_weights,
-    // at::Tensor& topk_ids,
-    // bool fused_experts_inplace,
+    at::Tensor& fused_experts_w13_weight, // experts
+    at::Tensor& fused_experts_w2_weight, // experts
+    int top_k, // select_experts
+    bool use_grouped_topk, // select_experts
+    bool renormalize, // select_experts
+    bool fused_experts_use_int8_w8a8, // experts
+    bool fused_experts_use_fp8_w8a16, // experts  
+    bool fused_experts_inplace, // experts
     // bool shared_expert_inplace,
-    // bool fused_experts_use_int8_w8a8,
-    // bool fused_experts_use_fp8_w8a16,
-    // std::optional<at::Tensor>& fused_experts_w1_scale,
-    // std::optional<at::Tensor>& fused_experts_w2_scale,
-    // std::optional<std::vector<int64_t>> fused_experts_block_size,
-    // std::optional<at::Tensor>& fused_experts_a1_scale,
-    // std::optional<at::Tensor>& fused_experts_a2_scale,
+    std::optional<int> topk_group, // select_experts
+    std::optional<int> num_expert_group, // select_experts
+    std::optional<at::Tensor>& correction_bias, // select_experts
+    std::optional<at::Tensor>& fused_experts_w1_scale, // experts
+    std::optional<at::Tensor>& fused_experts_w2_scale, // experts
+    std::optional<at::Tensor>& fused_experts_a1_scale, // experts
+    std::optional<at::Tensor>& fused_experts_a2_scale, // experts
+    std::optional<std::vector<int64_t>> fused_experts_block_size, // experts
     bool is_vnni) {
   // TODO: add more shape args
   RECORD_FUNCTION("sgl-kernel::forward_moe_fused_cpu", std::vector<c10::IValue>({
@@ -283,5 +320,58 @@ at::Tensor forward_moe_fused_cpu(
   //     hidden_states=hidden_states, router_logits=router_logits
   // )
 
-  return router_logits;
+  // stage 3.1:
+  // topk_weights, topk_ids = select_experts(
+  //     hidden_states=x,
+  //     router_logits=router_logits,
+  //     use_grouped_topk=use_grouped_topk,
+  //     top_k=top_k,
+  //     renormalize=renormalize,
+  //     topk_group=topk_group,
+  //     num_expert_group=num_expert_group,
+  //     custom_routing_function=custom_routing_function,
+  //     correction_bias=correction_bias,
+  // )
+  TORCH_CHECK(use_grouped_topk, "forward_moe_fused_cpu: expect use_grouped_topk to be true");
+  TORCH_CHECK(topk_group.has_value(), "forward_moe_fused_cpu: missing topk_group");
+  TORCH_CHECK(num_expert_group.has_value(), "forward_moe_fused_cpu: missing num_expert_group");
+  
+  at::Tensor topk_weights, topk_ids;
+  if (!correction_bias.has_value()) {
+    std::tie(topk_weights, topk_ids) = grouped_topk_cpu(
+      hidden_states,
+      router_logits,
+      top_k,
+      renormalize,
+      num_expert_group.value(),
+      topk_group.value());
+  } else {
+    std::tie(topk_weights, topk_ids) = biased_grouped_topk_cpu(
+      hidden_states,
+      router_logits,
+      correction_bias.value(),
+      top_k,
+      renormalize,
+      num_expert_group.value(),
+      topk_group.value());    
+  }
+
+  // stage 3.2: fused_experts
+  auto fused_experts_out = fused_experts_cpu(
+    hidden_states,
+    fused_experts_w13_weight,
+    fused_experts_w2_weight,
+    topk_weights,
+    topk_ids,
+    fused_experts_inplace,
+    fused_experts_use_int8_w8a8,
+    fused_experts_use_fp8_w8a16,
+    fused_experts_w1_scale,
+    fused_experts_w2_scale,
+    fused_experts_block_size,
+    fused_experts_a1_scale,
+    fused_experts_a2_scale,
+    is_vnni);
+
+  return fused_experts_out;
 }
