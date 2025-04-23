@@ -176,7 +176,7 @@ def extend_attention(
     )
 
 
-def forward_absorb(
+def forward_absorb_decode_fused(
     hidden_states,
     q_a_proj_weight,
     q_b_proj_weight,
@@ -222,7 +222,7 @@ def forward_absorb(
     o_proj_block_size,
     is_vnni=True,
 ):
-    return sgl_kernel.common_ops.forward_absorb_cpu(
+    return sgl_kernel.common_ops.forward_absorb_decode_fused_cpu(
         hidden_states,
         q_a_proj_weight,
         q_b_proj_weight,

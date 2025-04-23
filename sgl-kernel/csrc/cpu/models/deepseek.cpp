@@ -48,7 +48,7 @@ at::Tensor row_parallel_linear_forward(
   return output_parallel;
 }
 
-at::Tensor forward_absorb_cpu(
+at::Tensor forward_absorb_decode_fused_cpu(
     at::Tensor& hidden_states, // qkv_proj_with_rope
     at::Tensor& q_a_proj_weight, // qkv_proj_with_rope
     at::Tensor& q_b_proj_weight, // qkv_proj_with_rope
@@ -94,7 +94,7 @@ at::Tensor forward_absorb_cpu(
     std::optional<std::vector<int64_t>> o_proj_block_size, // o_proj
     bool is_vnni  // qkv_proj_with_rope, bmm, o_proj
 ) {
-  RECORD_FUNCTION("sgl-kernel::forward_absorb_cpu", std::vector<c10::IValue>({
+  RECORD_FUNCTION("sgl-kernel::forward_absorb_decode_fused_cpu", std::vector<c10::IValue>({
     hidden_states, q_a_proj_weight, q_b_proj_weight, kv_a_proj_weight, w_kc,
     q_a_layernorm_weight, kv_a_layernorm_weight, positions, cos_sin_cache,
     k_cache, v_cache, loc, attn_logits, req_to_token, req_pool_indices,

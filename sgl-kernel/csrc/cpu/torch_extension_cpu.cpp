@@ -47,7 +47,8 @@ void extend_attention_cpu(at::Tensor& q_extend, at::Tensor& k_extend, at::Tensor
     at::Tensor& extend_seq_lens, at::Tensor& extend_start_loc,
     int64_t max_len_extend, double sm_scale, double logit_cap);
 
-at::Tensor forward_absorb_cpu(
+// fused forward_absorb for decode
+at::Tensor forward_absorb_decode_fused_cpu(
     at::Tensor& hidden_states, // qkv_proj_with_rope
     at::Tensor& q_a_proj_weight, // qkv_proj_with_rope
     at::Tensor& q_b_proj_weight, // qkv_proj_with_rope
@@ -196,8 +197,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // extend
   m.def("extend_attention_cpu", &extend_attention_cpu, "Attention extend for CPU");
 
-  // fused forward_absorb
-  m.def("forward_absorb_cpu", &forward_absorb_cpu, "fused forward_absorb for intel AMX");
+  // fused forward_absorb for decode
+  m.def("forward_absorb_decode_fused_cpu", &forward_absorb_decode_fused_cpu, "fused forward_absorb for intel AMX");
 
   // weight prepack
   m.def("convert_weight_packed", &convert_weight_packed, "prepack weight to vnni format for intel AMX");
