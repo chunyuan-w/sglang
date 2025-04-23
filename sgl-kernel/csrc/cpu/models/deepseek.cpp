@@ -75,7 +75,6 @@ at::Tensor forward_absorb_fused_cpu(
     at::Tensor& o_proj_weight,
     std::optional<at::Tensor>& o_proj_bias,
 
-
     double eps,
     bool use_int8_w8a8,
 
@@ -96,7 +95,6 @@ at::Tensor forward_absorb_fused_cpu(
     at::ScalarType o_proj_out_dtype,
     std::optional<at::Tensor>& o_proj_scales2,
 
-    bool is_vnni,
     std::optional<at::Tensor>& q_a_proj_scale,
     std::optional<at::Tensor>& q_b_proj_scale,
     std::optional<at::Tensor>& kv_a_proj_scale,
@@ -105,7 +103,8 @@ at::Tensor forward_absorb_fused_cpu(
     std::optional<c10::intrusive_ptr<c10d::ProcessGroup>> process_group,
     std::optional<py::object> op,
 
-    std::optional<std::vector<int64_t>> o_proj_block_size) {
+    std::optional<std::vector<int64_t>> o_proj_block_size,
+    bool is_vnni) {
 
   RECORD_FUNCTION("sgl-kernel::forward_absorb_fused_cpu", std::vector<c10::IValue>({
     hidden_states, q_a_proj_weight, q_b_proj_weight, kv_a_proj_weight, w_kc,
@@ -183,7 +182,6 @@ at::Tensor forward_absorb_fused_cpu(
   at::Tensor attn_bmm_output = output.view({M, B, N}).transpose_(0, 1);
 
   attn_output = attn_output.transpose(0, 1);
-  // TODO: is_vnni: set it as an arg to this OP
   bmm_cpu(attn_bmm_output, attn_output, w_vc, is_vnni, bmm_scale);
 
   return row_parallel_linear_forward(

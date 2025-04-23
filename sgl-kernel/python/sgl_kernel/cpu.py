@@ -212,7 +212,6 @@ def forward_absorb_fused(
     o_proj_use_fp8_w8a16,
     o_proj_out_dtype,
     o_proj_scales2,
-    is_vnni,
     q_a_proj_scale,
     q_b_proj_scale,
     kv_a_proj_scale,
@@ -220,6 +219,7 @@ def forward_absorb_fused(
     process_group,
     op,
     o_proj_block_size,
+    is_vnni=True,
 ):
     return sgl_kernel.common_ops.forward_absorb_fused_cpu(
         hidden_states,
@@ -257,7 +257,6 @@ def forward_absorb_fused(
         o_proj_use_fp8_w8a16,
         o_proj_out_dtype,
         o_proj_scales2,
-        is_vnni,
         q_a_proj_scale,
         q_b_proj_scale,
         kv_a_proj_scale,
@@ -265,6 +264,7 @@ def forward_absorb_fused(
         process_group,
         op,
         o_proj_block_size,
+        is_vnni,
     )
 
 

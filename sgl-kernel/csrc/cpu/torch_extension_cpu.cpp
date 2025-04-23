@@ -92,7 +92,6 @@ at::Tensor forward_absorb_fused_cpu(
     at::ScalarType o_proj_out_dtype,
     std::optional<at::Tensor>& o_proj_scales2,
 
-    bool is_vnni,
     std::optional<at::Tensor>& q_a_proj_scale,
     std::optional<at::Tensor>& q_b_proj_scale,
     std::optional<at::Tensor>& kv_a_proj_scale,
@@ -101,7 +100,8 @@ at::Tensor forward_absorb_fused_cpu(
     std::optional<c10::intrusive_ptr<c10d::ProcessGroup>> process_group,
     std::optional<py::object> op,
 
-    std::optional<std::vector<int64_t>> o_proj_block_size);
+    std::optional<std::vector<int64_t>> o_proj_block_size,
+    bool is_vnni);
 
 // weight prepack
 at::Tensor convert_weight_packed(at::Tensor& weight);
