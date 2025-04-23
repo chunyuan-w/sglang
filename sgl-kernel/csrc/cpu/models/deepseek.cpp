@@ -52,59 +52,51 @@ at::Tensor row_parallel_linear_forward(
 }
 
 at::Tensor forward_absorb_cpu(
-    at::Tensor& hidden_states,
-    at::Tensor& q_a_proj_weight,
-    at::Tensor& q_b_proj_weight,
-    at::Tensor& kv_a_proj_weight,
-    at::Tensor& w_kc,
-    at::Tensor& q_a_layernorm_weight,
-    at::Tensor& kv_a_layernorm_weight,
-    at::Tensor& positions,
-    at::Tensor& cos_sin_cache,
-
-    at::Tensor& k_cache,
-    at::Tensor& v_cache,
-    at::Tensor& loc,
-    at::Tensor& attn_logits,
-    at::Tensor& req_to_token,
-    at::Tensor& req_pool_indices,
-    at::Tensor& seq_lens,
-    at::Tensor& w_vc,
-
-    at::Tensor& o_proj_weight,
-    std::optional<at::Tensor>& o_proj_bias,
-
-    double eps,
-    bool use_int8_w8a8,
-
-    double sm_scale,
-    double logit_cap,
-    int tp_k_head_num,
-    int qk_head_dim,
-    int tp_v_head_num,
-    int v_head_dim,
-    int tp_q_head_num,
-    int num_local_heads,
-    int kv_lora_rank,
-
-    int tp_size,
-    int tp_rank,
-
-    bool o_proj_use_int8_w8a8,
-    bool o_proj_use_fp8_w8a16,
-    at::ScalarType o_proj_out_dtype,
-    std::optional<at::Tensor>& o_proj_scales2,
-
-    std::optional<at::Tensor>& q_a_proj_scale,
-    std::optional<at::Tensor>& q_b_proj_scale,
-    std::optional<at::Tensor>& kv_a_proj_scale,
-    std::optional<at::Tensor>& bmm_scale,
-
-    std::optional<c10::intrusive_ptr<c10d::ProcessGroup>> process_group,
-    std::optional<py::object> op,
-
-    std::optional<std::vector<int64_t>> o_proj_block_size,
-    bool is_vnni) {
+    at::Tensor& hidden_states, // qkv_proj_with_rope
+    at::Tensor& q_a_proj_weight, // qkv_proj_with_rope
+    at::Tensor& q_b_proj_weight, // qkv_proj_with_rope
+    at::Tensor& kv_a_proj_weight, // qkv_proj_with_rope
+    at::Tensor& w_kc, // qkv_proj_with_rope
+    at::Tensor& q_a_layernorm_weight, // qkv_proj_with_rope
+    at::Tensor& kv_a_layernorm_weight, // qkv_proj_with_rope
+    at::Tensor& positions, // qkv_proj_with_rope
+    at::Tensor& cos_sin_cache, // qkv_proj_with_rope
+    at::Tensor& k_cache, // decode_attention_cpu
+    at::Tensor& v_cache, // decode_attention_cpu
+    at::Tensor& loc, // decode_attention_cpu
+    at::Tensor& attn_logits, // decode_attention_cpu
+    at::Tensor& req_to_token, // decode_attention_cpu
+    at::Tensor& req_pool_indices, // decode_attention_cpu
+    at::Tensor& seq_lens, // decode_attention_cpu
+    at::Tensor& w_vc, // bmm
+    at::Tensor& o_proj_weight, // o_proj
+    std::optional<at::Tensor>& o_proj_bias, // o_proj
+    double eps, // qkv_proj_with_rope
+    bool use_int8_w8a8, // qkv_proj_with_rope
+    double sm_scale, // decode_attention_cpu
+    double logit_cap, // decode_attention_cpu
+    int tp_k_head_num, // decode_attention_cpu
+    int qk_head_dim, // decode_attention_cpu
+    int tp_v_head_num, // decode_attention_cpu
+    int v_head_dim, // decode_attention_cpu
+    int tp_q_head_num, // decode_attention_cpu
+    int num_local_heads, // decode_attention_cpu
+    int kv_lora_rank, // decode_attention_cpu
+    int tp_size, // o_proj
+    int tp_rank, // o_proj
+    bool o_proj_use_int8_w8a8, // o_proj
+    bool o_proj_use_fp8_w8a16, // o_proj
+    at::ScalarType o_proj_out_dtype, // o_proj
+    std::optional<at::Tensor>& o_proj_scales2, // o_proj
+    std::optional<at::Tensor>& q_a_proj_scale, // qkv_proj_with_rope
+    std::optional<at::Tensor>& q_b_proj_scale, // qkv_proj_with_rope
+    std::optional<at::Tensor>& kv_a_proj_scale, // qkv_proj_with_rope
+    std::optional<at::Tensor>& bmm_scale, // bmm
+    std::optional<c10::intrusive_ptr<c10d::ProcessGroup>> process_group, // o_proj
+    std::optional<py::object> op, // o_proj
+    std::optional<std::vector<int64_t>> o_proj_block_size, // o_proj
+    bool is_vnni  // qkv_proj_with_rope, bmm, o_proj
+    ) {
 
   RECORD_FUNCTION("sgl-kernel::forward_absorb_cpu", std::vector<c10::IValue>({
     hidden_states, q_a_proj_weight, q_b_proj_weight, kv_a_proj_weight, w_kc,
@@ -134,7 +126,7 @@ at::Tensor forward_absorb_cpu(
   // stage 2:
   // attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
   // attn_output = attn_output.view(-1, params.num_local_heads, params.kv_lora_rank)
-  
+
   // stage 2.1:
   // sglang/python/sglang/srt/layers/radix_attention.py: RadixAttention: forward
   // For DeepSeek R1, key and value returned from qkv_proj_with_rope is 3D, thus the below code is not needed.
@@ -181,7 +173,7 @@ at::Tensor forward_absorb_cpu(
 
   // stage 2.3: attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
   attn_output = attn_output.view({-1, num_local_heads, kv_lora_rank});
-  
+
   // stage 3: bmm
   int64_t B = w_vc.sizes()[0];
   int64_t N = w_vc.sizes()[1];
