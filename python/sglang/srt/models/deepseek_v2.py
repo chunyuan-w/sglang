@@ -1124,9 +1124,9 @@ class DeepseekV2AttentionMLA(nn.Module):
             params.q_lora_rank is not None and self.use_intel_amx_backend
         ), "forward_absorb_fused_mla_rope_cpu requires q_lora_rank is not None and use_intel_amx_backend"
 
-        # TODO: add FP8 support?
+        # TODO: add FP8 support
         assert self.w_vc.dtype not in [torch.float8_e4m3fnuz, torch.float8_e4m3fn]
-        output = sgl_kernel.common_ops.forward_absorb_cpu(
+        output = sgl_kernel.cpu.forward_absorb(
             hidden_states,
             params.q_a_proj.weight,
             params.q_b_proj.weight,
@@ -1169,7 +1169,6 @@ class DeepseekV2AttentionMLA(nn.Module):
             params.device_group,
             params.reduce_op,
             params.o_proj_weight_block_size,
-            True,  # is_vnni
         )
 
         return output
