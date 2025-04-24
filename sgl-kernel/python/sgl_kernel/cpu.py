@@ -88,6 +88,7 @@ def forward_moe_fused(
     shared_expert_inplace,
     shared_expert_use_int8_w8a8,
     shared_expert_use_fp8_w8a16,
+    tp_size,
     topk_group,
     num_expert_group,
     correction_bias,
@@ -101,6 +102,8 @@ def forward_moe_fused(
     shared_expert_block_size,
     shared_expert_a1_scale=None,
     shared_expert_a2_scale=None,
+    process_group=None,
+    op=None,
     is_vnni=True,
 ):
     return sgl_kernel.common_ops.forward_moe_fused_cpu(
@@ -121,6 +124,7 @@ def forward_moe_fused(
         shared_expert_inplace,
         shared_expert_use_int8_w8a8,
         shared_expert_use_fp8_w8a16,
+        tp_size,
         topk_group,
         num_expert_group,
         correction_bias,
@@ -134,6 +138,8 @@ def forward_moe_fused(
         shared_expert_block_size,
         shared_expert_a1_scale,
         shared_expert_a2_scale,
+        process_group,
+        op,
         is_vnni,
     )
 

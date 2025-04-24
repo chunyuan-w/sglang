@@ -176,7 +176,7 @@ at::Tensor forward_moe_fused_cpu(
     bool shared_expert_inplace, // shared_expert
     bool shared_expert_use_int8_w8a8, // shared_expert
     bool shared_expert_use_fp8_w8a16, // shared_expert 
-    // bool shared_expert_inplace,
+    int tp_size,
     std::optional<int> topk_group, // select_experts
     std::optional<int> num_expert_group, // select_experts
     std::optional<at::Tensor>& correction_bias, // select_experts
@@ -190,6 +190,8 @@ at::Tensor forward_moe_fused_cpu(
     std::optional<std::vector<int64_t>> shared_expert_block_size, // shared_expert
     std::optional<at::Tensor>& shared_expert_a1_scale, // shared_expert
     std::optional<at::Tensor>& shared_expert_a2_scale,     // shared_expert
+    std::optional<c10::intrusive_ptr<c10d::ProcessGroup>> process_group,
+    std::optional<py::object> op,    
     bool is_vnni);
 
 // weight absorption

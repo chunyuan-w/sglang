@@ -293,6 +293,9 @@ class DeepseekV2MoE(nn.Module):
         shared_experts_is_fp8 = self.shared_experts_is_fp8
         shared_experts_weight_block_size = self.shared_experts_weight_block_size
         
+        # [Note] inplace should be False in fused_experts.
+        # If inplace is True in fused_experts (self.experts), hidden_states will be changed after fused_experts
+        # While hidden_states is still needed in shared_expert.        
         final_hidden_states = sgl_kernel.cpu.forward_moe_fused(
             hidden_states,
             self.gate.weight,
@@ -311,6 +314,7 @@ class DeepseekV2MoE(nn.Module):
             True, # shared_expert_inplace
             shared_experts_is_int8,
             shared_experts_is_fp8,
+            self.tp_size,
             self.experts.topk_group,
             self.experts.num_expert_group,
             self.experts.correction_bias,
@@ -333,17 +337,15 @@ class DeepseekV2MoE(nn.Module):
                 if shared_experts_is_int8
                 else down_proj.weight_scale_inv if shared_experts_is_fp8 else None
             ),
-            shared_experts_weight_block_size if shared_experts_is_fp8 else None,                   
+            shared_experts_weight_block_size if shared_experts_is_fp8 else None,
+            None, # shared_expert_a1_scale TODO: are they always None?
+            None, # shared_expert_a2_scale TODO: are they always None?
+            get_tp_group().device_group if self.tp_size > 1 else None,
+            torch.distributed.ReduceOp.SUM if self.tp_size > 1 else None,
         )
 
-
-
-        # [Note] inplace should be False in fused_experts.
-        # If inplace is True in fused_experts (self.experts), hidden_states will be changed after fused_experts
-        # While hidden_states is still needed in shared_expert.
-
-        if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+        # if self.tp_size > 1:
+        #     final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 

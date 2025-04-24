@@ -311,6 +311,7 @@ at::Tensor forward_moe_fused_cpu(
     bool shared_expert_inplace, // shared_expert
     bool shared_expert_use_int8_w8a8, // shared_expert
     bool shared_expert_use_fp8_w8a16, // shared_expert 
+    int tp_size,
     std::optional<int> topk_group, // select_experts
     std::optional<int> num_expert_group, // select_experts
     std::optional<at::Tensor>& correction_bias, // select_experts
@@ -324,6 +325,8 @@ at::Tensor forward_moe_fused_cpu(
     std::optional<std::vector<int64_t>> shared_expert_block_size, // shared_expert
     std::optional<at::Tensor>& shared_expert_a1_scale, // shared_expert
     std::optional<at::Tensor>& shared_expert_a2_scale,     // shared_expert
+    std::optional<c10::intrusive_ptr<c10d::ProcessGroup>> process_group,
+    std::optional<py::object> op,    
     bool is_vnni) {
   // TODO: add more shape args
   RECORD_FUNCTION("sgl-kernel::forward_moe_fused_cpu", std::vector<c10::IValue>({
@@ -415,6 +418,18 @@ at::Tensor forward_moe_fused_cpu(
     shared_expert_a1_scale,
     shared_expert_a2_scale,
     is_vnni);
+
+  // stage 5:
+  // if self.tp_size > 1:
+  //     final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)  
+  if (tp_size > 1) {
+    TORCH_CHECK(process_group.has_value(), "missing process_group for tp_size > 1 row_parallel_linear_forward");
+    TORCH_CHECK(op.has_value(), "missing reduce op for tp_size > 1 row_parallel_linear_forward");
+    shm_allreduce(final_hidden_states, process_group.value(), op.value());    
+  }
+
+  // stage 6:
+  // return final_hidden_states.view(num_tokens, hidden_dim)
 
 
   return final_hidden_states;
