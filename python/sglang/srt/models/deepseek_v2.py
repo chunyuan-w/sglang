@@ -283,9 +283,6 @@ class DeepseekV2MoE(nn.Module):
             return self.forward_normal(hidden_states)
 
     def forward_moe_fused_cpu(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # TODO: remove this line
-        num_tokens, hidden_dim = hidden_states.shape
-
         # Use cached attributes instead of dynamic access
         gate_up_proj = self.shared_experts_gate_up_proj
         down_proj = self.shared_experts_down_proj
@@ -296,7 +293,7 @@ class DeepseekV2MoE(nn.Module):
         # [Note] inplace should be False in fused_experts.
         # If inplace is True in fused_experts (self.experts), hidden_states will be changed after fused_experts
         # While hidden_states is still needed in shared_expert.        
-        final_hidden_states = sgl_kernel.cpu.forward_moe_fused(
+        return sgl_kernel.cpu.forward_moe_fused(
             hidden_states,
             self.gate.weight,
             None, #bias
@@ -344,10 +341,7 @@ class DeepseekV2MoE(nn.Module):
             torch.distributed.ReduceOp.SUM if self.tp_size > 1 else None,
         )
 
-        # if self.tp_size > 1:
-        #     final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
-
-        return final_hidden_states.view(num_tokens, hidden_dim)
+        # return final_hidden_states.view(num_tokens, hidden_dim)
 
     def forward_normal(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape

@@ -430,7 +430,7 @@ at::Tensor forward_moe_fused_cpu(
 
   // stage 6:
   // return final_hidden_states.view(num_tokens, hidden_dim)
-
+  final_hidden_states = final_hidden_states.view({num_tokens, hidden_dim});
 
   return final_hidden_states;
 }
