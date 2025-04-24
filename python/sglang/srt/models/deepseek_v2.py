@@ -285,24 +285,32 @@ class DeepseekV2MoE(nn.Module):
     def forward_moe_fused_cpu(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # TODO: remove this line
         num_tokens, hidden_dim = hidden_states.shape
-        # hidden_states = hidden_states.view(-1, hidden_dim)
-        # if self.gate_impl is None:
-        #     self.gate_impl = self.gate.forward
-        # # router_logits: (num_tokens, n_experts)
-        # router_logits = self.gate_impl(hidden_states)
+
+        # Use cached attributes instead of dynamic access
+        gate_up_proj = self.shared_experts_gate_up_proj
+        down_proj = self.shared_experts_down_proj
+        shared_experts_is_int8 = self.shared_experts_is_int8
+        shared_experts_is_fp8 = self.shared_experts_is_fp8
+        shared_experts_weight_block_size = self.shared_experts_weight_block_size
         
-        fused_experts_out = sgl_kernel.cpu.forward_moe_fused(
+        final_hidden_states = sgl_kernel.cpu.forward_moe_fused(
             hidden_states,
             self.gate.weight,
             None, #bias
             self.experts.w13_weight,
             self.experts.w2_weight,
+            gate_up_proj.weight,
+            down_proj.weight,            
             self.experts.top_k,
             self.experts.use_grouped_topk,
             self.experts.renormalize,
             self.experts_is_int8,
             self.experts_is_fp8,
             False, # fused_experts_inplace
+            self.routed_scaling_factor,
+            True, # shared_expert_inplace
+            shared_experts_is_int8,
+            shared_experts_is_fp8,
             self.experts.topk_group,
             self.experts.num_expert_group,
             self.experts.correction_bias,
@@ -315,46 +323,24 @@ class DeepseekV2MoE(nn.Module):
             self.experts.w13_input_scale if self.experts_is_int8 else None,
             self.experts.w2_input_scale if self.experts_is_int8 else None,
             self.experts_weight_block_size,
-        )
-        # if self.experts_impl is None:
-        #     self.experts_impl = self.experts.forward
-        # fused_experts_out = self.experts_impl(
-        #     hidden_states=hidden_states, router_logits=router_logits
-        # )
-
-        # Use cached attributes instead of dynamic access
-        gate_up_proj = self.shared_experts_gate_up_proj
-        down_proj = self.shared_experts_down_proj
-        shared_experts_is_int8 = self.shared_experts_is_int8
-        shared_experts_is_fp8 = self.shared_experts_is_fp8
-        shared_experts_weight_block_size = self.shared_experts_weight_block_size
-
-        # [Note] inplace should be False in fused_experts.
-        # If inplace is True in fused_experts (self.experts), hidden_states will be changed after fused_experts
-        # While hidden_states is still needed in shared_expert.
-        final_hidden_states = self.sgl_kernel_cpu_shared_expert(
-            hidden_states,
-            gate_up_proj.weight,
-            down_proj.weight,
-            fused_experts_out,
-            self.routed_scaling_factor,
-            inplace=True,
-            use_int8_w8a8=shared_experts_is_int8,
-            use_fp8_w8a16=shared_experts_is_fp8,
-            w1_scale=(
+            (
                 gate_up_proj.weight_scale
                 if shared_experts_is_int8
                 else (gate_up_proj.weight_scale_inv if shared_experts_is_fp8 else None)
             ),
-            w2_scale=(
+            (
                 down_proj.weight_scale
                 if shared_experts_is_int8
                 else down_proj.weight_scale_inv if shared_experts_is_fp8 else None
             ),
-            block_size=(
-                shared_experts_weight_block_size if shared_experts_is_fp8 else None
-            ),
+            shared_experts_weight_block_size if shared_experts_is_fp8 else None,                   
         )
+
+
+
+        # [Note] inplace should be False in fused_experts.
+        # If inplace is True in fused_experts (self.experts), hidden_states will be changed after fused_experts
+        # While hidden_states is still needed in shared_expert.
 
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
