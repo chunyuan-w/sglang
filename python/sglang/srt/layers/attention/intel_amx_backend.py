@@ -121,5 +121,7 @@ class IntelAMXAttnBackend(AttentionBackend):
             layer.scaling,
             layer.logit_cap,
         )
+        
+        assert not torch.isnan(o).any(), "nan in o"
 
         return o
