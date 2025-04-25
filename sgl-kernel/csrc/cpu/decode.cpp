@@ -1001,6 +1001,12 @@ void decode_attention_mla_kernel_impl(
           copy_stub<scalar_t, BLOCK_N>(s_delta2 + h * BLOCK_N, s_delta + h * BLOCK_N);
         }
 
+        for (int64_t i = 0; i < head_size_v; ++i) {
+            if (std::isnan(v_prime[i])) {
+                TORCH_CHECK(false, "NaN detected at v_prime before brgemm ", i);
+            }
+        }
+
         // caculate V' <- s_delta @ V + V'
         at::native::cpublas::brgemm(
             /* M     */ h_size,
@@ -1013,6 +1019,14 @@ void decode_attention_mla_kernel_impl(
             /* A     */ s_delta2,
             /* B     */ Btmp1,
             /* C     */ v_prime);
+
+
+        for (int64_t i = 0; i < head_size_v; ++i) {
+            if (std::isnan(v_prime[i])) {
+                TORCH_CHECK(false, "NaN detected at v_prime after brgemm ", i);
+            }
+        }
+
       } // loop with KV blocks
 
       // only update v' when kv_split_size > 0
