@@ -1007,6 +1007,28 @@ void decode_attention_mla_kernel_impl(
             }
         }
 
+        for (int64_t i = 0; i < h_size; ++i) {
+          for (int64_t j = 0; j < padded_n_size; ++j) {
+            if (std::isnan(s_delta[i * BLOCK_N + j])) {
+                TORCH_CHECK(false, "NaN detected at s_delta before brgemm ", i);
+            }
+          }
+        }  
+
+        for (int64_t i = 0; i < h_size; ++i) {
+          for (int64_t j = 0; j < padded_n_size; ++j) {
+            if (std::isnan(s_delta2[i * BLOCK_N + j])) {
+                TORCH_CHECK(false, "NaN detected at s_delta2 before brgemm ", i);
+            }
+          }
+        }  
+
+        for (int64_t i = 0; i < padded_n_size * head_size_v; ++i) {
+          if (std::isnan(Btmp1[i])) {
+            TORCH_CHECK(false, "NaN detected in Btmp1 at ", i);
+          }
+        }
+
         // caculate V' <- s_delta @ V + V'
         at::native::cpublas::brgemm(
             /* M     */ h_size,
