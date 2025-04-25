@@ -851,12 +851,22 @@ void decode_attention_mla_kernel_impl(
     int64_t max_num_reqs,
     int64_t max_context_len,
     int64_t max_total_num_tokens,
-    int64_t buffer_size_per_thread) {
+    int64_t buffer_size_per_thread,
+    int64_t output_size,
+    int64_t attn_logits_size) {
 
   using Vec = at::vec::Vectorized<float>;
 
   // block length for heads
   const int64_t BLOCK_H = batches == 1 ? 6 : (batches > 16 ? 22 : 11);
+  // constexpr int64_t BLOCK_H = 11;
+
+
+  for (int64_t i = 0; i < attn_logits_size; ++i) {
+      if (std::isnan(attn_logits[i])) {
+          TORCH_CHECK(false, "NaN detected before compute attn_logits ", i);
+      }
+  }
 
   // strides
   const int64_t q_strideM = num_heads * head_size;
@@ -913,10 +923,23 @@ void decode_attention_mla_kernel_impl(
         fill_stub(v_prime + h * l_stride1, 0.f, head_size_v);
       }
 
+      for (int64_t i = 0; i < head_size_v; ++i) {
+          if (std::isnan(v_prime[i])) {
+              TORCH_CHECK(false, "NaN detected at v_prime after fill_stub ", i);
+          }
+      }      
+
       // loop over K and V sequence with BLOCK_N
       for (int64_t n = kv_start; n < kv_end; n += BLOCK_N) {
         int64_t n_size = std::min(BLOCK_N, kv_end - n);
         const int64_t padded_n_size = div_up(int(n_size), TILE_K) * TILE_K;
+
+
+        for (int64_t i = 0; i < head_size_v; ++i) {
+            if (std::isnan(v_prime[i])) {
+                TORCH_CHECK(false, "NaN detected at v_prime before pack_vnni ", i);
+            }
+        }
 
         // get key and pack
         pack_vnni<scalar_t, index_t>(
@@ -931,6 +954,18 @@ void decode_attention_mla_kernel_impl(
             /* ld_dst0 */ BLOCK_N,
             /* ld_dst1 */ head_size_v);
 
+
+        for (int64_t i = 0; i < h_size * head_size; ++i) {
+            if (std::isnan(q_ptr[i])) {
+                TORCH_CHECK(false, "NaN detected at q_ptr ", i);
+            }
+        }  
+        for (int64_t i = 0; i < n_size * head_size; ++i) {
+            if (std::isnan(Btmp0[i])) {
+                TORCH_CHECK(false, "NaN detected at Btmp0 ", i);
+            }
+        }  
+
         // calculate s_i <- Q @ K
         at::native::cpublas::brgemm(
             /* M     */ h_size,
@@ -943,6 +978,13 @@ void decode_attention_mla_kernel_impl(
             /* A     */ q_ptr,
             /* B     */ Btmp0,
             /* C     */ s_i);
+
+        for (int64_t i = 0; i < h_size * n_size; ++i) {
+            if (std::isnan(s_i[i])) {
+                TORCH_CHECK(false, "NaN detected at s_i ", i);
+            }
+        }  
+
 
         const Vec scale_vec = Vec(scaling);
         for (int64_t h = 0; h < h_size; ++h) {
@@ -992,6 +1034,37 @@ void decode_attention_mla_kernel_impl(
           copy_stub<scalar_t, BLOCK_N>(s_delta2 + h * BLOCK_N, s_delta + h * BLOCK_N);
         }
 
+
+        std::cout << "BLOCK_N:" << BLOCK_N << ", n_size:" << n_size << ",padded_n_size:" << padded_n_size << ",h_size:" << h_size << ",head_size_v:" << head_size_v << "\n";
+        for (int64_t i = 0; i < head_size_v; ++i) {
+            if (std::isnan(v_prime[i])) {
+                TORCH_CHECK(false, "NaN detected at v_prime before brgemm ", i);
+            }
+        }  
+
+
+        for (int64_t i = 0; i < h_size; ++i) {
+          for (int64_t j = 0; j < padded_n_size; ++j) {
+            if (std::isnan(s_delta[i * BLOCK_N + j])) {
+                TORCH_CHECK(false, "NaN detected at s_delta before brgemm ", i);
+            }
+          }
+        }  
+
+        for (int64_t i = 0; i < h_size; ++i) {
+          for (int64_t j = 0; j < padded_n_size; ++j) {
+            if (std::isnan(s_delta2[i * BLOCK_N + j])) {
+                TORCH_CHECK(false, "NaN detected at s_delta2 before brgemm ", i);
+            }
+          }
+        }  
+
+        for (int64_t i = 0; i < padded_n_size * head_size_v; ++i) {
+          if (std::isnan(Btmp1[i])) {
+            TORCH_CHECK(false, "NaN detected in Btmp1 at ", i);
+          }
+        }
+
         // caculate V' <- s_delta @ V + V'
         at::native::cpublas::brgemm(
             /* M     */ h_size,
@@ -1004,26 +1077,70 @@ void decode_attention_mla_kernel_impl(
             /* A     */ s_delta2,
             /* B     */ Btmp1,
             /* C     */ v_prime);
+
+
+        for (int64_t i = 0; i < head_size_v; ++i) {
+            if (std::isnan(v_prime[i])) {
+                TORCH_CHECK(false, "NaN detected at v_prime after brgemm ", i);
+            }
+        }  
+
+
+
+
       } // loop with KV blocks
 
+
+
+      for (int64_t i = 0; i < head_size_v; ++i) {
+          if (std::isnan(v_prime[i])) {
+              TORCH_CHECK(false, "NaN detected at v_prime after loop1 ", i);
+          }
+      }  
+
+
       // only update v' when kv_split_size > 0
+      // s_prime [BLOCK_H]
       if (kv_end > kv_start) {
         for (int64_t h = 0; h < h_size; ++h) {
           float s = 1 / s_prime[h];
+          // std::cout << "s_prime[h]:" << s_prime[h] << ", s:" <<  s << "\n";
+          TORCH_CHECK(s_prime[h] != 0.f, "0 detected at s_prime[h] ", h);
           at::vec::map<float>(
               [s](Vec out) { return out * Vec(s); },
               v_prime + h * l_stride1,
               v_prime + h * l_stride1,
               head_size_v);
           (v_prime + h * l_stride1)[head_size_v] = m_prime[h] + std::log(s_prime[h]);
+
+          // v_prime [head_size_v]
+
         }
       }
+
+
+
+      for (int64_t i = 0; i < head_size_v; ++i) {
+          if (std::isnan(v_prime[i])) {
+              TORCH_CHECK(false, "NaN detected at v_prime after loop2 ", i);
+          }
+      }  
 
       // move to the next index
       data_index_step(bs, batches, block_id, num_blocks, kv_id, num_kv_splits);
     }
     at::native::cpublas::brgemm_release();
   });
+
+  // attn_logits [batches, num_heads, num_kv_splits, head_size_v + 1]
+  // output [num_tokens, num_heads, head_size]
+
+
+  for (int64_t i = 0; i < attn_logits_size; ++i) {
+      if (std::isnan(attn_logits[i])) {
+          TORCH_CHECK(false, "NaN detected at attn_logits ", i);
+      }
+  }
 
   decode_accumulate_kv_splits(
       output,
@@ -1034,6 +1151,14 @@ void decode_attention_mla_kernel_impl(
       num_kv_splits,
       l_stride1,
       l_stride2);
+
+
+  for (int64_t i = 0; i < output_size; ++i) {
+      if (std::isnan(output[i])) {
+          TORCH_CHECK(false, "NaN detected at output ", i);
+      }
+  }
+
 } // MLA
 
 template <typename scalar_t, typename index_t, int64_t BLOCK_N>
@@ -1068,7 +1193,9 @@ void decode_attention_grouped_kernel_impl(
   // we parallel on [batches, divup(num_heads, BLOCK_H), num_kv_splits]
   // use smaller BLOCK_H when batches is small to utilize all cores
   constexpr int64_t kBLOCK_H = 16;
+  
   const int64_t BLOCK_H = std::min(4 * batches, kBLOCK_H);
+  // constexpr int64_t BLOCK_H = 16;
 
   // strides
   const int64_t q_strideM = num_heads * head_size;
@@ -1248,6 +1375,12 @@ void decode_attention_cpu(
     at::Tensor& seq_lens,
     double sm_scale,
     double logit_cap) {
+  std::cout << "output size: " << output.sizes() << "\n";
+  std::cout << "attn_logits size: " << attn_logits.sizes() << "\n";
+  
+  int64_t output_size = output.numel();
+  int64_t attn_logits_size = attn_logits.numel();
+  
   RECORD_FUNCTION(
       "sgl-kernel::decode_attention_cpu",
       std::vector<c10::IValue>({query, output, k_buffer, v_buffer, attn_logits, req_to_token, req_pool_indices, seq_lens}));
@@ -1310,12 +1443,15 @@ void decode_attention_cpu(
   void* k_buffer_data = k_buffer.data_ptr();
   void* v_buffer_data = v_buffer.data_ptr();
   const bool is_mla = (k_buffer_data == v_buffer_data) && (num_heads_kv == 1);
+  // const bool is_mla = false;
 
   // block length for k_buffer and v_buffer
   constexpr int BLOCK_N = 256;
 
   // buffer for packing k_cache and v_cache
   int num_threads = at::get_num_threads();
+  // std::cout << "is_mla:" << is_mla << ",num_threads" << num_threads << "\n";
+  
   int64_t size_per_thread = is_mla ? BLOCK_N * head_size + BLOCK_N * head_size_v : 0;
   auto buffer = at::empty({num_threads, size_per_thread}, k_buffer.options());
 
@@ -1393,7 +1529,9 @@ void decode_attention_cpu(
             max_num_reqs,
             max_context_len,
             max_total_num_tokens,
-            size_per_thread);
+            size_per_thread,
+            output_size,
+            attn_logits_size);
       } else {
         // GQA/MQA
         decode_attention_grouped_kernel_impl<scalar_t, index_t, BLOCK_N>(

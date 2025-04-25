@@ -108,23 +108,25 @@ class IntelAMXAttnBackend(AttentionBackend):
             o = q.new_empty((q.shape[0], layer.tp_q_head_num * layer.v_head_dim))
         else:
             o = torch.empty_like(q)
-
-        import copy
-        q_ref = copy.deepcopy(q)
-        k_ref = copy.deepcopy(forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id))
-        v_ref = copy.deepcopy(forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id))
-        o_ref = copy.deepcopy(o)
-        k_raw_ref = copy.deepcopy(k)
-        v_raw_ref = copy.deepcopy(v)
-        out_cache_loc_ref = copy.deepcopy(forward_batch.out_cache_loc)
-        req_to_token_ref = copy.deepcopy(forward_batch.req_to_token_pool.req_to_token)
-        req_pool_indices_ref = copy.deepcopy(forward_batch.req_pool_indices)
-        seq_lens_ref = copy.deepcopy(forward_batch.seq_lens)
-        attn_logits_ref = copy.deepcopy(attn_logits)
-        scaling_ref = copy.deepcopy(layer.scaling)
-        logit_cap_ref = copy.deepcopy(layer.logit_cap)
         
-        print(f"{forward_batch.out_cache_loc=}", flush=True)
+        o.zero_()
+
+        # import copy
+        # q_ref = copy.deepcopy(q)
+        # k_ref = copy.deepcopy(forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id))
+        # v_ref = copy.deepcopy(forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id))
+        # o_ref = copy.deepcopy(o)
+        # k_raw_ref = copy.deepcopy(k)
+        # v_raw_ref = copy.deepcopy(v)
+        # out_cache_loc_ref = copy.deepcopy(forward_batch.out_cache_loc)
+        # req_to_token_ref = copy.deepcopy(forward_batch.req_to_token_pool.req_to_token)
+        # req_pool_indices_ref = copy.deepcopy(forward_batch.req_pool_indices)
+        # seq_lens_ref = copy.deepcopy(forward_batch.seq_lens)
+        # attn_logits_ref = copy.deepcopy(attn_logits)
+        # scaling_ref = copy.deepcopy(layer.scaling)
+        # logit_cap_ref = copy.deepcopy(layer.logit_cap)
+        
+        # print(f"{forward_batch.out_cache_loc=}", flush=True)
         
         # k_buffer_size = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id).size()
         # k_buffer_stride = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id).stride()
@@ -162,24 +164,24 @@ class IntelAMXAttnBackend(AttentionBackend):
         #     f"{layer.logit_cap=},"
         # )          
         
-        import time
-        import os
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        tp_rank = get_tensor_model_parallel_rank()
-        debug_filename = f"/home/chunyuan/sglang-dev/debug-inputs/debug_inputs_{timestamp}_{tp_rank}.pt"
-        torch.save({
-            "q": q,
-            "k": forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id),
-            "v": forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id),
-            "o": o.view(-1, layer.tp_q_head_num, layer.v_head_dim),
-            "k_raw": k,
-            "v_raw": v,
-            "out_cache_loc": forward_batch.out_cache_loc,
-            "req_to_token": forward_batch.req_to_token_pool.req_to_token,
-            "req_pool_indices": forward_batch.req_pool_indices,
-            "seq_lens": forward_batch.seq_lens,
-            "attn_logits": attn_logits,
-        }, debug_filename)        
+        # import time
+        # import os
+        # timestamp = time.strftime("%Y%m%d_%H%M%S")
+        # tp_rank = get_tensor_model_parallel_rank()
+        # debug_filename = f"/home/chunyuan/sglang-dev/debug-inputs/debug_inputs_{timestamp}_{tp_rank}.pt"
+        # torch.save({
+        #     "q": q,
+        #     "k": forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id),
+        #     "v": forward_batch.token_to_kv_pool.get_value_buffer(layer.layer_id),
+        #     "o": o.view(-1, layer.tp_q_head_num, layer.v_head_dim),
+        #     "k_raw": k,
+        #     "v_raw": v,
+        #     "out_cache_loc": forward_batch.out_cache_loc,
+        #     "req_to_token": forward_batch.req_to_token_pool.req_to_token,
+        #     "req_pool_indices": forward_batch.req_pool_indices,
+        #     "seq_lens": forward_batch.seq_lens,
+        #     "attn_logits": attn_logits,
+        # }, debug_filename)        
         
         self.decode_attention_fwd(
             q.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
@@ -196,11 +198,11 @@ class IntelAMXAttnBackend(AttentionBackend):
             layer.scaling,
             layer.logit_cap,
         )
-        logger.info(f"o contains NaN: {torch.isnan(o).any()}")
-        if torch.isnan(o).any():
-            logger.warning(f"NaN detected in output. Inputs saved to: {debug_filename}")
-        else:
-            os.remove(debug_filename)  # Optional cleanup
+        # logger.info(f"o contains NaN: {torch.isnan(o).any()}")
+        # if torch.isnan(o).any():
+        #     logger.warning(f"NaN detected in output. Inputs saved to: {debug_filename}")
+        # else:
+        #     os.remove(debug_filename)  # Optional cleanup
 
 
         # self.decode_attention_fwd(
