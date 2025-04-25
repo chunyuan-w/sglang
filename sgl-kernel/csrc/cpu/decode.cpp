@@ -851,12 +851,21 @@ void decode_attention_mla_kernel_impl(
     int64_t max_num_reqs,
     int64_t max_context_len,
     int64_t max_total_num_tokens,
-    int64_t buffer_size_per_thread) {
+    int64_t buffer_size_per_thread,
+    int64_t output_size,
+    int64_t attn_logits_size) {
 
   using Vec = at::vec::Vectorized<float>;
 
   // block length for heads
   const int64_t BLOCK_H = batches == 1 ? 6 : (batches > 16 ? 22 : 11);
+
+
+  for (int64_t i = 0; i < attn_logits_size; ++i) {
+      if (std::isnan(attn_logits[i])) {
+          TORCH_CHECK(false, "NaN detected before compute attn_logits ", i);
+      }
+  }
 
   // strides
   const int64_t q_strideM = num_heads * head_size;
@@ -1024,6 +1033,12 @@ void decode_attention_mla_kernel_impl(
     }
     at::native::cpublas::brgemm_release();
   });
+
+  for (int64_t i = 0; i < attn_logits_size; ++i) {
+      if (std::isnan(attn_logits[i])) {
+          TORCH_CHECK(false, "NaN detected at attn_logits ", i);
+      }
+  }
 
   decode_accumulate_kv_splits(
       output,
@@ -1252,6 +1267,9 @@ void decode_attention_cpu(
       "sgl-kernel::decode_attention_cpu",
       std::vector<c10::IValue>({query, output, k_buffer, v_buffer, attn_logits, req_to_token, req_pool_indices, seq_lens}));
 
+  int64_t output_size = output.numel();
+  int64_t attn_logits_size = attn_logits.numel();
+
   CHECK_INPUT(query);
   CHECK_LAST_DIM_CONTIGUOUS_INPUT(k_buffer);
   CHECK_LAST_DIM_CONTIGUOUS_INPUT(v_buffer);
@@ -1393,7 +1411,9 @@ void decode_attention_cpu(
             max_num_reqs,
             max_context_len,
             max_total_num_tokens,
-            size_per_thread);
+            size_per_thread,
+            output_size,
+            attn_logits_size);
       } else {
         // GQA/MQA
         decode_attention_grouped_kernel_impl<scalar_t, index_t, BLOCK_N>(
