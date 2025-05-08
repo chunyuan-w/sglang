@@ -1,6 +1,6 @@
 #include "common.h"
-#include "gemm.h"
 #include "vec.h"
+#include "gemm.h"
 
 // we use 4x32 for BLOCK_M
 #define BLOCK_SIZE_M_SCALE 4
@@ -14,7 +14,7 @@ inline void copy_stub(scalar_t* __restrict__ out, const float* __restrict__ inpu
   constexpr int kVecSize = bVec::size();
 
   int64_t d;
-#pragma GCC unroll 4
+  #pragma GCC unroll 4
   for (d = 0; d <= size - kVecSize; d += kVecSize) {
     fVec data0 = fVec::loadu(input + d);
     fVec data1 = fVec::loadu(input + d + fVec::size());
@@ -27,14 +27,13 @@ inline void copy_stub(scalar_t* __restrict__ out, const float* __restrict__ inpu
 }
 
 template <typename scalar_t>
-inline void copy_add_stub(
-    scalar_t* __restrict__ out, const float* __restrict__ input, const float* __restrict__ bias, int64_t size) {
+inline void copy_add_stub(scalar_t* __restrict__ out, const float* __restrict__ input, const float* __restrict__ bias, int64_t size) {
   using bVec = at::vec::Vectorized<scalar_t>;
   using fVec = at::vec::Vectorized<float>;
   constexpr int kVecSize = bVec::size();
 
   int64_t d;
-#pragma GCC unroll 4
+  #pragma GCC unroll 4
   for (d = 0; d <= size - kVecSize; d += kVecSize) {
     fVec data0 = fVec::loadu(input + d) + fVec::loadu(bias + d);
     fVec data1 = fVec::loadu(input + d + fVec::size()) + fVec::loadu(bias + d + fVec::size());
@@ -57,16 +56,22 @@ inline void unpack_B(
 #if defined(CPU_CAPABILITY_AVX512)
   // [K/2, N, 2]
   const int K2 = K >> 1;
-  const int ldb2 = ldb;  // ldb * 2 >> 1;
+  const int ldb2 = ldb; // ldb * 2 >> 1;
   const uint16_t* b_ptr = reinterpret_cast<const uint16_t*>(packed_B);
   const __m512 vd = _mm512_set1_ps(scale);
 
   constexpr int BLOCK_N = block_size_n();
   static_assert(BLOCK_N == 32);
 
+  // prefetch distance
+  constexpr int PREFETCH_SIZE_K = 64;
+
 #pragma GCC unroll 4
   for (int k = 0; k < K2; ++k) {
     __m512i b8 = _mm512_loadu_si512(b_ptr + k * ldb2);
+    if constexpr (PREFETCH_SIZE_K > 0) {
+      _mm_prefetch(b_ptr + (k + PREFETCH_SIZE_K) * ldb2, _MM_HINT_T0);
+    }
 
     __m256i b8_0 = _mm512_extracti32x8_epi32(b8, 0);
     __m256i b8_1 = _mm512_extracti32x8_epi32(b8, 1);
@@ -99,16 +104,8 @@ inline void unpack_B(
 template <typename scalar_t, typename packed_t, bool has_bias, int BLOCK_M, int BLOCK_N>
 struct tinygemm_kernel_nn {
   static inline void apply(
-      const scalar_t* __restrict__ A,
-      const packed_t* __restrict__ B,
-      scalar_t* __restrict__ C,
-      const float* __restrict__ bias,
-      const float* __restrict__ scale,
-      int K,
-      int lda,
-      int ldb,
-      int ldc,
-      int64_t block_size_K) {
+      const scalar_t* __restrict__ A, const packed_t* __restrict__ B, scalar_t* __restrict__ C,
+      const float* __restrict__ bias, const float* __restrict__ scale, int K, int lda, int ldb, int ldc, int64_t block_size_K) {
     TORCH_CHECK(false, "tinygemm_kernel_nn: scalar path not implemented!");
   }
 };
@@ -117,23 +114,17 @@ struct tinygemm_kernel_nn {
 template <bool has_bias, int BLOCK_M, int BLOCK_N>
 struct tinygemm_kernel_nn<at::BFloat16, at::Float8_e4m3fn, has_bias, BLOCK_M, BLOCK_N> {
   static inline void apply(
-      const at::BFloat16* __restrict__ A,
-      const at::Float8_e4m3fn* __restrict__ B,
-      at::BFloat16* __restrict__ C,
-      const float* __restrict__ bias,
-      const float* __restrict__ scale,
-      int K,
-      int lda,
-      int ldb,
-      int ldc,
-      int64_t block_size_K) {
+      const at::BFloat16* __restrict__ A, const at::Float8_e4m3fn* __restrict__ B, at::BFloat16* __restrict__ C,
+      const float* __restrict__ bias, const float* __restrict__ scale, int K, int lda, int ldb, int ldc, int64_t block_size_K) {
+
     constexpr int ROWS = BLOCK_M;
     constexpr int COLS = BLOCK_N / 16;
 
     const int KB = div_up(K, BLOCK_K);
 
     // prefetch distance
-    constexpr int PREFETCH_SIZE_K = 0;
+    constexpr int PREFETCH_SIZE_K = 64;
+    constexpr int PREFETCH_SIZE_KB = 1;
 
     __m512bh va;
     __m512bh vb[COLS];
@@ -148,13 +139,13 @@ struct tinygemm_kernel_nn<at::BFloat16, at::Float8_e4m3fn, has_bias, BLOCK_M, BL
       if constexpr (has_bias) {
         vc[i] = _mm512_loadu_ps(bias + col * 16);
       } else {
-        vc[i] = _mm512_set1_ps(0.f);
+        vc[i] = _mm512_setzero_ps();
       }
     };
     Unroll<ROWS * COLS>{}(loadc);
 
     const int lda2 = lda >> 1;
-    const int ldb2 = ldb;  // ldb * 2 >> 1;
+    const int ldb2 = ldb; // ldb * 2 >> 1;
     const float* a_ptr = reinterpret_cast<const float*>(A);
     const uint16_t* b_ptr = reinterpret_cast<const uint16_t*>(B);
 
@@ -164,6 +155,9 @@ struct tinygemm_kernel_nn<at::BFloat16, at::Float8_e4m3fn, has_bias, BLOCK_M, BL
 
       if constexpr (col == 0) {
         va = (__m512bh)(_mm512_set1_ps(a_ptr[row * lda2 + k]));
+        if constexpr (PREFETCH_SIZE_K > 0) {
+          _mm_prefetch(a_ptr + row * lda2 + k + PREFETCH_SIZE_K, _MM_HINT_T0);
+        }
       }
       if constexpr (row == 0) {
         if constexpr (col % 2 == 0) {
@@ -184,14 +178,21 @@ struct tinygemm_kernel_nn<at::BFloat16, at::Float8_e4m3fn, has_bias, BLOCK_M, BL
       int kb_end = std::min(K, kb_start + BLOCK_K2);
       // 1. load scale vector
       vscale = _mm512_set1_ps(scale[kb]);
+      if constexpr (PREFETCH_SIZE_KB > 0) {
+        _mm_prefetch(scale + kb + PREFETCH_SIZE_KB, _MM_HINT_T0);
+      }
       // 2. zero vsum for each block
-      Unroll<ROWS * COLS>{}([&](auto i) { vsum[i] = _mm512_set1_ps(0.f); });
+      Unroll<ROWS * COLS>{}([&](auto i) {
+        vsum[i] = _mm512_setzero_ps();
+      });
       // 3. accumulate across each block
       for (int k = kb_start; k < kb_end; ++k) {
         Unroll<ROWS * COLS>{}(compute, k);
       }
       // 4. apply scale
-      Unroll<ROWS * COLS>{}([&](auto i) { vc[i] = _mm512_fmadd_ps(vsum[i], vscale, vc[i]); });
+      Unroll<ROWS * COLS>{}([&](auto i) {
+        vc[i] = _mm512_fmadd_ps(vsum[i], vscale, vc[i]);
+      });
     }
 
     auto storec = [&](auto i) {
@@ -209,18 +210,10 @@ struct tinygemm_kernel_nn<at::BFloat16, at::Float8_e4m3fn, has_bias, BLOCK_M, BL
 };
 #endif
 
-#define LAUNCH_TINYGEMM_KERNEL_NN(MB_SIZE, NB_SIZE)                                   \
-  tinygemm_kernel_nn<scalar_t, at::Float8_e4m3fn, has_bias, MB_SIZE, NB_SIZE>::apply( \
-      A + mb_start * lda,                                                             \
-      B + nb_start * 2,                                                               \
-      C + mb_start * ldc + nb_start,                                                  \
-      has_bias ? bias + nb_start : nullptr,                                           \
-      scale,                                                                          \
-      K,                                                                              \
-      lda,                                                                            \
-      ldb,                                                                            \
-      ldc,                                                                            \
-      block_size_K);
+#define LAUNCH_TINYGEMM_KERNEL_NN(MB_SIZE, NB_SIZE)                          \
+    tinygemm_kernel_nn<scalar_t, at::Float8_e4m3fn, has_bias, MB_SIZE, NB_SIZE>::apply(         \
+        A + mb_start * lda, B + nb_start * 2, C + mb_start * ldc + nb_start, \
+        has_bias ? bias + nb_start : nullptr, scale, K, lda, ldb, ldc, block_size_K);
 
 template <typename scalar_t, typename packed_t, bool has_bias>
 struct brgemm {
@@ -258,6 +251,7 @@ struct brgemm<at::BFloat16, at::Float8_e4m3fn, has_bias> {
       int lda,
       int ldb,
       int ldc) {
+
     constexpr int BLOCK_N = block_size_n();
 
     // [K, BLOCK_N] -> [K / 2, BLOCK_N * 2]
@@ -266,11 +260,12 @@ struct brgemm<at::BFloat16, at::Float8_e4m3fn, has_bias> {
     for (int k = 0; k < K; k += BLOCK_K) {
       int kb_size = std::min(BLOCK_K, K - k);
 
-      int idx = k >> 7;  // k / BLOCK_K where BLOCK_K = 128
+      int idx = k >> 7; // k / BLOCK_K where BLOCK_K = 128
       unpack_B(Btmp + k * ldb_tmp, B + k * ldb, N, kb_size, ldb, ldb_tmp, scale[idx]);
     }
 
-    at::native::cpublas::brgemm(M, N, K, lda, ldb_tmp, BLOCK_N, /* add_C */ false, A, Btmp, Ctmp);
+    at::native::cpublas::brgemm(
+        M, N, K, lda, ldb_tmp, BLOCK_N, /* add_C */ false, A, Btmp, Ctmp);
 
     // copy from Ctmp to C
     for (int m = 0; m < M; ++m) {
@@ -300,8 +295,10 @@ void tinygemm_kernel(
     int64_t ldc,
     bool brg,
     int64_t block_size_K) {
+
   if (brg) {
-    brgemm<scalar_t, at::Float8_e4m3fn, has_bias>::apply(A, B, C, Btmp, Ctmp, bias, scale, M, N, K, lda, ldb, ldc);
+    brgemm<scalar_t, at::Float8_e4m3fn, has_bias>::apply(
+        A, B, C, Btmp, Ctmp, bias, scale, M, N, K, lda, ldb, ldc);
     return;
   }
 
@@ -317,21 +314,12 @@ void tinygemm_kernel(
       int64_t nb_start = nb * BLOCK_N;
       int64_t nb_size = std::min(BLOCK_N, N - nb_start);
 
-      switch (mb_size << 4 | nb_size >> 4) {
-        case 0x12:
-          LAUNCH_TINYGEMM_KERNEL_NN(1, 32);
-          break;
-        case 0x22:
-          LAUNCH_TINYGEMM_KERNEL_NN(2, 32);
-          break;
-        case 0x32:
-          LAUNCH_TINYGEMM_KERNEL_NN(3, 32);
-          break;
-        case 0x42:
-          LAUNCH_TINYGEMM_KERNEL_NN(4, 32);
-          break;
-        default:
-          TORCH_CHECK(false, "Unexpected block size, ", mb_size, "x", "nb_size");
+      switch(mb_size << 4 | nb_size >> 4) {
+        case 0x12: LAUNCH_TINYGEMM_KERNEL_NN(1, 32); break;
+        case 0x22: LAUNCH_TINYGEMM_KERNEL_NN(2, 32); break;
+        case 0x32: LAUNCH_TINYGEMM_KERNEL_NN(3, 32); break;
+        case 0x42: LAUNCH_TINYGEMM_KERNEL_NN(4, 32); break;
+        default: TORCH_CHECK(false, "Unexpected block size, ", mb_size, "x", "nb_size");
       }
     }
   }
@@ -353,6 +341,7 @@ void fp8_scaled_mm_kernel_impl(
     int64_t block_size_N,
     int64_t block_size_K,
     int64_t buffer_size_per_thread) {
+
   constexpr int64_t BLOCK_M = block_size_m() * BLOCK_SIZE_M_SCALE;
   constexpr int64_t BLOCK_N = block_size_n();
   const int64_t MB = div_up(M, BLOCK_M);
@@ -384,7 +373,7 @@ void fp8_scaled_mm_kernel_impl(
 
         tinygemm_kernel<scalar_t, has_bias>(
             /*   A            */ mat1 + mb_start * mat1_strideM,
-            /*   B            */ mat2 + nb_start * K,  // nb * BLOCK_N * K
+            /*   B            */ mat2 + nb_start * K, // nb * BLOCK_N * K
             /*   C            */ out + mb_start * out_strideM + nb_start,
             /*   Btmp         */ Btmp,
             /*   Ctmp         */ Ctmp,
@@ -410,7 +399,7 @@ void fp8_scaled_mm_kernel_impl(
   });
 }
 
-}  // anonymous namespace
+} // anonymous namespace
 
 // tinygemm interface
 template <typename scalar_t>
@@ -452,14 +441,9 @@ void tinygemm_kernel(
 INSTANTIATE_TINYGEMM_TEMPLATE(at::BFloat16);
 INSTANTIATE_TINYGEMM_TEMPLATE(at::Half);
 
-at::Tensor fp8_scaled_mm_cpu(
-    at::Tensor& mat1,
-    at::Tensor& mat2,
-    at::Tensor& scales2,
-    std::vector<int64_t> block_size,
-    std::optional<at::Tensor>& bias,
-    at::ScalarType out_dtype,
-    bool is_vnni) {
+at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2, at::Tensor& scales2,
+    std::vector<int64_t> block_size, std::optional<at::Tensor>& bias,
+    at::ScalarType out_dtype, bool is_vnni) {
   RECORD_FUNCTION("sgl-kernel::fp8_scaled_mm_cpu", std::vector<c10::IValue>({mat1, mat2, scales2, block_size, bias}));
 
   auto packed_w = is_vnni ? mat2 : convert_weight_packed(mat2);
@@ -467,7 +451,8 @@ at::Tensor fp8_scaled_mm_cpu(
   CHECK_LAST_DIM_CONTIGUOUS_INPUT(mat1);
   CHECK_INPUT(mat2);
   CHECK_INPUT(scales2);
-  TORCH_CHECK(scales2.scalar_type() == at::kFloat, "fp8_scaled_mm_cpu: expect scales2 to be float32.");
+  TORCH_CHECK(scales2.scalar_type() == at::kFloat,
+      "fp8_scaled_mm_cpu: expect scales2 to be float32.");
 
   int64_t M = mat1.size(0);
   int64_t N = mat2.size(0);
@@ -477,7 +462,8 @@ at::Tensor fp8_scaled_mm_cpu(
   CHECK_DIM(2, mat1);
   CHECK_DIM(2, mat2);
 
-  TORCH_CHECK(block_size.size() == 2, "fp8_scaled_mm_cpu: expect block_size.size() to be 2.");
+  TORCH_CHECK(block_size.size() == 2,
+      "fp8_scaled_mm_cpu: expect block_size.size() to be 2.");
 
   int64_t block_size_N = block_size[0];
   int64_t block_size_K = block_size[1];
@@ -490,10 +476,14 @@ at::Tensor fp8_scaled_mm_cpu(
   CHECK_EQ(scales2.size(1), div_up(K, block_size_K));
 
   const auto st = mat1.scalar_type();
-  TORCH_CHECK(st == at::kBFloat16 || st == at::kHalf, "fp8_scaled_mm_cpu: expect A to be bfloat16 or half.");
-  TORCH_CHECK(st == out_dtype, "fp8_scaled_mm_cpu: expect A has same dtype with out_dtype.");
-  TORCH_CHECK(mat2.scalar_type() == at::kFloat8_e4m3fn, "fp8_scaled_mm_cpu: expect mat2 to be fp8_e4m3.");
-  TORCH_CHECK(scales2.scalar_type() == at::kFloat, "fp8_scaled_mm_cpu: expect scales to be float32.");
+  TORCH_CHECK(st == at::kBFloat16 || st == at::kHalf,
+      "fp8_scaled_mm_cpu: expect A to be bfloat16 or half.");
+  TORCH_CHECK(st == out_dtype,
+      "fp8_scaled_mm_cpu: expect A has same dtype with out_dtype.");
+  TORCH_CHECK(mat2.scalar_type() == at::kFloat8_e4m3fn,
+      "fp8_scaled_mm_cpu: expect mat2 to be fp8_e4m3.");
+  TORCH_CHECK(scales2.scalar_type() == at::kFloat,
+      "fp8_scaled_mm_cpu: expect scales to be float32.");
   auto out = at::empty({M, N}, mat1.options().dtype(out_dtype));
 
   // strides

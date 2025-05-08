@@ -1,6 +1,6 @@
 #include "common.h"
-#include "gemm.h"
 #include "vec.h"
+#include "gemm.h"
 
 namespace {
 
@@ -35,8 +35,8 @@ inline void fill_stub(scalar_t* __restrict__ out, scalar_t val, int64_t size) {
 template <typename scalar_t>
 inline void copy_stub(scalar_t* __restrict__ out, const scalar_t* __restrict__ input, int64_t size) {
   using Vec = at::vec::Vectorized<scalar_t>;
-// no remainder
-#pragma GCC unroll 4
+  // no remainder
+  #pragma GCC unroll 4
   for (int64_t d = 0; d < size; d += Vec::size()) {
     Vec data = Vec::loadu(input + d);
     data.store(out + d);
@@ -50,7 +50,7 @@ inline void copy_mul_stub(scalar_t* __restrict__ out, const float* __restrict__ 
   constexpr int kVecSize = bVec::size();
   const fVec weight_vec = fVec(weight);
   int64_t d;
-#pragma GCC unroll 4
+  #pragma GCC unroll 4
   for (d = 0; d <= size - kVecSize; d += kVecSize) {
     fVec data0 = fVec::loadu(input + d) * weight_vec;
     fVec data1 = fVec::loadu(input + d + fVec::size()) * weight_vec;
@@ -74,7 +74,7 @@ inline void sum_stub(scalar_t* __restrict__ out, const scalar_t* __restrict__ in
   } else {
     // do sum for topk != 1
     int64_t d;
-#pragma GCC unroll 4
+    #pragma GCC unroll 4
     for (d = 0; d <= K - kVecSize; d += kVecSize) {
       fVec sum_fvec0 = fVec(0.f);
       fVec sum_fvec1 = fVec(0.f);
@@ -101,18 +101,15 @@ inline void sum_stub(scalar_t* __restrict__ out, const scalar_t* __restrict__ in
 
 // out = input + input2 * scale
 template <typename scalar_t>
-inline void add_mul_stub(
-    scalar_t* __restrict__ out,
-    const float* __restrict__ input,
-    const scalar_t* __restrict__ input2,
-    float scale,
-    int64_t size) {
+inline void add_mul_stub(scalar_t* __restrict__ out, const float* __restrict__ input,
+    const scalar_t* __restrict__ input2, float scale, int64_t size) {
+
   using bVec = at::vec::Vectorized<scalar_t>;
   using fVec = at::vec::Vectorized<float>;
   constexpr int kVecSize = bVec::size();
   const fVec s_vec = fVec(scale);
   int64_t d;
-#pragma GCC unroll 4
+  #pragma GCC unroll 4
   for (d = 0; d <= size - kVecSize; d += kVecSize) {
     fVec x0 = fVec::loadu(input + d);
     fVec x1 = fVec::loadu(input + d + fVec::size());
@@ -142,7 +139,8 @@ int moe_align_block_size(
     int num_experts,
     int numel,
     int num_threads) {
-#define T_INDEX(tt) total_cnts + (tt) * num_experts
+
+  #define T_INDEX(tt) total_cnts + (tt) * num_experts
 
   // accumulate count of expert ids locally
   at::parallel_for(0, numel, 0, [&](int begin, int end) {
@@ -157,7 +155,8 @@ int moe_align_block_size(
   using iVec = at::vec::Vectorized<int32_t>;
   for (int t = 0; t < num_threads; ++t) {
     at::vec::map2<int32_t>(
-        [](iVec x, iVec y) { return x + y; }, T_INDEX(t + 1), T_INDEX(t + 1), T_INDEX(t), num_experts);
+        [](iVec x, iVec y) { return x + y; },
+        T_INDEX(t + 1), T_INDEX(t + 1), T_INDEX(t), num_experts);
   }
 
   // the last row holds sums of each experts
@@ -197,9 +196,7 @@ int moe_align_block_size(
   // padding value for sorted_ids: numel
   auto sorted_id_size = [=](const int32_t* sorted_ids_ptr) {
     for (int d = 0; d < BLOCK_M; ++d) {
-      if (sorted_ids_ptr[d] == numel) {
-        return d;
-      }
+      if (sorted_ids_ptr[d] == numel) { return d; }
     }
     return BLOCK_M;
   };
@@ -234,6 +231,7 @@ inline void silu_and_mul(
     const float* __restrict__ input1,  // y: y0, y1
     int64_t m_size,
     int64_t N) {
+
   using bVec = at::vec::Vectorized<scalar_t>;
   using fVec = at::vec::Vectorized<float>;
 
@@ -266,14 +264,8 @@ inline void silu_and_mul(
 template <typename scalar_t, int BLOCK_M, int BLOCK_N>
 struct tinygemm_kernel_nn2 {
   static inline void apply(
-      const scalar_t* __restrict__ A,
-      const scalar_t* __restrict__ B0,
-      const scalar_t* __restrict__ B1,
-      scalar_t* __restrict__ C,
-      int64_t K,
-      int64_t lda,
-      int64_t ldb,
-      int64_t ldc) {
+      const scalar_t* __restrict__ A, const scalar_t* __restrict__ B0, const scalar_t* __restrict__ B1,
+      scalar_t* __restrict__ C, int64_t K, int64_t lda, int64_t ldb, int64_t ldc) {
     TORCH_CHECK(false, "tinygemm_kernel_nn: scalar path not implemented!");
   }
 };
@@ -282,14 +274,9 @@ struct tinygemm_kernel_nn2 {
 template <int BLOCK_M, int BLOCK_N>
 struct tinygemm_kernel_nn2<at::BFloat16, BLOCK_M, BLOCK_N> {
   static inline void apply(
-      const at::BFloat16* __restrict__ A,
-      const at::BFloat16* __restrict__ B0,
-      const at::BFloat16* __restrict__ B1,
-      at::BFloat16* __restrict__ C,
-      int64_t K,
-      int64_t lda,
-      int64_t ldb,
-      int64_t ldc) {
+      const at::BFloat16* __restrict__ A, const at::BFloat16* __restrict__ B0, const at::BFloat16* __restrict__ B1,
+      at::BFloat16* __restrict__ C, int64_t K, int64_t lda, int64_t ldb, int64_t ldc) {
+
     constexpr int ROWS = BLOCK_M;
     constexpr int COLS = BLOCK_N / 16;
 
@@ -312,7 +299,7 @@ struct tinygemm_kernel_nn2<at::BFloat16, BLOCK_M, BLOCK_N> {
 
     const int64_t K2 = K >> 1;
     const int64_t lda2 = lda >> 1;
-    const int64_t ldb2 = ldb;  // ldb * 2 >> 1;
+    const int64_t ldb2 = ldb; // ldb * 2 >> 1;
     const float* a_ptr = reinterpret_cast<const float*>(A);
     const float* b0_ptr = reinterpret_cast<const float*>(B0);
     const float* b1_ptr = reinterpret_cast<const float*>(B1);
@@ -360,16 +347,17 @@ struct tinygemm_kernel_nn2<at::BFloat16, BLOCK_M, BLOCK_N> {
         _mm512_storeu_si512(
             reinterpret_cast<__m512i*>((C + row * ldc + col * 16)),
             (__m512i)(_mm512_cvtne2ps_pbh(__m512(x1), __m512(x0))));
-      }
+        }
     };
     Unroll<ROWS * COLS>{}(storec);
   }
 };
 #endif
 
-#define LAUNCH_TINYGEMM_KERNEL_NN(MB_SIZE, NB_SIZE)       \
-  tinygemm_kernel_nn2<scalar_t, MB_SIZE, NB_SIZE>::apply( \
-      A + mb_start * lda, B0 + nb_start * 2, B1 + nb_start * 2, C + mb_start * ldc + nb_start, K, lda, ldb, ldc);
+#define LAUNCH_TINYGEMM_KERNEL_NN(MB_SIZE, NB_SIZE)                          \
+    tinygemm_kernel_nn2<scalar_t, MB_SIZE, NB_SIZE>::apply(                  \
+        A + mb_start * lda, B0 + nb_start * 2, B1 + nb_start * 2,            \
+        C + mb_start * ldc + nb_start, K, lda, ldb, ldc);
 
 template <typename scalar_t>
 void tinygemm_kernel(
@@ -383,6 +371,7 @@ void tinygemm_kernel(
     int64_t lda,
     int64_t ldb,
     int64_t ldc) {
+
   // pattern: 1-(2+2)-(8+8)
   constexpr int64_t BLOCK_M = 4;
   constexpr int64_t BLOCK_N = 32;
@@ -395,25 +384,16 @@ void tinygemm_kernel(
       int64_t nb_start = nb * BLOCK_N;
       int64_t nb_size = std::min(BLOCK_N, N - nb_start);
 
-      switch (mb_size << 4 | nb_size >> 4) {
+      switch(mb_size << 4 | nb_size >> 4) {
         // mb_size = 1
-        case 0x12:
-          LAUNCH_TINYGEMM_KERNEL_NN(1, 32);
-          break;
+        case 0x12: LAUNCH_TINYGEMM_KERNEL_NN(1, 32); break;
         // mb_size = 2
-        case 0x22:
-          LAUNCH_TINYGEMM_KERNEL_NN(2, 32);
-          break;
+        case 0x22: LAUNCH_TINYGEMM_KERNEL_NN(2, 32); break;
         // mb_size = 3
-        case 0x32:
-          LAUNCH_TINYGEMM_KERNEL_NN(3, 32);
-          break;
+        case 0x32: LAUNCH_TINYGEMM_KERNEL_NN(3, 32); break;
         // mb_size = 4
-        case 0x42:
-          LAUNCH_TINYGEMM_KERNEL_NN(4, 32);
-          break;
-        default:
-          TORCH_CHECK(false, "Unexpected block size, ", mb_size, "x", "nb_size");
+        case 0x42: LAUNCH_TINYGEMM_KERNEL_NN(4, 32); break;
+        default: TORCH_CHECK(false, "Unexpected block size, ", mb_size, "x", "nb_size");
       }
     }
   }
@@ -422,13 +402,8 @@ void tinygemm_kernel(
 template <typename scalar_t, int BLOCK_M, int BLOCK_N>
 struct tinygemm_kernel_nn {
   static inline void apply(
-      const scalar_t* __restrict__ A,
-      const scalar_t* __restrict__ B,
-      float* __restrict__ C,
-      int64_t K,
-      int64_t lda,
-      int64_t ldb,
-      int64_t ldc) {
+      const scalar_t* __restrict__ A, const scalar_t* __restrict__ B, float* __restrict__ C,
+      int64_t K, int64_t lda, int64_t ldb, int64_t ldc) {
     TORCH_CHECK(false, "tinygemm_kernel_nn: scalar path not implemented!");
   }
 };
@@ -437,13 +412,9 @@ struct tinygemm_kernel_nn {
 template <int BLOCK_M, int BLOCK_N>
 struct tinygemm_kernel_nn<at::BFloat16, BLOCK_M, BLOCK_N> {
   static inline void apply(
-      const at::BFloat16* __restrict__ A,
-      const at::BFloat16* __restrict__ B,
-      float* __restrict__ C,
-      int64_t K,
-      int64_t lda,
-      int64_t ldb,
-      int64_t ldc) {
+      const at::BFloat16* __restrict__ A, const at::BFloat16* __restrict__ B, float* __restrict__ C,
+      int64_t K, int64_t lda, int64_t ldb, int64_t ldc) {
+
     constexpr int ROWS = BLOCK_M;
     constexpr int COLS = BLOCK_N / 16;
 
@@ -456,12 +427,14 @@ struct tinygemm_kernel_nn<at::BFloat16, BLOCK_M, BLOCK_N> {
     __m512bh vb[COLS];
     __m512 vc[ROWS * COLS];
 
-    auto loadc = [&](auto i) { vc[i] = _mm512_set1_ps(0.f); };
+    auto loadc = [&](auto i) {
+      vc[i] = _mm512_set1_ps(0.f);
+    };
     Unroll<ROWS * COLS>{}(loadc);
 
     const int64_t K2 = K >> 1;
     const int64_t lda2 = lda >> 1;
-    const int64_t ldb2 = ldb;  // ldb * 2 >> 1;
+    const int64_t ldb2 = ldb; // ldb * 2 >> 1;
     const float* a_ptr = reinterpret_cast<const float*>(A);
     const float* b_ptr = reinterpret_cast<const float*>(B);
 
@@ -488,15 +461,17 @@ struct tinygemm_kernel_nn<at::BFloat16, BLOCK_M, BLOCK_N> {
       constexpr int row = i / COLS;
       constexpr int col = i % COLS;
       _mm512_storeu_ps(reinterpret_cast<__m512*>(C + row * ldc + col * 16), vc[i]);
+
     };
     Unroll<ROWS * COLS>{}(storec);
   }
 };
 #endif
 
-#define LAUNCH_TINYGEMM_KERNEL_NN2(MB_SIZE, NB_SIZE)     \
-  tinygemm_kernel_nn<scalar_t, MB_SIZE, NB_SIZE>::apply( \
-      A + mb_start * lda, B + nb_start * 2, C + mb_start * ldc + nb_start, K, lda, ldb, ldc);
+#define LAUNCH_TINYGEMM_KERNEL_NN2(MB_SIZE, NB_SIZE)                         \
+    tinygemm_kernel_nn<scalar_t, MB_SIZE, NB_SIZE>::apply(                   \
+        A + mb_start * lda, B + nb_start * 2, C + mb_start * ldc + nb_start, \
+        K, lda, ldb, ldc);
 
 template <typename scalar_t>
 void tinygemm_kernel(
@@ -509,6 +484,7 @@ void tinygemm_kernel(
     int64_t lda,
     int64_t ldb,
     int64_t ldc) {
+
   // pattern: 1-2-8
   constexpr int64_t BLOCK_M = 4;
   constexpr int64_t BLOCK_N = 32;
@@ -521,25 +497,16 @@ void tinygemm_kernel(
       int64_t nb_start = nb * BLOCK_N;
       int64_t nb_size = std::min(BLOCK_N, N - nb_start);
 
-      switch (mb_size << 4 | nb_size >> 4) {
+      switch(mb_size << 4 | nb_size >> 4) {
         // mb_size = 1
-        case 0x12:
-          LAUNCH_TINYGEMM_KERNEL_NN2(1, 32);
-          break;
+        case 0x12: LAUNCH_TINYGEMM_KERNEL_NN2(1, 32); break;
         // mb_size = 2
-        case 0x22:
-          LAUNCH_TINYGEMM_KERNEL_NN2(2, 32);
-          break;
+        case 0x22: LAUNCH_TINYGEMM_KERNEL_NN2(2, 32); break;
         // mb_size = 3
-        case 0x32:
-          LAUNCH_TINYGEMM_KERNEL_NN2(3, 32);
-          break;
+        case 0x32: LAUNCH_TINYGEMM_KERNEL_NN2(3, 32); break;
         // mb_size = 4
-        case 0x42:
-          LAUNCH_TINYGEMM_KERNEL_NN2(4, 32);
-          break;
-        default:
-          TORCH_CHECK(false, "Unexpected block size, ", mb_size, "x", "nb_size");
+        case 0x42: LAUNCH_TINYGEMM_KERNEL_NN2(4, 32); break;
+        default: TORCH_CHECK(false, "Unexpected block size, ", mb_size, "x", "nb_size");
       }
     }
   }
@@ -565,6 +532,7 @@ void fused_experts_kernel_impl(
     int64_t E,
     int64_t topk,
     int64_t num_tokens_post_pad) {
+
   // handle 2 tiles per block
   constexpr int64_t BLOCK_M = block_size_m();
   constexpr int64_t BLOCK_N = block_size_n();
@@ -643,7 +611,12 @@ void fused_experts_kernel_impl(
 
         // 1.d silu and mul
         const int64_t offset = offsets[mb];
-        silu_and_mul<scalar_t, BLOCK_N>(ic1 + offset * N + nb * BLOCK_N, C0, C1, m_size, N);
+        silu_and_mul<scalar_t, BLOCK_N>(
+            ic1 + offset * N + nb * BLOCK_N,
+            C0,
+            C1,
+            m_size,
+            N);
       } else {
         // fused 1.bcd: silu_and_mul(A @ B0, A @ B1)
         const int64_t offset = offsets[mb];
@@ -765,6 +738,7 @@ void shared_expert_kernel_impl(
     int64_t M,
     int64_t N,
     int64_t K) {
+
   // handle 2 tiles per block
   constexpr int64_t BLOCK_M = block_size_m();
   constexpr int64_t BLOCK_N = block_size_n();
@@ -794,8 +768,8 @@ void shared_expert_kernel_impl(
       int64_t n_size = std::min(N - nb0 * BLOCK_N, BLOCK_N);
       int64_t m_size = std::min(M - mb * BLOCK_M, BLOCK_M);
 
-      // int64_t mb_start = mb * BLOCK_M;
-      // int64_t mb_size = std::min(M - mb_start, BLOCK_M);
+      //int64_t mb_start = mb * BLOCK_M;
+      //int64_t mb_size = std::min(M - mb_start, BLOCK_M);
 
       // A shape [m_size, K]
       const scalar_t* A = input + mb * BLOCK_M * K;
@@ -835,7 +809,12 @@ void shared_expert_kernel_impl(
             /* C     */ C1);
 
         // 1.d silu and mul
-        silu_and_mul<scalar_t, BLOCK_N>(ic1 + mb * BLOCK_M * N + nb * BLOCK_N, C0, C1, m_size, N);
+        silu_and_mul<scalar_t, BLOCK_N>(
+            ic1 + mb * BLOCK_M * N + nb * BLOCK_N,
+            C0,
+            C1,
+            m_size,
+            N);
       } else {
         // fused 1.bcd: silu_and_mul(A @ B0, A @ B1)
         tinygemm_kernel(
@@ -930,7 +909,7 @@ void shared_expert_kernel_impl(
   });
 }
 
-}  // anonymous namespace
+} // anonymous namespace
 
 // common checks
 static inline void check_moe_scales(
@@ -955,16 +934,16 @@ static inline void check_moe_scales(
   }
 }
 
-#define CHECK_MOE_SCALES_FP8(DIM0, DIM1)               \
-  auto w1s = w1_scale.value();                         \
-  auto w2s = w2_scale.value();                         \
-  auto block_size_val = block_size.value();            \
-  int64_t block_size_N = block_size_val[0];            \
-  int64_t block_size_K = block_size_val[1];            \
-  TORCH_CHECK(w1s.size(DIM0) == 2 * N / block_size_N); \
-  TORCH_CHECK(w1s.size(DIM1) == K / block_size_K);     \
-  TORCH_CHECK(w2s.size(DIM0) == K / block_size_N);     \
-  TORCH_CHECK(w2s.size(DIM1) == N / block_size_K)
+#define CHECK_MOE_SCALES_FP8(DIM0, DIM1)                 \
+    auto w1s = w1_scale.value();                         \
+    auto w2s = w2_scale.value();                         \
+    auto block_size_val = block_size.value();            \
+    int64_t block_size_N = block_size_val[0];            \
+    int64_t block_size_K = block_size_val[1];            \
+    TORCH_CHECK(w1s.size(DIM0) == 2 * N / block_size_N); \
+    TORCH_CHECK(w1s.size(DIM1) == K / block_size_K);     \
+    TORCH_CHECK(w2s.size(DIM0) == K / block_size_N);     \
+    TORCH_CHECK(w2s.size(DIM1) == N / block_size_K)
 
 // hidden_states: [M, K]
 // w1: [E, 2N, K]
@@ -987,8 +966,7 @@ at::Tensor fused_experts_cpu(
     std::optional<at::Tensor>& a1_scale,
     std::optional<at::Tensor>& a2_scale,
     bool is_vnni) {
-  RECORD_FUNCTION(
-      "sgl-kernel::fused_experts_cpu", std::vector<c10::IValue>({hidden_states, w1, w2, topk_weights, topk_ids}));
+  RECORD_FUNCTION("sgl-kernel::fused_experts_cpu", std::vector<c10::IValue>({hidden_states, w1, w2, topk_weights, topk_ids}));
 
   auto packed_w1 = is_vnni ? w1 : convert_weight_packed(w1);
   auto packed_w2 = is_vnni ? w2 : convert_weight_packed(w2);
@@ -1048,8 +1026,8 @@ at::Tensor fused_experts_cpu(
   int32_t* __restrict__ sorted_ids = buffer.data_ptr<int32_t>();
   int32_t* __restrict__ expert_ids = sorted_ids + max_num_tokens_padded;
   int32_t* __restrict__ total_cnts = expert_ids + max_num_blocks;
-  int32_t* __restrict__ cumsums = total_cnts + (num_threads + 1) * E;
-  int32_t* __restrict__ offsets = cumsums + (E + 1);
+  int32_t* __restrict__ cumsums    = total_cnts + (num_threads + 1) * E;
+  int32_t* __restrict__ offsets    = cumsums    + (E + 1);
 
   // init sorted_ids with `numel` as the padding number
   // init expert_ids with `num_experts`
@@ -1080,17 +1058,18 @@ at::Tensor fused_experts_cpu(
   //   6. As_tmp : [M * topk]
   //
   // for fp8 w8a16:
-  //   7. intermediate_cache1 : [M * topk, 2N]
+  //   7. intermediate_cache0 : [M * topk, 2N]
+  //   8. B_tmp : [T, BLOCK_N, std::max(K, N)]
   //
   int64_t buffer_size_nbytes = M * topk * N * 2 + M * topk * K * 2 +
-                               num_threads * BLOCK_M * K * (use_int8_w8a8 ? 1 : 2) +
-                               num_threads * 2 * BLOCK_M * BLOCK_N * sizeof(float);
+      num_threads * BLOCK_M * K * (use_int8_w8a8 ? 1 : 2) +
+      num_threads * 2 * BLOCK_M * BLOCK_N * sizeof(float);
 
   if (use_int8_w8a8) {
     buffer_size_nbytes += std::max(M * K, M * topk * N) + M * topk * sizeof(float);
   }
   if (use_fp8_w8a16) {
-    buffer_size_nbytes += M * topk * 2 * N * 2;
+    buffer_size_nbytes += M * topk * 2 * N * 2 + num_threads * BLOCK_N * std::max(K, N) * 2;
   }
 
   auto buffer2 = at::empty({buffer_size_nbytes}, hidden_states.options().dtype(at::kChar));
@@ -1136,7 +1115,9 @@ at::Tensor fused_experts_cpu(
     } else if (use_fp8_w8a16) {
       // here we just ignore C_tmp as it is not used
       scalar_t* __restrict__ A_tmp = (scalar_t*)((void*)(intermediate_cache2 + M * topk * K));
-      scalar_t* __restrict__ intermediate_cache0 = (scalar_t*)((void*)(A_tmp + num_threads * BLOCK_M * K));
+      float* __restrict__ C_tmp = (float*)((void*)(A_tmp + num_threads * BLOCK_M * K));
+      scalar_t* __restrict__ intermediate_cache0 = (scalar_t*)((void*)(C_tmp + num_threads * 2 * BLOCK_M * BLOCK_N));
+      scalar_t* __restrict__ B_tmp = (scalar_t*)((void*)(intermediate_cache0 + M * topk * 2 * N));
 
       CHECK_MOE_SCALES_FP8(1, 2);
       fused_experts_fp8_kernel_impl(
@@ -1145,6 +1126,8 @@ at::Tensor fused_experts_cpu(
           intermediate_cache1,
           intermediate_cache2,
           A_tmp,
+          B_tmp,
+          C_tmp,
           hidden_states.data_ptr<scalar_t>(),
           packed_w1.data_ptr<at::Float8_e4m3fn>(),
           packed_w2.data_ptr<at::Float8_e4m3fn>(),
@@ -1204,8 +1187,10 @@ at::Tensor shared_expert_cpu(
     double routed_scaling_factor,
     bool inplace,
     bool use_int8_w8a8,
+    bool use_fp8_w8a16,
     std::optional<at::Tensor>& w1_scale,
     std::optional<at::Tensor>& w2_scale,
+    std::optional<std::vector<int64_t>> block_size,
     std::optional<at::Tensor>& a1_scale,
     std::optional<at::Tensor>& a2_scale,
     bool is_vnni) {
@@ -1241,12 +1226,8 @@ at::Tensor shared_expert_cpu(
   CHECK_EQ(packed_w1.size(1), packed_K);
   CHECK_EQ(packed_w2.size(1), packed_N);
 
-  if (use_int8_w8a8) {
-    TORCH_CHECK(w1_scale.has_value(), "missing w1_scale for int8 w8a8.");
-    TORCH_CHECK(w2_scale.has_value(), "missing w2_scale for int8 w8a8.");
-    TORCH_CHECK(!a1_scale.has_value(), "static quantization for activation not supported.");
-    TORCH_CHECK(!a2_scale.has_value(), "static quantization for activation not supported.");
-  }
+  // check scales
+  check_moe_scales(use_int8_w8a8, use_fp8_w8a16, w1_scale, w2_scale, block_size, a1_scale, a2_scale);
 
   at::Tensor out_hidden_states = inplace ? hidden_states : at::empty_like(hidden_states);
 
@@ -1258,11 +1239,18 @@ at::Tensor shared_expert_cpu(
   //   3. Aq_tmp : [M, K] or [M, N]
   //   4. As_tmp : [M]
   //
+  // for fp8 w8a16:
+  //   5. intermediate_cache0 : [M, 2N]
+  //   6. B_tmp: [T, BLOCK_M, max(K, N)]
+  //
   int num_threads = at::get_num_threads();
   int64_t buffer_size_nbytes = M * N * 2 + num_threads * 2 * BLOCK_M * BLOCK_N * sizeof(float);
 
   if (use_int8_w8a8) {
     buffer_size_nbytes += std::max(M * K, M * N) + M * sizeof(float);
+  }
+  if (use_fp8_w8a16) {
+    buffer_size_nbytes += M * 2 * N * 2 + num_threads * BLOCK_M * std::max(K, N) * 2;
   }
 
   auto buffer = at::empty({buffer_size_nbytes}, hidden_states.options().dtype(at::kChar));
@@ -1290,6 +1278,29 @@ at::Tensor shared_expert_cpu(
           packed_w2.data_ptr<int8_t>(),
           w1s.data_ptr<float>(),
           w2s.data_ptr<float>(),
+          fused_experts_out.data_ptr<scalar_t>(),
+          routed_scaling_factor,
+          M,
+          N,
+          K);
+    } else if (use_fp8_w8a16) {
+      scalar_t* __restrict__ intermediate_cache0 = (scalar_t*)((void*)(C_tmp + num_threads * 2 * BLOCK_M * BLOCK_N));
+      scalar_t* __restrict__ B_tmp = (scalar_t*)((void*)(intermediate_cache0 + M * 2 * N));
+
+      CHECK_MOE_SCALES_FP8(0, 1);
+      shared_expert_fp8_kernel_impl<scalar_t>(
+          out_hidden_states.data_ptr<scalar_t>(),
+          intermediate_cache0,
+          intermediate_cache1,
+          B_tmp,
+          C_tmp,
+          hidden_states.data_ptr<scalar_t>(),
+          packed_w1.data_ptr<at::Float8_e4m3fn>(),
+          packed_w2.data_ptr<at::Float8_e4m3fn>(),
+          w1s.data_ptr<float>(),
+          w2s.data_ptr<float>(),
+          block_size_N,
+          block_size_K,
           fused_experts_out.data_ptr<scalar_t>(),
           routed_scaling_factor,
           M,

@@ -14,8 +14,8 @@ limitations under the License.
 ==============================================================================*/
 
 #include <ATen/ATen.h>
-#include <torch/extension.h>
 #include <torch/library.h>
+#include <torch/extension.h>
 
 #include "shm.h"
 
@@ -82,39 +82,26 @@ at::Tensor convert_weight_packed(at::Tensor& weight);
 std::tuple<at::Tensor, at::Tensor> per_token_quant_int8_cpu(at::Tensor& A);
 
 // gemm
-at::Tensor weight_packed_linear(at::Tensor& mat1, at::Tensor& mat2, std::optional<at::Tensor>& bias, bool is_vnni);
+at::Tensor weight_packed_linear(at::Tensor& mat1, at::Tensor& mat2,
+    std::optional<at::Tensor>& bias, bool is_vnni);
 
 // igemm
-at::Tensor int8_scaled_mm_cpu(
-    at::Tensor& mat1,
-    at::Tensor& mat2,
-    at::Tensor& scales1,
-    at::Tensor& scales2,
-    std::optional<at::Tensor>& bias,
-    at::ScalarType out_dtype,
-    bool is_vnni);
+at::Tensor int8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2,
+    at::Tensor& scales1, at::Tensor& scales2,
+    std::optional<at::Tensor>& bias, at::ScalarType out_dtype, bool is_vnni);
 
 // fp8 gemm
-at::Tensor fp8_scaled_mm_cpu(
-    at::Tensor& mat1,
-    at::Tensor& mat2,
-    at::Tensor& scales2,
-    std::vector<int64_t> block_size,
-    std::optional<at::Tensor>& bias,
-    at::ScalarType out_dtype,
-    bool is_vnni);
+at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2,
+    at::Tensor& scales2, std::vector<int64_t> block_size,
+    std::optional<at::Tensor>& bias, at::ScalarType out_dtype, bool is_vnni);
 
 // quant + igemm
-at::Tensor int8_scaled_mm_with_quant(
-    at::Tensor& mat1,
-    at::Tensor& mat2,
-    at::Tensor& scales2,
-    std::optional<at::Tensor>& bias,
-    at::ScalarType out_dtype,
-    bool is_vnni);
+at::Tensor int8_scaled_mm_with_quant(at::Tensor& mat1, at::Tensor& mat2, at::Tensor& scales2,
+    std::optional<at::Tensor>& bias, at::ScalarType out_dtype, bool is_vnni);
 
 // bmm
-void bmm_cpu(at::Tensor& out, at::Tensor& mat1, at::Tensor& mat2, bool is_vnni, std::optional<at::Tensor>& scale);
+void bmm_cpu(at::Tensor& out, at::Tensor& mat1, at::Tensor& mat2, bool is_vnni,
+    std::optional<at::Tensor>& scale);
 
 // fused moe
 at::Tensor fused_experts_cpu(
@@ -141,8 +128,10 @@ at::Tensor shared_expert_cpu(
     double routed_scaling_factor,
     bool inplace,
     bool use_int8_w8a8,
+    bool use_fp8_w8a16,
     std::optional<at::Tensor>& w1_scale,
     std::optional<at::Tensor>& w2_scale,
+    std::optional<std::vector<int64_t>> block_size,
     std::optional<at::Tensor>& a1_scale,
     std::optional<at::Tensor>& a2_scale,
     bool is_vnni);
@@ -175,8 +164,8 @@ void shm_allreduce(at::Tensor& data, c10::intrusive_ptr<c10d::ProcessGroup> proc
 at::Tensor shm_allgather(at::Tensor& data, c10::intrusive_ptr<c10d::ProcessGroup> process_group, int dim);
 
 // rope
-std::tuple<at::Tensor, at::Tensor>
-rotary_position_embedding_cpu(at::Tensor& t_pos, at::Tensor& q_pe, at::Tensor& k_pe, at::Tensor& t_emb_pos);
+std::tuple<at::Tensor, at::Tensor> rotary_position_embedding_cpu(at::Tensor& t_pos, at::Tensor& q_pe,
+    at::Tensor& k_pe, at::Tensor& t_emb_pos);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // activation
@@ -214,8 +203,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fp8_scaled_mm_cpu", &fp8_scaled_mm_cpu, "fp8 weight packed linear for intel AMX");
 
   // quant + igemm
-  m.def(
-      "int8_scaled_mm_with_quant", &int8_scaled_mm_with_quant, "fused per row quant and int8 scaled mm for intel AMX");
+  m.def("int8_scaled_mm_with_quant", &int8_scaled_mm_with_quant, "fused per row quant and int8 scaled mm for intel AMX");
 
   // bmm
   m.def("bmm_cpu", &bmm_cpu, "bmm kernel for intel AMX");

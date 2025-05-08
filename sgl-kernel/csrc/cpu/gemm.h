@@ -1,7 +1,6 @@
 #pragma once
 
 #include <ATen/native/CPUBlas.h>
-
 #include "common.h"
 
 // amx-bf16
@@ -10,37 +9,19 @@
 #define TILE_K 32
 
 // block size for AMX gemm
-constexpr int block_size_m() {
-  return 2 * TILE_M;
-}
-constexpr int block_size_n() {
-  return 2 * TILE_N;
-}
+constexpr int block_size_m() { return 2 * TILE_M; }
+constexpr int block_size_n() { return 2 * TILE_N; }
 
 // define threshold using brgemm (intel AMX)
-template <typename T>
-inline bool can_use_brgemm(int M);
-template <>
-inline bool can_use_brgemm<at::BFloat16>(int M) {
-  return M > 4;
-}
-template <>
-inline bool can_use_brgemm<at::Half>(int M) {
-  return true;
-}
+template <typename T> inline bool can_use_brgemm(int M);
+template <> inline bool can_use_brgemm<at::BFloat16>(int M) { return M > 4; }
+template <> inline bool can_use_brgemm<at::Half>(int M) { return true; }
 // TODO: add u8s8 brgemm, this requires PyTorch 2.7
-template <>
-inline bool can_use_brgemm<int8_t>(int M) {
-  return false;
-}
-
-template <>
-inline bool can_use_brgemm<at::Float8_e4m3fn>(int M) {
-  return M > 4;
-}
+template <> inline bool can_use_brgemm<int8_t>(int M) { return false; }
+template <> inline bool can_use_brgemm<at::Float8_e4m3fn>(int M) { return M > 4; }
 
 // work around compiler internal error
-#define BLOCK_K 128  // 4 * TILE_K
+#define BLOCK_K 128 // 4 * TILE_K
 
 // adjust leading dimension size for K
 template <typename T>
@@ -94,6 +75,8 @@ void fused_experts_fp8_kernel_impl(
     scalar_t* __restrict__ ic1,
     scalar_t* __restrict__ ic2,
     scalar_t* __restrict__ A_tmp,
+    scalar_t* __restrict__ B_tmp,
+    float* __restrict__ C_tmp,
     const scalar_t* __restrict__ input,
     const at::Float8_e4m3fn* __restrict__ packed_w1,
     const at::Float8_e4m3fn* __restrict__ packed_w2,
@@ -125,6 +108,26 @@ void shared_expert_int8_kernel_impl(
     const int8_t* __restrict__ packed_w2,
     const float* __restrict__ w1s,
     const float* __restrict__ w2s,
+    const scalar_t* __restrict__ fused_experts_out,
+    float routed_scaling_factor,
+    int64_t M,
+    int64_t N,
+    int64_t K);
+
+template <typename scalar_t>
+void shared_expert_fp8_kernel_impl(
+    scalar_t* __restrict__ output,
+    scalar_t* __restrict__ ic0,
+    scalar_t* __restrict__ ic1,
+    scalar_t* __restrict__ B_tmp,
+    float* __restrict__ C_tmp,
+    const scalar_t* __restrict__ input,
+    const at::Float8_e4m3fn* __restrict__ packed_w1,
+    const at::Float8_e4m3fn* __restrict__ packed_w2,
+    const float* __restrict__ w1s,
+    const float* __restrict__ w2s,
+    int64_t block_size_N,
+    int64_t block_size_K,
     const scalar_t* __restrict__ fused_experts_out,
     float routed_scaling_factor,
     int64_t M,
@@ -178,3 +181,35 @@ void tinygemm_kernel(
     int64_t ldc,
     bool brg,
     int64_t block_size_K);
+
+// TODO: debug print, remove me later
+inline void print_16x32i(const __m512i x) {
+  int32_t a[16];
+  _mm512_storeu_si512((__m512i *)a, x);
+
+  for (int i = 0; i < 16; i++){
+    std::cout << a[i] << " ";
+  }
+  std::cout << std::endl;
+}
+
+inline void print_16x32(const __m512 x) {
+  float a[16];
+  _mm512_storeu_ps((__m512 *)a, x);
+
+  for (int i = 0; i < 16; i++){
+    std::cout << a[i] << " ";
+  }
+  std::cout << std::endl;
+}
+
+
+inline void print_32x8u(const __m256i x) {
+  uint8_t a[32];
+  _mm256_storeu_si256((__m256i *)a, x);
+
+  for (int i = 0; i < 32; ++i) {
+    std::cout << int32_t(a[i]) << " ";
+  }
+  std::cout << std::endl;
+}
