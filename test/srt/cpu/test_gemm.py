@@ -38,9 +38,13 @@ class TestGemm(CustomTestCase):
     K = [32 * 16]
     has_bias = [False, True]
 
-    M_fp8 = [1, 14]
-    N_fp8 = [160]
-    K_fp8 = [768]
+    M_int8 = [2, 128]
+    N_int8 = [32 * 12]
+    K_int8 = [32 * 17]
+    
+    M_fp8 = [1, 11]
+    N_fp8 = [128, 224]
+    K_fp8 = [512, 576]
 
     def _bf16_gemm(self, M, N, K, has_bias):
 
@@ -110,9 +114,9 @@ class TestGemm(CustomTestCase):
 
     def test_int8_gemm(self):
         for params in itertools.product(
-            self.M,
-            self.N,
-            self.K,
+            self.M_int8,
+            self.N_int8,
+            self.K_int8,
             self.has_bias,
         ):
             with self.subTest(
