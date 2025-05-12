@@ -1535,12 +1535,14 @@ class DeepseekV2Model(nn.Module):
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+    
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         forward_batch: ForwardBatch,
     ) -> torch.Tensor:
+        # breakpoint()
         hidden_states = self.embed_tokens(input_ids)
         residual = None
         layers = self.layers

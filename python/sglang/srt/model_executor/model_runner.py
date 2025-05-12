@@ -923,6 +923,7 @@ class ModelRunner:
 
     def forward_decode(self, forward_batch: ForwardBatch):
         self.attn_backend.init_forward_metadata(forward_batch)
+
         return self.model.forward(
             forward_batch.input_ids, forward_batch.positions, forward_batch
         )
@@ -935,6 +936,9 @@ class ModelRunner:
 
         if self.is_generation:
             if forward_batch.input_embeds is None:
+                example_inputs = (forward_batch.input_ids, forward_batch.positions, forward_batch)
+                exported = torch.export.export(self.model, example_inputs)
+                
                 return self.model.forward(
                     forward_batch.input_ids, forward_batch.positions, forward_batch
                 )
