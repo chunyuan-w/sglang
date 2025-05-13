@@ -955,16 +955,16 @@ static inline void check_moe_scales(
   }
 }
 
-#define CHECK_MOE_SCALES_FP8(DIM0, DIM1)                 \
-    auto w1s = w1_scale.value();                         \
-    auto w2s = w2_scale.value();                         \
-    auto block_size_val = block_size.value();            \
-    int64_t block_size_N = block_size_val[0];            \
-    int64_t block_size_K = block_size_val[1];            \
-    TORCH_CHECK(w1s.size(DIM0) == 2 * N / block_size_N); \
-    TORCH_CHECK(w1s.size(DIM1) == K / block_size_K);     \
-    TORCH_CHECK(w2s.size(DIM0) == K / block_size_N);     \
-    TORCH_CHECK(w2s.size(DIM1) == N / block_size_K)
+#define CHECK_MOE_SCALES_FP8(DIM0, DIM1)               \
+  auto w1s = w1_scale.value();                         \
+  auto w2s = w2_scale.value();                         \
+  auto block_size_val = block_size.value();            \
+  int64_t block_size_N = block_size_val[0];            \
+  int64_t block_size_K = block_size_val[1];            \
+  TORCH_CHECK(w1s.size(DIM0) == 2 * N / block_size_N); \
+  TORCH_CHECK(w1s.size(DIM1) == K / block_size_K);     \
+  TORCH_CHECK(w2s.size(DIM0) == K / block_size_N);     \
+  TORCH_CHECK(w2s.size(DIM1) == N / block_size_K)
 
 // hidden_states: [M, K]
 // w1: [E, 2N, K]
@@ -987,7 +987,8 @@ at::Tensor fused_experts_cpu(
     std::optional<at::Tensor>& a1_scale,
     std::optional<at::Tensor>& a2_scale,
     bool is_vnni) {
-  RECORD_FUNCTION("sgl-kernel::fused_experts_cpu", std::vector<c10::IValue>({hidden_states, w1, w2, topk_weights, topk_ids}));
+  RECORD_FUNCTION(
+      "sgl-kernel::fused_experts_cpu", std::vector<c10::IValue>({hidden_states, w1, w2, topk_weights, topk_ids}));
 
   auto packed_w1 = is_vnni ? w1 : convert_weight_packed(w1);
   auto packed_w2 = is_vnni ? w2 : convert_weight_packed(w2);
