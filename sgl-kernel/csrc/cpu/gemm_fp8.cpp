@@ -185,17 +185,13 @@ struct tinygemm_kernel_nn<at::BFloat16, at::Float8_e4m3fn, has_bias, BLOCK_M, BL
       // 1. load scale vector
       vscale = _mm512_set1_ps(scale[kb]);
       // 2. zero vsum for each block
-      Unroll<ROWS * COLS>{}([&](auto i) {
-        vsum[i] = _mm512_set1_ps(0.f);
-      });
+      Unroll<ROWS * COLS>{}([&](auto i) { vsum[i] = _mm512_set1_ps(0.f); });
       // 3. accumulate across each block
       for (int k = kb_start; k < kb_end; ++k) {
         Unroll<ROWS * COLS>{}(compute, k);
       }
       // 4. apply scale
-      Unroll<ROWS * COLS>{}([&](auto i) {
-        vc[i] = _mm512_fmadd_ps(vsum[i], vscale, vc[i]);
-      });
+      Unroll<ROWS * COLS>{}([&](auto i) { vc[i] = _mm512_fmadd_ps(vsum[i], vscale, vc[i]); });
     }
 
     auto storec = [&](auto i) {
@@ -262,7 +258,6 @@ struct brgemm<at::BFloat16, at::Float8_e4m3fn, has_bias> {
       int lda,
       int ldb,
       int ldc) {
-
     constexpr int BLOCK_N = block_size_n();
 
     // [K, BLOCK_N] -> [K / 2, BLOCK_N * 2]
@@ -271,12 +266,11 @@ struct brgemm<at::BFloat16, at::Float8_e4m3fn, has_bias> {
     for (int k = 0; k < K; k += BLOCK_K) {
       int kb_size = std::min(BLOCK_K, K - k);
 
-      int idx = k >> 7; // k / BLOCK_K where BLOCK_K = 128
+      int idx = k >> 7;  // k / BLOCK_K where BLOCK_K = 128
       unpack_B(Btmp + k * ldb_tmp, B + k * ldb, N, kb_size, ldb, ldb_tmp, scale[idx]);
     }
 
-    at::native::cpublas::brgemm(
-        M, N, K, lda, ldb_tmp, BLOCK_N, /* add_C */ false, A, Btmp, Ctmp);
+    at::native::cpublas::brgemm(M, N, K, lda, ldb_tmp, BLOCK_N, /* add_C */ false, A, Btmp, Ctmp);
 
     // copy from Ctmp to C
     for (int m = 0; m < M; ++m) {
@@ -323,12 +317,21 @@ void tinygemm_kernel(
       int64_t nb_start = nb * BLOCK_N;
       int64_t nb_size = std::min(BLOCK_N, N - nb_start);
 
-      switch(mb_size << 4 | nb_size >> 4) {
-        case 0x12: LAUNCH_TINYGEMM_KERNEL_NN(1, 32); break;
-        case 0x22: LAUNCH_TINYGEMM_KERNEL_NN(2, 32); break;
-        case 0x32: LAUNCH_TINYGEMM_KERNEL_NN(3, 32); break;
-        case 0x42: LAUNCH_TINYGEMM_KERNEL_NN(4, 32); break;
-        default: TORCH_CHECK(false, "Unexpected block size, ", mb_size, "x", "nb_size");
+      switch (mb_size << 4 | nb_size >> 4) {
+        case 0x12:
+          LAUNCH_TINYGEMM_KERNEL_NN(1, 32);
+          break;
+        case 0x22:
+          LAUNCH_TINYGEMM_KERNEL_NN(2, 32);
+          break;
+        case 0x32:
+          LAUNCH_TINYGEMM_KERNEL_NN(3, 32);
+          break;
+        case 0x42:
+          LAUNCH_TINYGEMM_KERNEL_NN(4, 32);
+          break;
+        default:
+          TORCH_CHECK(false, "Unexpected block size, ", mb_size, "x", "nb_size");
       }
     }
   }
@@ -350,7 +353,6 @@ void fp8_scaled_mm_kernel_impl(
     int64_t block_size_N,
     int64_t block_size_K,
     int64_t buffer_size_per_thread) {
-
   constexpr int64_t BLOCK_M = block_size_m() * BLOCK_SIZE_M_SCALE;
   constexpr int64_t BLOCK_N = block_size_n();
   const int64_t MB = div_up(M, BLOCK_M);

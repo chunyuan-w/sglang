@@ -169,7 +169,6 @@ void segment_gemm_kernel_impl(
     int64_t K,
     int64_t block_size_N,
     int64_t block_size_K) {
-
   constexpr int64_t BLOCK_M = block_size_m();
   constexpr int64_t BLOCK_N = block_size_n();
   const int64_t MB = div_up(M, BLOCK_M);
@@ -545,7 +544,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qkv_proj_with_rope(
 
       const int BLOCK_N = block_size_n();
       const int num_threads = at::get_num_threads();
-      auto buffer  = at::empty({num_threads, BLOCK_N * hidden_size}, options);
+      auto buffer = at::empty({num_threads, BLOCK_N * hidden_size}, options);
       segment_gemm_kernel_impl<scalar_t>(
           qa.data_ptr<scalar_t>(),
           k_input.data_ptr<scalar_t>(),
