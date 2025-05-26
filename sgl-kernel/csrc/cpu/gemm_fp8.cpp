@@ -198,9 +198,7 @@ struct tinygemm_kernel_nn<at::BFloat16, at::Float8_e4m3fn, has_bias, BLOCK_M, BL
         _mm_prefetch(scale + kb + PREFETCH_SIZE_KB, _MM_HINT_T0);
       }
       // 2. zero vsum for each block
-      Unroll<ROWS * COLS>{}([&](auto i) {
-        vsum[i] = _mm512_setzero_ps();
-      });
+      Unroll<ROWS * COLS>{}([&](auto i) { vsum[i] = _mm512_setzero_ps(); });
       // 3. accumulate across each block
       for (int k = kb_start; k < kb_end; ++k) {
         Unroll<ROWS * COLS>{}(compute, k);
