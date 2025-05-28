@@ -68,10 +68,17 @@ def update_config(
         model_config.hf_text_config.num_attention_heads_ori = model_config.num_attention_heads
         model_config.hf_config.num_key_value_heads_ori = model_config.get_total_num_kv_heads()
         model_config.hf_text_config.num_key_value_heads_ori = model_config.get_total_num_kv_heads()
+        
+        print(f"n heads before pad: {model_config.num_attention_heads=}", flush=True)
+        
+        
         query_heads_per_kv = (
             model_config.num_attention_heads // model_config.get_total_num_kv_heads()
         )
         total_kv_heads = model_config.get_total_num_kv_heads()
+        print(f"before pad: {total_kv_heads=}", flush=True)
+        print(f"{query_heads_per_kv=}", flush=True)
+        
         num_key_value_heads = pad_vocab_size(total_kv_heads, tp_size)
 
         model_config.num_key_value_heads = num_key_value_heads
@@ -82,6 +89,12 @@ def update_config(
         model_config.num_attention_heads = num_attention_heads
         model_config.hf_config.num_attention_heads = num_attention_heads
         model_config.hf_text_config.num_attention_heads = num_attention_heads
+
+        
+        
+        print(f"after pad: {num_key_value_heads=}", flush=True)
+        print(f"n heads after pad: {num_attention_heads=}", flush=True)
+        
 
         # num_attention_heads_o = pad_vocab_size(model_config.hf_config.num_attention_heads_ori, tp_size)
         # model_config.hf_config.num_attention_heads_o = num_attention_heads_o
