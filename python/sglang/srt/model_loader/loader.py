@@ -387,7 +387,10 @@ class DefaultModelLoader(BaseModelLoader):
     @staticmethod
     def load_weights_and_postprocess(model, weights, target_device):
         model.load_weights(weights)
-
+        
+        import psutil
+        logger.info(f"After load_weights {psutil.virtual_memory().available  / (1 << 30)}")
+        
         for _, module in model.named_modules():
             quant_method = getattr(module, "quant_method", None)
             if quant_method is not None:
@@ -399,6 +402,7 @@ class DefaultModelLoader(BaseModelLoader):
                 with device_loading_context(module, target_device):
                     quant_method.process_weights_after_loading(module)
 
+        logger.info(f"After process_weights_after_loading {psutil.virtual_memory().available  / (1 << 30)}")
 
 class LayeredModelLoader(DefaultModelLoader):
     """Model loader that loads weights layer by layer so that one can quantize a
