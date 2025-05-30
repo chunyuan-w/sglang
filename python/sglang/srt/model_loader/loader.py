@@ -362,6 +362,9 @@ class DefaultModelLoader(BaseModelLoader):
 
             model.load_weights(self._get_all_weights(model_config, model))
 
+            import psutil
+            logger.info(f"After load_weights {psutil.virtual_memory().available  / (1 << 30)}")
+
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
                 if quant_method is not None:
@@ -372,6 +375,8 @@ class DefaultModelLoader(BaseModelLoader):
                     # parameters onto device for processing and back off after.
                     with device_loading_context(module, target_device):
                         quant_method.process_weights_after_loading(module)
+            logger.info(f"After process_weights_after_loading {psutil.virtual_memory().available  / (1 << 30)}")
+        
         return model.eval()
 
 
