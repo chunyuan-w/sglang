@@ -3,6 +3,10 @@ from __future__ import annotations
 import subprocess
 from collections import defaultdict
 from typing import TYPE_CHECKING
+import psutil
+import logging
+logger = logging.getLogger(__name__)
+
 
 import torch
 
@@ -109,7 +113,13 @@ def prepack_weight_if_needed(weight):
     if not cpu_has_amx_support():
         return weight
 
-    return convert_weight_packed(weight)
+    if weight.shape == torch.Size([256, 7168, 2048]):
+        logger.info(f"before pack avai mem {psutil.virtual_memory().available / (1024 ** 3)} G")
+    out = convert_weight_packed(weight)
+    if weight.shape == torch.Size([256, 7168, 2048]):
+        logger.info(f"after pack avai mem {psutil.virtual_memory().available / (1024 ** 3)} G")    
+    
+    return out
 
 
 def _process_weight_after_loading(module, weight_names, transpose_dims=None) -> None:

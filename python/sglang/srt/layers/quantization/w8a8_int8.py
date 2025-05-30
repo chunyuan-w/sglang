@@ -26,6 +26,9 @@ from sglang.srt.layers.quantization.base_config import (
 )
 from sglang.srt.layers.quantization.int8_kernel import per_token_quant_int8
 
+import logging
+logger = logging.getLogger(__name__)
+
 if cpu_has_amx_support():
     import sgl_kernel.cpu
 
@@ -236,9 +239,14 @@ class W8A8Int8MoEMethod:
         layer.w2_input_scale = w2_input_scale
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        import psutil
+        
         if all(w.device.type == "cpu" for w in [layer.w13_weight, layer.w2_weight]):
             if cpu_has_amx_support():
+                logger.info(f"before MoE pack {psutil.virtual_memory().available  / (1 << 30)}")
                 _process_weight_after_loading(layer, ["w13_weight", "w2_weight"])
+                logger.info(f"after MoE pack {psutil.virtual_memory().available  / (1 << 30)}")
+                
                 return
             else:
                 layer.use_intel_amx_backend = False
