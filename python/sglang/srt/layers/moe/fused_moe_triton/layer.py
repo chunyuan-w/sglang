@@ -115,6 +115,16 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 requires_grad=False,
             )
             torch.cuda.empty_cache()
+        
+        layer.w13_weight = torch.nn.Parameter(
+            torch.ops.sgl_kernel.convert_weight_packed(layer.w13_weight.data),
+            requires_grad=False,
+        )
+        layer.w2_weight = torch.nn.Parameter(
+            torch.ops.sgl_kernel.convert_weight_packed(layer.w2_weight.data),
+            requires_grad=False,
+        )        
+        
         return
 
     def apply(
