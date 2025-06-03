@@ -1307,12 +1307,26 @@ class RowParallelLinear(LinearBase):
             start_idx = self.tp_rank * shard_size
 
 
+            if loaded_weight.size(input_dim) < start_idx:
+                print("#" * 50)
+                print(f"{input_dim=}", flush=True)
+                print(f"{self.tp_rank=}", flush=True)
+                print(f"{shard_size=}", flush=True)
+                print(f"{loaded_weight.size(input_dim)=}", flush=True)
+                print(f"{start_idx=}", flush=True)                
+                print(f"{loaded_weight.shape=}", flush=True)                
+                print(f"{param_data.shape=}", flush=True)                
+            
             actual_shard_size = get_actual_shard_size(
                 shard_size, start_idx, loaded_weight.size(input_dim)
             )
-            loaded_weight = loaded_weight.narrow(
-                input_dim, start_idx, actual_shard_size
-            )
+            if actual_shard_size > 0:
+                loaded_weight = loaded_weight.narrow(
+                    input_dim, start_idx, actual_shard_size
+                )
+            else:
+                # No real data to load; create a dummy tensor filled with zeros
+                loaded_weight = torch.zeros_like(param_data.narrow(input_dim, 0, actual_shard_size))                
 
 
 

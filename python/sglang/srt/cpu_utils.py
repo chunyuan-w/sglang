@@ -109,6 +109,9 @@ def update_config(
 
 
 def get_actual_shard_size(shard_size, weight_start, weight_end):
+    if weight_end < weight_start:
+        return 0
+    
     return min(shard_size, weight_end - weight_start)
 
 
