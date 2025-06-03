@@ -1306,17 +1306,6 @@ class RowParallelLinear(LinearBase):
             shard_size = param_data.shape[input_dim]
             start_idx = self.tp_rank * shard_size
 
-
-            if loaded_weight.size(input_dim) < start_idx:
-                print("#" * 50)
-                print(f"{input_dim=}", flush=True)
-                print(f"{self.tp_rank=}", flush=True)
-                print(f"{shard_size=}", flush=True)
-                print(f"{loaded_weight.size(input_dim)=}", flush=True)
-                print(f"{start_idx=}", flush=True)                
-                print(f"{loaded_weight.shape=}", flush=True)                
-                print(f"{param_data.shape=}", flush=True)                
-            
             actual_shard_size = get_actual_shard_size(
                 shard_size, start_idx, loaded_weight.size(input_dim)
             )
@@ -1328,48 +1317,11 @@ class RowParallelLinear(LinearBase):
                 # No real data to load; create a dummy tensor filled with zeros
                 loaded_weight = torch.zeros_like(param_data.narrow(input_dim, 0, actual_shard_size))                
 
-
-
-
-
-
-
-
             # See [Note] Reset padded weights to zero.
             reset_param_data_if_needed(
                 param_data, input_dim, actual_shard_size, shard_size - actual_shard_size
             )
             param_data = param_data.narrow(input_dim, 0, actual_shard_size)
-
-
-
-
-
-
-            
-            # tp_size = get_tensor_model_parallel_world_size()
-            # full_shard_size = shard_size * tp_size
-            # if full_shard_size > loaded_weight.size(input_dim) and start_idx >= loaded_weight.size(input_dim):
-            #     pad_size = start_idx + shard_size - loaded_weight.size(input_dim)
-            #     pad_tensor = torch.zeros(loaded_weight.size(0), pad_size).to(loaded_weight.dtype)
-            #     loaded_weight = torch.cat([loaded_weight, pad_tensor], dim=input_dim).to(loaded_weight.dtype)
-            #     loaded_weight = loaded_weight.narrow(
-            #         input_dim, start_idx, shard_size
-            #     )
-            # else:
-            #     actual_shard_size = get_actual_shard_size(
-            #         shard_size, start_idx, loaded_weight.size(input_dim)
-            #     )
-
-            #     loaded_weight = loaded_weight.narrow(
-            #         input_dim, start_idx, actual_shard_size
-            #     )
-
-            #     # See [Note] Reset padded weights to zero.
-            #     reset_param_data_if_needed(
-            #         param_data, input_dim, actual_shard_size, shard_size - actual_shard_size
-            #     )
-            #     param_data = param_data.narrow(input_dim, 0, actual_shard_size)
 
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
