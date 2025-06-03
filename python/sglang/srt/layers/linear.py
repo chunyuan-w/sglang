@@ -33,10 +33,7 @@ from sglang.srt.layers.quantization.base_config import (
 from sglang.srt.utils import (
     _process_weight_after_loading,
     cpu_has_amx_support,
-    get_actual_shard_size,
     narrow_padded_param_and_loaded_weight,
-    prepack_weight_if_needed,
-    reset_param_data_if_needed,
     set_weight_attrs,
 )
 
