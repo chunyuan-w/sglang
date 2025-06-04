@@ -71,7 +71,7 @@ class IntelAMXAttnBackend(AttentionBackend):
         _, max_extend_len = self.forward_metadata
 
         self.extend_attention_fwd(
-            q.view(-1, layer.tp_q_head_num, layer.qk_head_dim),
+            q.view(-1, layer.tp_q_head_num, layer.qk_head_dim).contiguous(),
             k,
             v,
             o.view(-1, layer.tp_q_head_num, layer.v_head_dim),

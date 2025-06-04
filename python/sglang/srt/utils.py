@@ -2296,6 +2296,20 @@ def update_config(
 ) -> ModelConfig:
     # Support the case where the num_attention_heads is not divisible by the TP size.
     if model_config.num_attention_heads % tp_size != 0:
+
+        model_config.hf_config.num_attention_heads_ori = (
+            model_config.num_attention_heads
+        )
+        model_config.hf_text_config.num_attention_heads_ori = (
+            model_config.num_attention_heads
+        )
+        model_config.hf_config.num_key_value_heads_ori = (
+            model_config.get_total_num_kv_heads()
+        )
+        model_config.hf_text_config.num_key_value_heads_ori = (
+            model_config.get_total_num_kv_heads()
+        )
+
         query_heads_per_kv = (
             model_config.num_attention_heads // model_config.get_total_num_kv_heads()
         )
