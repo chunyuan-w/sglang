@@ -1931,7 +1931,12 @@ class DeepseekV2ForCausalLM(nn.Module):
                 self_attn.use_deep_gemm_bmm = True
 
         # TODO support nextn later
-        if not is_nextn:
+        # TODO: on CPU, the original weight is saved into self.routed_experts_weights_of_layer here,
+        # while weight will be packed later during process_weights_after_loading,
+        # and the packed weight is saved as the parameter of the module,
+        # which makes the memory usage doubled.
+        # Disable it for CPU.
+        if not is_nextn and global_server_args_dict["device"] != "cpu":
             self.routed_experts_weights_of_layer = {
                 layer_id: layer.mlp.get_moe_weights()
                 for layer_id, layer in enumerate(self.model.layers)
