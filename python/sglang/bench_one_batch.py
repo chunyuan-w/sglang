@@ -384,7 +384,11 @@ def latency_test_run_once(
         parent_dir = os.path.dirname(os.path.abspath(profile_filename))
         os.makedirs(parent_dir, exist_ok=True)
         profiler.export_chrome_trace(profile_filename)
-        print(profiler.key_averages(group_by_input_shape=True).table(sort_by="self_cpu_time_total"))
+        print(
+            profiler.key_averages(group_by_input_shape=True).table(
+                sort_by="self_cpu_time_total"
+            )
+        )
         rank_print(f"torch profiler chrome trace saved to {profile_filename}")
 
     prefill_latency = time.perf_counter() - tic
@@ -429,7 +433,11 @@ def latency_test_run_once(
             parent_dir = os.path.dirname(os.path.abspath(profile_filename))
             os.makedirs(parent_dir, exist_ok=True)
             profiler.export_chrome_trace(profile_filename)
-            print(profiler.key_averages(group_by_input_shape=True).table(sort_by="self_cpu_time_total"))
+            print(
+                profiler.key_averages(group_by_input_shape=True).table(
+                    sort_by="self_cpu_time_total"
+                )
+            )
             rank_print(f"torch profiler chrome trace saved to {profile_filename}")
 
     # Record decode timing from 2nd output
