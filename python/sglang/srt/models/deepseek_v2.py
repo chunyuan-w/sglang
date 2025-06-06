@@ -379,10 +379,6 @@ class DeepseekV2MoE(nn.Module):
         return final_hidden_states
 
     def forward_cpu(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # TODO: the below 2 lines are not on main. Check if can be removed
-        num_tokens, hidden_dim = hidden_states.shape
-        hidden_states = hidden_states.view(-1, hidden_dim)
-
         # router_logits: (num_tokens, n_experts)
         router_logits = self.gate(hidden_states)
         fused_experts_out = self.experts(
@@ -2189,9 +2185,22 @@ class DeepseekV2ForCausalLM(nn.Module):
                         ):
                             q_a_proj_weight = cached_a_proj[q_a_proj_name]
                             kv_a_proj_weight = cached_a_proj[kv_a_proj_name]
+                            
+                            
+                            
+                            # logger.info(f"name: {name}")
+                            # logger.info(f"q_a_proj shape: {q_a_proj_weight.shape}")
+                            # logger.info(f"q_a_proj stride: {q_a_proj_weight.stride()}")
+                            # logger.info(f"kv_a_proj shape: {kv_a_proj_weight.shape}")
+                            # logger.info(f"kv_a_proj stride: {kv_a_proj_weight.stride()}")
+                            
                             fused_weight = torch.cat(
                                 [q_a_proj_weight, kv_a_proj_weight], dim=0
                             )
+                            
+                            # logger.info(f"after cat shape: {fused_weight.shape}")
+                            # logger.info(f"after cat stride: {fused_weight.stride()}")
+                            
 
                             param_name = name.replace(
                                 "q_a_proj", "fused_qkv_a_proj_with_mqa"
