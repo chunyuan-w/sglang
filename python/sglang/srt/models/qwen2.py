@@ -123,7 +123,10 @@ class Qwen2Attention(nn.Module):
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = hidden_size // self.total_num_heads
+        # self.head_dim = hidden_size // self.total_num_heads  28: 4 * 7 -> 6 *7  total_num_heads = 42    hidden_size = 3584
+        # TODO: we should calculate using hidden_size // self.total_num_heads, self.total_num_heads has been modified by us
+        # Quick workaround to use the original head_dim compuated by 3584 / 28 (28 is the value before padding)
+        self.head_dim = 128
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
