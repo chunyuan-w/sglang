@@ -106,6 +106,7 @@ class Qwen2Attention(nn.Module):
         max_position_embeddings: int = 32768,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        head_dim: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -123,7 +124,12 @@ class Qwen2Attention(nn.Module):
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = hidden_size // self.total_num_heads
+        if head_dim is not None:
+            self.head_dim = head_dim
+        else:
+            self.head_dim = hidden_size // self.total_num_heads
+
+        print(f"my computed head_dim={self.head_dim}")
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -191,6 +197,8 @@ class Qwen2DecoderLayer(nn.Module):
         rope_theta = getattr(config, "rope_theta", 1000000)
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings", 32768)
+        head_dim = getattr(config, "original_head_dim", None)
+        print(f"my original_head_dim = {head_dim}")
         self.self_attn = Qwen2Attention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -201,6 +209,7 @@ class Qwen2DecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
             prefix=add_prefix("self_attn", prefix),
+            head_dim=head_dim,
         )
         self.mlp = Qwen2MLP(
             hidden_size=self.hidden_size,
