@@ -270,7 +270,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
-                topk_weights,
+                topk_weights.to(torch.float),
                 topk_ids,
                 False,  # inplace # See [Note] inplace should be False in fused_experts.
                 False,  # use_int8_w8a8
