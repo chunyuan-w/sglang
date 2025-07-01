@@ -29,6 +29,7 @@ import torch.distributed as dist
 from sglang.srt.configs.device_config import DeviceConfig
 from sglang.srt.configs.load_config import LoadConfig
 from sglang.srt.configs.model_config import AttentionArch, ModelConfig
+from sglang.srt.configs.update_config import adjust_config_with_unaligned_cpu_tp
 from sglang.srt.distributed import (
     get_tp_group,
     get_world_group,
@@ -107,7 +108,6 @@ from sglang.srt.utils import (
     monkey_patch_vllm_gguf_config,
     set_cpu_offload_max_bytes,
     set_cuda_arch,
-    update_config,
 )
 
 _is_hip = is_hip()
@@ -561,7 +561,7 @@ class ModelRunner:
             download_dir=self.server_args.download_dir,
         )
         if self.device == "cpu":
-            self.model_config = update_config(
+            self.model_config = adjust_config_with_unaligned_cpu_tp(
                 self.model_config, self.load_config, self.tp_size
             )
         if self.server_args.load_format == "gguf":

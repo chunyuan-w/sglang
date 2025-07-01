@@ -95,7 +95,9 @@ class _ColumnvLLMParameter(BasevLLMParameter):
             shard_size = self.data.shape[self.output_dim]
 
             from sglang.srt.managers.schedule_batch import global_server_args_dict
-            from sglang.srt.utils import narrow_padded_param_and_loaded_weight
+            from sglang.srt.model_loader.weight_utils import (
+                narrow_padded_param_and_loaded_weight,
+            )
 
             if global_server_args_dict["device"] == "cpu":
                 param_data, loaded_weight = narrow_padded_param_and_loaded_weight(
@@ -136,7 +138,9 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         param_data = param_data.narrow(self.output_dim, shard_offset, shard_size)
 
         from sglang.srt.managers.schedule_batch import global_server_args_dict
-        from sglang.srt.utils import narrow_padded_param_and_loaded_weight
+        from sglang.srt.model_loader.weight_utils import (
+            narrow_padded_param_and_loaded_weight,
+        )
 
         if global_server_args_dict["device"] == "cpu":
             param_data, loaded_weight = narrow_padded_param_and_loaded_weight(
@@ -218,7 +222,9 @@ class RowvLLMParameter(BasevLLMParameter):
             shard_size = self.data.shape[self.input_dim]
 
             from sglang.srt.managers.schedule_batch import global_server_args_dict
-            from sglang.srt.utils import narrow_padded_param_and_loaded_weight
+            from sglang.srt.model_loader.weight_utils import (
+                narrow_padded_param_and_loaded_weight,
+            )
 
             if global_server_args_dict["device"] == "cpu":
                 param_data, loaded_weight = narrow_padded_param_and_loaded_weight(

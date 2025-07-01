@@ -18,11 +18,11 @@ from sglang.srt.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from sglang.srt.model_loader.weight_utils import narrow_padded_param_and_loaded_weight
 from sglang.srt.utils import (
     _process_weight_after_loading,
     get_bool_env_var,
     is_hip,
-    narrow_padded_param_and_loaded_weight,
     set_weight_attrs,
 )
 

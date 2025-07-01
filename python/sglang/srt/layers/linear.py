@@ -33,7 +33,6 @@ from sglang.srt.layers.quantization.base_config import (
 from sglang.srt.utils import (
     _process_weight_after_loading,
     cpu_has_amx_support,
-    narrow_padded_param_and_loaded_weight,
     set_weight_attrs,
 )
 
@@ -423,6 +422,9 @@ class ColumnParallelLinear(LinearBase):
             start_idx = self.tp_rank * shard_size
 
             from sglang.srt.managers.schedule_batch import global_server_args_dict
+            from sglang.srt.model_loader.weight_utils import (
+                narrow_padded_param_and_loaded_weight,
+            )
 
             if global_server_args_dict["device"] == "cpu":
                 param_data, loaded_weight = narrow_padded_param_and_loaded_weight(
@@ -659,6 +661,9 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             start_idx = self.tp_rank * shard_size
 
             from sglang.srt.managers.schedule_batch import global_server_args_dict
+            from sglang.srt.model_loader.weight_utils import (
+                narrow_padded_param_and_loaded_weight,
+            )
 
             if global_server_args_dict["device"] == "cpu":
                 param_data, loaded_weight = narrow_padded_param_and_loaded_weight(
@@ -1143,6 +1148,9 @@ class QKVParallelLinear(ColumnParallelLinear):
             start_idx = shard_id * shard_size
 
             from sglang.srt.managers.schedule_batch import global_server_args_dict
+            from sglang.srt.model_loader.weight_utils import (
+                narrow_padded_param_and_loaded_weight,
+            )
 
             if global_server_args_dict["device"] == "cpu":
                 param_data, loaded_weight = narrow_padded_param_and_loaded_weight(
@@ -1304,6 +1312,9 @@ class RowParallelLinear(LinearBase):
             start_idx = self.tp_rank * shard_size
 
             from sglang.srt.managers.schedule_batch import global_server_args_dict
+            from sglang.srt.model_loader.weight_utils import (
+                narrow_padded_param_and_loaded_weight,
+            )
 
             if global_server_args_dict["device"] == "cpu":
                 param_data, loaded_weight = narrow_padded_param_and_loaded_weight(
