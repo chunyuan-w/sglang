@@ -467,7 +467,7 @@ void tinygemm_kernel(
 
 }  // anonymous namespace
 
-template <typename scalar_t, typename topk_w_scalar_t>
+template <typename scalar_t, typename topk_w_t>
 void fused_experts_int8_kernel_impl(
     scalar_t* __restrict__ output,
     scalar_t* __restrict__ ic1,
@@ -481,7 +481,7 @@ void fused_experts_int8_kernel_impl(
     const int8_t* __restrict__ packed_w2,
     const float* __restrict__ w1s,
     const float* __restrict__ w2s,
-    const topk_w_scalar_t* __restrict__ topk_weights,
+    const topk_w_t* __restrict__ topk_weights,
     const int32_t* __restrict__ sorted_ids,
     const int32_t* __restrict__ expert_ids,
     const int32_t* __restrict__ offsets,
@@ -641,29 +641,29 @@ void fused_experts_int8_kernel_impl(
   });
 }
 
-#define INSTANTIATE_MOE_INT8_TEMPLATE(TYPE, TYPE2)           \
-  template void fused_experts_int8_kernel_impl<TYPE, TYPE2>( \
-      TYPE* __restrict__ output,                             \
-      TYPE* __restrict__ ic1,                                \
-      TYPE* __restrict__ ic2,                                \
-      uint8_t* __restrict__ A_tmp,                           \
-      float* __restrict__ C_tmp,                             \
-      uint8_t* __restrict__ Aq_tmp,                          \
-      float* __restrict__ As_tmp,                            \
-      const TYPE* __restrict__ input,                        \
-      const int8_t* __restrict__ packed_w1,                  \
-      const int8_t* __restrict__ packed_w2,                  \
-      const float* __restrict__ w1s,                         \
-      const float* __restrict__ w2s,                         \
-      const TYPE2* __restrict__ topk_weights,                \
-      const int32_t* __restrict__ sorted_ids,                \
-      const int32_t* __restrict__ expert_ids,                \
-      const int32_t* __restrict__ offsets,                   \
-      int64_t M,                                             \
-      int64_t N,                                             \
-      int64_t K,                                             \
-      int64_t E,                                             \
-      int64_t topk,                                          \
+#define INSTANTIATE_MOE_INT8_TEMPLATE(TYPE, TYPE_TOPK_W)           \
+  template void fused_experts_int8_kernel_impl<TYPE, TYPE_TOPK_W>( \
+      TYPE* __restrict__ output,                                   \
+      TYPE* __restrict__ ic1,                                      \
+      TYPE* __restrict__ ic2,                                      \
+      uint8_t* __restrict__ A_tmp,                                 \
+      float* __restrict__ C_tmp,                                   \
+      uint8_t* __restrict__ Aq_tmp,                                \
+      float* __restrict__ As_tmp,                                  \
+      const TYPE* __restrict__ input,                              \
+      const int8_t* __restrict__ packed_w1,                        \
+      const int8_t* __restrict__ packed_w2,                        \
+      const float* __restrict__ w1s,                               \
+      const float* __restrict__ w2s,                               \
+      const TYPE_TOPK_W* __restrict__ topk_weights,                \
+      const int32_t* __restrict__ sorted_ids,                      \
+      const int32_t* __restrict__ expert_ids,                      \
+      const int32_t* __restrict__ offsets,                         \
+      int64_t M,                                                   \
+      int64_t N,                                                   \
+      int64_t K,                                                   \
+      int64_t E,                                                   \
+      int64_t topk,                                                \
       int64_t num_tokens_post_pad)
 
 INSTANTIATE_MOE_INT8_TEMPLATE(at::BFloat16, at::BFloat16);

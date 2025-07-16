@@ -60,7 +60,7 @@ inline int64_t get_row_size(int64_t K, bool use_int8_w8a8) {
 at::Tensor convert_weight_packed(at::Tensor& weight);
 
 // moe implementations for int8 w8a8
-template <typename scalar_t, typename topk_w_scalar_t>
+template <typename scalar_t, typename topk_w_t>
 void fused_experts_int8_kernel_impl(
     scalar_t* __restrict__ output,
     scalar_t* __restrict__ ic1,
@@ -74,7 +74,7 @@ void fused_experts_int8_kernel_impl(
     const int8_t* __restrict__ packed_w2,
     const float* __restrict__ w1s,
     const float* __restrict__ w2s,
-    const topk_w_scalar_t* __restrict__ topk_weights,
+    const topk_w_t* __restrict__ topk_weights,
     const int32_t* __restrict__ sorted_ids,
     const int32_t* __restrict__ expert_ids,
     const int32_t* __restrict__ offsets,
@@ -86,7 +86,7 @@ void fused_experts_int8_kernel_impl(
     int64_t num_tokens_post_pad);
 
 // moe implementations for fp8 w8a16
-template <typename scalar_t, typename topk_w_scalar_t>
+template <typename scalar_t, typename topk_w_t>
 void fused_experts_fp8_kernel_impl(
     scalar_t* __restrict__ output,
     scalar_t* __restrict__ ic0,
@@ -102,7 +102,7 @@ void fused_experts_fp8_kernel_impl(
     const float* __restrict__ w2s,
     int64_t block_size_N,
     int64_t block_size_K,
-    const topk_w_scalar_t* __restrict__ topk_weights,
+    const topk_w_t* __restrict__ topk_weights,
     const int32_t* __restrict__ sorted_ids,
     const int32_t* __restrict__ expert_ids,
     const int32_t* __restrict__ offsets,
@@ -205,18 +205,18 @@ void tinygemm_kernel(
     switch (TYPE_TOPK) {                                                                                   \
       case at::ScalarType::Float: {                                                                        \
         TORCH_CHECK(TYPE_A == at::kBFloat16 || TYPE_A == at::kHalf);                                       \
-        using topk_w_scalar_t = float;                                                                     \
+        using topk_w_t = float;                                                                            \
         return AT_DISPATCH_REDUCED_FLOATING_TYPES(TYPE_A, "topk_dispatch", [&] { return __VA_ARGS__(); }); \
       }                                                                                                    \
       case at::ScalarType::BFloat16: {                                                                     \
         TORCH_CHECK(TYPE_A == at::kBFloat16);                                                              \
-        using topk_w_scalar_t = at::BFloat16;                                                              \
+        using topk_w_t = at::BFloat16;                                                                     \
         using scalar_t = at::BFloat16;                                                                     \
         return __VA_ARGS__();                                                                              \
       }                                                                                                    \
       case at::ScalarType::Half: {                                                                         \
         TORCH_CHECK(TYPE_A == at::kHalf);                                                                  \
-        using topk_w_scalar_t = at::Half;                                                                  \
+        using topk_w_t = at::Half;                                                                         \
         using scalar_t = at::Half;                                                                         \
         return __VA_ARGS__();                                                                              \
       }                                                                                                    \
