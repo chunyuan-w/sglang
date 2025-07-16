@@ -545,7 +545,7 @@ void tinygemm_kernel(
   }
 }
 
-template <typename scalar_t>
+template <typename scalar_t, typename topk_w_scalar_t>
 void fused_experts_kernel_impl(
     scalar_t* __restrict__ output,
     scalar_t* __restrict__ ic1,
@@ -555,7 +555,7 @@ void fused_experts_kernel_impl(
     const scalar_t* __restrict__ input,
     const scalar_t* __restrict__ packed_w1,
     const scalar_t* __restrict__ packed_w2,
-    const float* __restrict__ topk_weights,
+    const topk_w_scalar_t* __restrict__ topk_weights,
     const int32_t* __restrict__ sorted_ids,
     const int32_t* __restrict__ expert_ids,
     const int32_t* __restrict__ offsets,
@@ -733,7 +733,7 @@ void fused_experts_kernel_impl(
       //   and also mul topk_weights in float32
       for (int64_t m = 0; m < m_size; ++m) {
         int32_t index = A_ids[m];
-        float weight = topk_weights[index];
+        float weight = static_cast<float>(topk_weights[index]);
         copy_mul_stub(ic2 + index * K + nb * BLOCK_N, C + m * BLOCK_N, weight, n_size);
       }
     }
@@ -1012,14 +1012,17 @@ at::Tensor fused_experts_cpu(
   // TODO: support topk_weights to be bf16 or fp16 in the kernel.
   // The topk_weights of llama4 is computed via Llama4MoE:custom_routing_function and is bf16/fp16
   // while the kernel currently only supports it to be float32
-  auto topk_weights_ = topk_weights.to(at::kFloat);
-  CHECK_EQ(topk_weights_.scalar_type(), at::kFloat);
+  const auto topk_weights_st = topk_weights.scalar_type();
+  TORCH_CHECK(
+      topk_weights_st == at::kFloat || topk_weights_st == at::kBFloat16 || topk_weights_st == at::kHalf,
+      "expect topk_weights to be float32 or bfloat16.");
+  // CHECK_EQ(topk_weights.scalar_type(), at::kFloat);
 
   int64_t M = hidden_states.size(0);
   int64_t K = hidden_states.size(1);
   int64_t N = w1.size(1) / 2;
   int64_t E = w1.size(0);
-  int64_t topk = topk_weights_.size(1);
+  int64_t topk = topk_weights.size(1);
 
   // we use int32_t compensation for int8 w8a8
   int64_t packed_K = get_row_size(K, use_int8_w8a8);
@@ -1101,7 +1104,7 @@ at::Tensor fused_experts_cpu(
 
   auto buffer2 = at::empty({buffer_size_nbytes}, hidden_states.options().dtype(at::kChar));
 
-  AT_DISPATCH_REDUCED_FLOATING_TYPES(st, "fused_experts_kernel_impl", [&] {
+  CPU_DISPATCH_TOPK_W_FLOAT_TYPES(st, topk_weights_st, [&] {
     scalar_t* __restrict__ intermediate_cache1 = (scalar_t*)((void*)(buffer2.data_ptr<int8_t>()));
     scalar_t* __restrict__ intermediate_cache2 = intermediate_cache1 + M * topk * N;
 
@@ -1116,7 +1119,7 @@ at::Tensor fused_experts_cpu(
       TORCH_CHECK(w1s.numel() == E * 2 * N);
       TORCH_CHECK(w2s.numel() == E * K);
 
-      fused_experts_int8_kernel_impl<scalar_t>(
+      fused_experts_int8_kernel_impl<scalar_t, topk_w_scalar_t>(
           out_hidden_states.data_ptr<scalar_t>(),
           intermediate_cache1,
           intermediate_cache2,
@@ -1129,7 +1132,7 @@ at::Tensor fused_experts_cpu(
           packed_w2.data_ptr<int8_t>(),
           w1s.data_ptr<float>(),
           w2s.data_ptr<float>(),
-          topk_weights_.data_ptr<float>(),
+          topk_weights.data_ptr<topk_w_scalar_t>(),
           sorted_ids,
           expert_ids,
           offsets,
@@ -1147,7 +1150,7 @@ at::Tensor fused_experts_cpu(
       scalar_t* __restrict__ B_tmp = (scalar_t*)((void*)(intermediate_cache0 + M * topk * 2 * N));
 
       CHECK_MOE_SCALES_FP8(1, 2);
-      fused_experts_fp8_kernel_impl(
+      fused_experts_fp8_kernel_impl<scalar_t, topk_w_scalar_t>(
           out_hidden_states.data_ptr<scalar_t>(),
           intermediate_cache0,
           intermediate_cache1,
@@ -1162,7 +1165,7 @@ at::Tensor fused_experts_cpu(
           w2s.data_ptr<float>(),
           block_size_N,
           block_size_K,
-          topk_weights_.data_ptr<float>(),
+          topk_weights.data_ptr<topk_w_scalar_t>(),
           sorted_ids,
           expert_ids,
           offsets,
@@ -1176,7 +1179,7 @@ at::Tensor fused_experts_cpu(
       scalar_t* __restrict__ A_tmp = intermediate_cache2 + M * topk * K;
       float* __restrict__ C_tmp = (float*)((void*)(A_tmp + num_threads * BLOCK_M * K));
 
-      fused_experts_kernel_impl<scalar_t>(
+      fused_experts_kernel_impl<scalar_t, topk_w_scalar_t>(
           out_hidden_states.data_ptr<scalar_t>(),
           intermediate_cache1,
           intermediate_cache2,
@@ -1185,7 +1188,7 @@ at::Tensor fused_experts_cpu(
           hidden_states.data_ptr<scalar_t>(),
           packed_w1.data_ptr<scalar_t>(),
           packed_w2.data_ptr<scalar_t>(),
-          topk_weights_.data_ptr<float>(),
+          topk_weights.data_ptr<topk_w_scalar_t>(),
           sorted_ids,
           expert_ids,
           offsets,
