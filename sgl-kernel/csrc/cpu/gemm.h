@@ -60,7 +60,7 @@ inline int64_t get_row_size(int64_t K, bool use_int8_w8a8) {
 at::Tensor convert_weight_packed(at::Tensor& weight);
 
 // moe implementations for int8 w8a8
-template <typename scalar_t>
+template <typename scalar_t, typename topk_w_scalar_t>
 void fused_experts_int8_kernel_impl(
     scalar_t* __restrict__ output,
     scalar_t* __restrict__ ic1,
@@ -74,7 +74,7 @@ void fused_experts_int8_kernel_impl(
     const int8_t* __restrict__ packed_w2,
     const float* __restrict__ w1s,
     const float* __restrict__ w2s,
-    const float* __restrict__ topk_weights,
+    const topk_w_scalar_t* __restrict__ topk_weights,
     const int32_t* __restrict__ sorted_ids,
     const int32_t* __restrict__ expert_ids,
     const int32_t* __restrict__ offsets,
@@ -86,7 +86,7 @@ void fused_experts_int8_kernel_impl(
     int64_t num_tokens_post_pad);
 
 // moe implementations for fp8 w8a16
-template <typename scalar_t>
+template <typename scalar_t, typename topk_w_scalar_t>
 void fused_experts_fp8_kernel_impl(
     scalar_t* __restrict__ output,
     scalar_t* __restrict__ ic0,
@@ -102,7 +102,7 @@ void fused_experts_fp8_kernel_impl(
     const float* __restrict__ w2s,
     int64_t block_size_N,
     int64_t block_size_K,
-    const float* __restrict__ topk_weights,
+    const topk_w_scalar_t* __restrict__ topk_weights,
     const int32_t* __restrict__ sorted_ids,
     const int32_t* __restrict__ expert_ids,
     const int32_t* __restrict__ offsets,
@@ -199,3 +199,52 @@ void tinygemm_kernel(
     int64_t ldc,
     bool brg,
     int64_t block_size_K);
+
+#define AT_DISPATCH_TOPK_W_TYPES(TYPE, NAME, ...)                                                 \
+  AT_DISPATCH_SWITCH(                                                                             \
+      TYPE,                                                                                       \
+      NAME,                                                                                       \
+      AT_PRIVATE_CASE_TYPE_USING_HINT(at::ScalarType::Float, topk_w_scalar_t, __VA_ARGS__)        \
+          AT_PRIVATE_CASE_TYPE_USING_HINT(at::ScalarType::BFloat16, topk_w_scalar_t, __VA_ARGS__) \
+              AT_PRIVATE_CASE_TYPE_USING_HINT(at::ScalarType::Half, topk_w_scalar_t, __VA_ARGS__))
+
+#define DISPATCH_FLOAT_TYPE(TYPE_A, ...)                   \
+  [&] {                                                    \
+    switch (TYPE_A) {                                      \
+      case at::kHalf: {                                    \
+        using scalar_t = at::Half;                         \
+        return __VA_ARGS__();                              \
+      }                                                    \
+      case at::kBFloat16: {                                \
+        using scalar_t = at::BFloat16;                     \
+        return __VA_ARGS__();                              \
+      }                                                    \
+      default:                                             \
+        TORCH_CHECK(false, "Unsupported type for TYPE_A"); \
+    }                                                      \
+  }()
+
+#define CPU_DISPATCH_TOPK_W_FLOAT_TYPES(TYPE_A, TYPE_TOPK, ...)             \
+  [&] {                                                                     \
+    switch (TYPE_TOPK) {                                                    \
+      case at::ScalarType::Float: {                                         \
+        TORCH_CHECK(TYPE_A == at::kBFloat16 || TYPE_TOPK == at::kHalf);     \
+        using topk_w_scalar_t = float;                                      \
+        return DISPATCH_FLOAT_TYPE(TYPE_A, __VA_ARGS__);                    \
+      }                                                                     \
+      case at::ScalarType::BFloat16: {                                      \
+        TORCH_CHECK(TYPE_A == at::kBFloat16);                               \
+        using topk_w_scalar_t = at::BFloat16;                               \
+        using scalar_t = at::BFloat16;                                      \
+        return __VA_ARGS__();                                               \
+      }                                                                     \
+      case at::ScalarType::Half: {                                          \
+        TORCH_CHECK(TYPE_A == at::kHalf);                                   \
+        using topk_w_scalar_t = at::Half;                                   \
+        using scalar_t = at::Half;                                          \
+        return __VA_ARGS__();                                               \
+      }                                                                     \
+      default:                                                              \
+        TORCH_CHECK(false, "Unsupported floating data type for weight.\n"); \
+    }                                                                       \
+  }()
