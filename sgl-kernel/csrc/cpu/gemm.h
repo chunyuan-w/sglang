@@ -200,51 +200,27 @@ void tinygemm_kernel(
     bool brg,
     int64_t block_size_K);
 
-#define AT_DISPATCH_TOPK_W_TYPES(TYPE, NAME, ...)                                                 \
-  AT_DISPATCH_SWITCH(                                                                             \
-      TYPE,                                                                                       \
-      NAME,                                                                                       \
-      AT_PRIVATE_CASE_TYPE_USING_HINT(at::ScalarType::Float, topk_w_scalar_t, __VA_ARGS__)        \
-          AT_PRIVATE_CASE_TYPE_USING_HINT(at::ScalarType::BFloat16, topk_w_scalar_t, __VA_ARGS__) \
-              AT_PRIVATE_CASE_TYPE_USING_HINT(at::ScalarType::Half, topk_w_scalar_t, __VA_ARGS__))
-
-#define DISPATCH_FLOAT_TYPE(TYPE_A, ...)                   \
-  [&] {                                                    \
-    switch (TYPE_A) {                                      \
-      case at::kHalf: {                                    \
-        using scalar_t = at::Half;                         \
-        return __VA_ARGS__();                              \
-      }                                                    \
-      case at::kBFloat16: {                                \
-        using scalar_t = at::BFloat16;                     \
-        return __VA_ARGS__();                              \
-      }                                                    \
-      default:                                             \
-        TORCH_CHECK(false, "Unsupported type for TYPE_A"); \
-    }                                                      \
-  }()
-
-#define CPU_DISPATCH_TOPK_W_FLOAT_TYPES(TYPE_A, TYPE_TOPK, ...)             \
-  [&] {                                                                     \
-    switch (TYPE_TOPK) {                                                    \
-      case at::ScalarType::Float: {                                         \
-        TORCH_CHECK(TYPE_A == at::kBFloat16 || TYPE_TOPK == at::kHalf);     \
-        using topk_w_scalar_t = float;                                      \
-        return DISPATCH_FLOAT_TYPE(TYPE_A, __VA_ARGS__);                    \
-      }                                                                     \
-      case at::ScalarType::BFloat16: {                                      \
-        TORCH_CHECK(TYPE_A == at::kBFloat16);                               \
-        using topk_w_scalar_t = at::BFloat16;                               \
-        using scalar_t = at::BFloat16;                                      \
-        return __VA_ARGS__();                                               \
-      }                                                                     \
-      case at::ScalarType::Half: {                                          \
-        TORCH_CHECK(TYPE_A == at::kHalf);                                   \
-        using topk_w_scalar_t = at::Half;                                   \
-        using scalar_t = at::Half;                                          \
-        return __VA_ARGS__();                                               \
-      }                                                                     \
-      default:                                                              \
-        TORCH_CHECK(false, "Unsupported floating data type for weight.\n"); \
-    }                                                                       \
+#define CPU_DISPATCH_TOPK_W_FLOAT_TYPES(TYPE_A, TYPE_TOPK, ...)                                            \
+  [&] {                                                                                                    \
+    switch (TYPE_TOPK) {                                                                                   \
+      case at::ScalarType::Float: {                                                                        \
+        TORCH_CHECK(TYPE_A == at::kBFloat16 || TYPE_A == at::kHalf);                                       \
+        using topk_w_scalar_t = float;                                                                     \
+        return AT_DISPATCH_REDUCED_FLOATING_TYPES(TYPE_A, "topk_dispatch", [&] { return __VA_ARGS__(); }); \
+      }                                                                                                    \
+      case at::ScalarType::BFloat16: {                                                                     \
+        TORCH_CHECK(TYPE_A == at::kBFloat16);                                                              \
+        using topk_w_scalar_t = at::BFloat16;                                                              \
+        using scalar_t = at::BFloat16;                                                                     \
+        return __VA_ARGS__();                                                                              \
+      }                                                                                                    \
+      case at::ScalarType::Half: {                                                                         \
+        TORCH_CHECK(TYPE_A == at::kHalf);                                                                  \
+        using topk_w_scalar_t = at::Half;                                                                  \
+        using scalar_t = at::Half;                                                                         \
+        return __VA_ARGS__();                                                                              \
+      }                                                                                                    \
+      default:                                                                                             \
+        TORCH_CHECK(false, "Unsupported TYPE_TOPK scalar type");                                           \
+    }                                                                                                      \
   }()
