@@ -23,10 +23,20 @@ from utils import (
     torch_w8a8_per_column_fused_moe,
 )
 
+from sglang.srt.models.llama4 import Llama4MoE
 from sglang.test.test_utils import CustomTestCase
 
 
-def fused_moe(a, w1, w2, score, topk, renormalize, prepack):
+def fused_moe(
+    a,
+    w1,
+    w2,
+    score,
+    topk,
+    renormalize,
+    prepack,
+    use_custom_routing_function,
+):
 
     G = 1
     topk_group = 1
@@ -34,9 +44,18 @@ def fused_moe(a, w1, w2, score, topk, renormalize, prepack):
     B, D = a.shape
     topk_weights = torch.empty(B, topk, dtype=torch.float32)
     topk_ids = torch.empty(B, topk, dtype=torch.int32)
-    topk_weights, topk_ids = kernel.grouped_topk_cpu(
-        a, score, topk, renormalize, G, topk_group, 0, None, None
-    )
+
+    if use_custom_routing_function:
+        topk_weights, topk_ids = Llama4MoE.custom_routing_function(
+            hidden_states=a,
+            gating_output=score,
+            topk=topk,
+            renormalize=renormalize,
+        )
+    else:
+        topk_weights, topk_ids = kernel.grouped_topk_cpu(
+            a, score, topk, renormalize, G, topk_group, 0, None, None
+        )
 
     packed_w1 = kernel.convert_weight_packed(w1) if prepack else w1
     packed_w2 = kernel.convert_weight_packed(w2) if prepack else w2
@@ -67,6 +86,7 @@ class TestFusedExperts(CustomTestCase):
     E = [4]
     topk = [2]
     renormalize = [False, True]
+    use_custom_routing_function = [False, True]
 
     M_int8 = [1, 39]
     N_int8 = [128]
@@ -80,7 +100,7 @@ class TestFusedExperts(CustomTestCase):
     E_fp8 = [8]
     topk_fp8 = [4]
 
-    def _bf16_moe(self, m, n, k, e, topk, renormalize):
+    def _bf16_moe(self, m, n, k, e, topk, renormalize, use_custom_routing_function):
         dtype = torch.bfloat16
         prepack = True
 
@@ -90,7 +110,9 @@ class TestFusedExperts(CustomTestCase):
         score = torch.randn((m, e), device="cpu", dtype=dtype)
 
         torch_output = torch_naive_fused_moe(a, w1, w2, score, topk, renormalize)
-        fused_output = fused_moe(a, w1, w2, score, topk, renormalize, prepack)
+        fused_output = fused_moe(
+            a, w1, w2, score, topk, renormalize, prepack, use_custom_routing_function
+        )
 
         atol = rtol = precision[torch_output.dtype]
         torch.testing.assert_close(torch_output, fused_output, atol=atol, rtol=rtol)
@@ -103,6 +125,7 @@ class TestFusedExperts(CustomTestCase):
             self.E,
             self.topk,
             self.renormalize,
+            self.use_custom_routing_function,
         ):
             with self.subTest(
                 m=params[0],
@@ -111,10 +134,11 @@ class TestFusedExperts(CustomTestCase):
                 e=params[3],
                 topk=params[4],
                 renormalize=params[5],
+                use_custom_routing_function=params[6],
             ):
                 self._bf16_moe(*params)
 
-    def _int8_moe(self, M, N, K, E, topk):
+    def _int8_moe(self, M, N, K, E, topk, use_custom_routing_function):
         dtype = torch.bfloat16
         prepack = True
 
@@ -141,7 +165,16 @@ class TestFusedExperts(CustomTestCase):
         # Calculate routing
         score = torch.randn((M, E), dtype=dtype)
         score = torch.softmax(score, dim=-1, dtype=torch.float32)
-        topk_weight, topk_ids = torch.topk(score, topk)
+
+        if use_custom_routing_function:
+            topk_weight, topk_ids = Llama4MoE.custom_routing_function(
+                hidden_states=a,
+                gating_output=score,
+                topk=topk,
+                renormalize=False,
+            )
+        else:
+            topk_weight, topk_ids = torch.topk(score, topk)
 
         ref_out = torch_w8a8_per_column_fused_moe(
             a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, topk
@@ -180,6 +213,7 @@ class TestFusedExperts(CustomTestCase):
             self.K_int8,
             self.E_int8,
             self.topk_int8,
+            self.use_custom_routing_function,
         ):
             with self.subTest(
                 M=params[0],
@@ -187,10 +221,11 @@ class TestFusedExperts(CustomTestCase):
                 K=params[2],
                 E=params[3],
                 topk=params[4],
+                use_custom_routing_function=params[5],
             ):
                 self._int8_moe(*params)
 
-    def _fp8_moe(self, M, N, K, E, topk):
+    def _fp8_moe(self, M, N, K, E, topk, use_custom_routing_function):
         dtype = torch.bfloat16
 
         a = torch.randn(M, K, dtype=dtype) / math.sqrt(K)
@@ -209,7 +244,16 @@ class TestFusedExperts(CustomTestCase):
 
         score = torch.randn((M, E), dtype=dtype)
         score = torch.softmax(score, dim=-1, dtype=torch.float32)
-        topk_weight, topk_ids = torch.topk(score, topk)
+
+        if use_custom_routing_function:
+            topk_weight, topk_ids = Llama4MoE.custom_routing_function(
+                hidden_states=a,
+                gating_output=score,
+                topk=topk,
+                renormalize=False,
+            )
+        else:
+            topk_weight, topk_ids = torch.topk(score, topk)
 
         w1 = kernel.convert_weight_packed(w1)
         w2 = kernel.convert_weight_packed(w2)
@@ -244,6 +288,7 @@ class TestFusedExperts(CustomTestCase):
             self.K_fp8,
             self.E_fp8,
             self.topk_fp8,
+            self.use_custom_routing_function,
         ):
             with self.subTest(
                 M=params[0],
@@ -251,6 +296,7 @@ class TestFusedExperts(CustomTestCase):
                 K=params[2],
                 E=params[3],
                 topk=params[4],
+                use_custom_routing_function=params[5],
             ):
                 self._fp8_moe(*params)
 
