@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from typing import TYPE_CHECKING, List, Optional
 
 import torch
@@ -39,6 +40,8 @@ if _use_aiter:
     from aiter import ActivationType
     from aiter.fused_moe import fused_moe
     from aiter.ops.shuffle import shuffle_weight
+
+run_moe_on_cpu = bool(int(os.getenv("ENABLE_CPU_MOE_IN_XPU", "0")))
 
 
 class UnquantizedEmbeddingMethod(QuantizeMethodBase):
@@ -216,8 +219,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             )
             torch.cuda.empty_cache()
 
+        if run_moe_on_cpu:
+            if not (
+                layer.w13_weight.device == torch.device("cpu")
+                and layer.w2_weight.device == torch.device("cpu")
+            ):
+                raise ValueError("MOE weights must be on cpu!!!")
+
+            print("checking MOE weight is in cpu and will shuffle!")
+
         # Pack weight for get better performance on CPU
-        if _is_cpu and _is_cpu_amx_available:
+        if (_is_cpu or run_moe_on_cpu) and _is_cpu_amx_available:
             _amx_process_weight_after_loading(layer, ["w13_weight", "w2_weight"])
 
         return
@@ -321,6 +333,39 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         assert (
             moe_runner_config.activation == "silu"
         ), f"activation = {moe_runner_config.activation} is not supported."
+
+        if run_moe_on_cpu:
+            assert (
+                use_intel_amx_backend(layer)
+                and not moe_runner_config.apply_router_weight_on_input
+            )
+
+            ori_device = x.device
+
+            # TODO: use torch.ops.sgl_kernel
+            from sglang.srt.layers.moe.topk import apply_topk_weights_cpu
+
+            topk_weights, topk_ids, _ = topk_output
+            x, topk_weights = apply_topk_weights_cpu(
+                moe_runner_config.apply_router_weight_on_input, topk_weights, x
+            )
+            cpuout = torch.ops.sgl_kernel.fused_experts_cpu(
+                x.cpu(),
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights.cpu(),
+                topk_ids.cpu(),
+                False,  # inplace See [Note] inplace should be False in fused_experts.
+                False,  # use_int8_w8a8
+                False,  # use_fp8_w8a16
+                None,  # w1_scale
+                None,  # w2_scale
+                None,  # block_size
+                None,  # a1_scale
+                None,  # a2_scale
+                True,  # is_vnni
+            )
+            return cpuout.to(ori_device)
 
         if (
             use_intel_amx_backend(layer)

@@ -155,6 +155,8 @@ _is_sm100_supported = is_cuda() and is_sm100_supported()
 
 logger = logging.getLogger(__name__)
 
+run_moe_on_cpu = bool(int(os.getenv("ENABLE_CPU_MOE_IN_XPU", "0")))
+
 
 class AttnForwardMethod(IntEnum):
     # Use multi-head attention
@@ -319,19 +321,24 @@ class DeepseekV2MoE(nn.Module):
             config=config, prefix=add_prefix("gate", prefix), is_nextn=is_nextn
         )
 
-        self.experts = get_moe_impl_class(quant_config)(
-            num_experts=config.n_routed_experts
-            + self.num_fused_shared_experts
-            + global_server_args_dict["ep_num_redundant_experts"],
-            num_fused_shared_experts=self.num_fused_shared_experts,
-            top_k=config.num_experts_per_tok + self.num_fused_shared_experts,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.moe_intermediate_size,
-            layer_id=self.layer_id,
-            quant_config=quant_config,
-            routed_scaling_factor=self.routed_scaling_factor,
-            prefix=add_prefix("experts", prefix),
-        )
+        orig_device = self.gate.weight.device
+        moe_device = orig_device
+        if run_moe_on_cpu:
+            moe_device = torch.device("cpu")
+        with moe_device:
+            self.experts = get_moe_impl_class(quant_config)(
+                num_experts=config.n_routed_experts
+                + self.num_fused_shared_experts
+                + global_server_args_dict["ep_num_redundant_experts"],
+                num_fused_shared_experts=self.num_fused_shared_experts,
+                top_k=config.num_experts_per_tok + self.num_fused_shared_experts,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.moe_intermediate_size,
+                layer_id=self.layer_id,
+                quant_config=quant_config,
+                routed_scaling_factor=self.routed_scaling_factor,
+                prefix=add_prefix("experts", prefix),
+            )
 
         self.topk = TopK(
             top_k=config.num_experts_per_tok + self.num_fused_shared_experts,

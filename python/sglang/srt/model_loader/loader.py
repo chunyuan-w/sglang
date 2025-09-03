@@ -72,6 +72,10 @@ from sglang.srt.utils import (
 _is_npu = is_npu()
 
 
+# TODO: set this as an server args and rename it?
+run_moe_on_cpu = bool(int(os.getenv("ENABLE_CPU_MOE_IN_XPU", "0")))
+
+
 @contextmanager
 def device_loading_context(module: torch.nn.Module, target_device: torch.device):
     if target_device.type == "cpu":
@@ -464,8 +468,17 @@ class DefaultModelLoader(BaseModelLoader):
                 # to be on the global target device. This scope is for the
                 # case where cpu offloading is used, where we will move the
                 # parameters onto device for processing and back off after.
-                with device_loading_context(module, target_device):
-                    quant_method.process_weights_after_loading(module)
+
+                # TODO: FP8 and INT8 MoE have different names
+                if (
+                    run_moe_on_cpu
+                    and type(quant_method).__name__ == "UnquantizedFusedMoEMethod"
+                ):
+                    with device_loading_context(module, torch.device("cpu")):
+                        quant_method.process_weights_after_loading(module)
+                else:
+                    with device_loading_context(module, target_device):
+                        quant_method.process_weights_after_loading(module)
 
 
 class LayeredModelLoader(DefaultModelLoader):

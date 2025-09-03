@@ -1,3 +1,5 @@
+import os
+
 from torch import nn
 
 from sglang.srt.utils import cpu_has_amx_support, is_cpu, is_cuda, is_hip, is_npu
@@ -7,6 +9,8 @@ _is_hip = is_hip()
 _is_cpu = is_cpu()
 _is_cpu_amx_available = cpu_has_amx_support()
 _is_npu = is_npu()
+
+run_moe_on_cpu = bool(int(os.getenv("ENABLE_CPU_MOE_IN_XPU", "0")))
 
 
 class CustomOp(nn.Module):
@@ -81,6 +85,10 @@ class CustomOp(nn.Module):
 
     def dispatch_forward(self):
         if _is_cuda:
+            # TODO: canwe change this anywhere else
+            if "FusedMoE" in self.__class__.__name__:
+                if run_moe_on_cpu:
+                    return self.forward_cpu
             return self.forward_cuda
         elif _is_hip:
             return self.forward_hip
