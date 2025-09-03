@@ -224,9 +224,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 layer.w13_weight.device == torch.device("cpu")
                 and layer.w2_weight.device == torch.device("cpu")
             ):
-                raise ValueError("MOE weights must be on cpu!!!")
-
-            print("checking MOE weight is in cpu and will shuffle!")
+                raise ValueError("MOE weights should be on cpu")
 
         # Pack weight for get better performance on CPU
         if (_is_cpu or run_moe_on_cpu) and _is_cpu_amx_available:
@@ -256,6 +254,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         topk_output: TopKOutput,
         moe_runner_config: MoeRunnerConfig,
     ) -> torch.Tensor:
+
+        if run_moe_on_cpu:
+            return self.forward_cpu(layer, x, topk_output, moe_runner_config)
 
         if self.use_triton_kernels:
             if self.with_bias:
