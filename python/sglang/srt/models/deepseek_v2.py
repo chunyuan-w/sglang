@@ -155,7 +155,7 @@ _is_sm100_supported = is_cuda() and is_sm100_supported()
 
 logger = logging.getLogger(__name__)
 
-run_moe_on_cpu = bool(int(os.getenv("ENABLE_CPU_MOE_IN_XPU", "0")))
+run_moe_on_cpu = bool(int(os.getenv("RUN_MOE_ON_CPU", "0")))
 
 
 class AttnForwardMethod(IntEnum):

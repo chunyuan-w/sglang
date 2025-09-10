@@ -73,7 +73,7 @@ _is_npu = is_npu()
 
 
 # TODO: set this as an server args and rename it?
-run_moe_on_cpu = bool(int(os.getenv("ENABLE_CPU_MOE_IN_XPU", "0")))
+run_moe_on_cpu = bool(int(os.getenv("RUN_MOE_ON_CPU", "0")))
 
 
 @contextmanager
