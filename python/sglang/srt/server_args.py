@@ -78,6 +78,7 @@ class ServerArgs:
 
     # Memory and scheduling
     mem_fraction_static: Optional[float] = None
+    cpu_mem_fraction_static: Optional[float] = None
     max_running_requests: Optional[int] = None
     max_queued_requests: Optional[int] = sys.maxsize
     max_total_tokens: Optional[int] = None
@@ -920,6 +921,12 @@ class ServerArgs:
             default=ServerArgs.mem_fraction_static,
             help="The fraction of the memory used for static allocation (model weights and KV cache memory pool). Use a smaller value if you see out-of-memory errors.",
         )
+        parser.add_argument(
+            "--cpu-mem-fraction-static",
+            type=float,
+            default=ServerArgs.cpu_mem_fraction_static,
+            help="The fraction of the memory used for static allocation (model weights and KV cache memory pool). Use a smaller value if you see out-of-memory errors.",
+        )        
         parser.add_argument(
             "--max-running-requests",
             type=int,
