@@ -181,6 +181,7 @@ def compute_dp_attention_local_info(
 def initialize_dp_attention(
     server_args: ServerArgs,
     model_config: ModelConfig,
+    backend,
 ):
     global _ATTN_TP_GROUP, _ATTN_TP_RANK, _ATTN_TP_SIZE, _ATTN_DP_RANK, _ATTN_DP_SIZE
     global _LOCAL_ATTN_DP_SIZE, _LOCAL_ATTN_DP_RANK, _ENABLE_DP_ATTENTION_FLAG
@@ -188,7 +189,7 @@ def initialize_dp_attention(
     from sglang.srt.layers.sampler import SYNC_TOKEN_IDS_ACROSS_TP
 
     enable_dp_attention = server_args.enable_dp_attention
-    tp_size = server_args.tp_size
+    tp_size = server_args.tp_size if backend != "gloo" else server_args.cpu_tp_size
     dp_size = server_args.dp_size
     moe_dense_tp_size = server_args.moe_dense_tp_size
     pp_size = server_args.pp_size
