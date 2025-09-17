@@ -95,6 +95,7 @@ class ServerArgs:
     device: Optional[str] = None
     tp_size: int = 1
     pp_size: int = 1
+    cpu_tp_size: int = 1
     max_micro_batch_size: Optional[int] = None
     stream_interval: int = 1
     stream_output: bool = False
@@ -1013,6 +1014,13 @@ class ServerArgs:
             type=int,
             default=ServerArgs.tp_size,
             help="The tensor parallelism size.",
+        )
+        parser.add_argument(
+            "--cpu-tensor-parallel-size",
+            "--cpu-tp-size",
+            type=int,
+            default=ServerArgs.cpu_tp_size,
+            help="The CPU tensor parallelism size.",
         )
         parser.add_argument(
             "--pipeline-parallel-size",
@@ -2010,6 +2018,7 @@ class ServerArgs:
         args.pp_size = args.pipeline_parallel_size
         args.dp_size = args.data_parallel_size
         args.ep_size = args.expert_parallel_size
+        args.cpu_tp_size = args.cpu_tensor_parallel_size
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         return cls(**{attr: getattr(args, attr) for attr in attrs})
 
