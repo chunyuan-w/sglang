@@ -146,23 +146,26 @@ class BenchArgs:
         )
 
 
-def load_model(server_args, port_args, tp_rank):
+def load_model(server_args, port_args, tp_rank, is_cpu_moe):
     suppress_other_loggers()
     rank_print = print if tp_rank == 0 else lambda *args, **kwargs: None
+    # TODO: do we need cpu_moe_rank?
     moe_ep_rank = tp_rank // (server_args.tp_size // server_args.ep_size)
 
     model_config = ModelConfig.from_server_args(server_args)
+    print("my device is: ", server_args.device)
     model_runner = ModelRunner(
         model_config=model_config,
         mem_fraction_static=server_args.mem_fraction_static,
         gpu_id=tp_rank,
         tp_rank=tp_rank,
-        tp_size=server_args.tp_size,
+        tp_size=server_args.cpu_tp_size if is_cpu_moe else server_args.tp_size,
         moe_ep_rank=moe_ep_rank,
         moe_ep_size=server_args.ep_size,
         pp_rank=0,
         pp_size=1,
         nccl_port=port_args.nccl_port,
+        is_cpu_moe=is_cpu_moe,
         server_args=server_args,
     )
     rank_print(f"max_total_num_tokens={model_runner.max_total_num_tokens}")
@@ -508,6 +511,7 @@ def latency_test(
     port_args,
     bench_args,
     tp_rank,
+    is_cpu_moe=False,
 ):
     # Set CPU affinity
     if get_bool_env_var("SGLANG_SET_CPU_AFFINITY"):
@@ -518,7 +522,7 @@ def latency_test(
     rank_print = print if tp_rank == 0 else lambda *args, **kwargs: None
 
     # Load the model
-    model_runner, tokenizer = load_model(server_args, port_args, tp_rank)
+    model_runner, tokenizer = load_model(server_args, port_args, tp_rank, is_cpu_moe)
 
     # Prepare inputs for warm up
     reqs = prepare_synthetic_inputs_for_latency_test(
@@ -619,7 +623,7 @@ def main(server_args, bench_args):
 
     port_args = PortArgs.init_new(server_args)
 
-    if server_args.tp_size == 1:
+    if server_args.tp_size == 1 and server_args.cpu_tp_size == 1:
         work_func(server_args, port_args, bench_args, 0)
     else:
         workers = []
@@ -631,6 +635,20 @@ def main(server_args, bench_args):
                     port_args,
                     bench_args,
                     tp_rank,
+                ),
+            )
+            proc.start()
+            workers.append(proc)
+
+        for cpu_tp_rank in range(server_args.cpu_tp_size):
+            proc = multiprocessing.Process(
+                target=work_func,
+                args=(
+                    server_args,
+                    port_args,
+                    bench_args,
+                    cpu_tp_rank,
+                    True, # is_cpu_moe
                 ),
             )
             proc.start()
@@ -658,5 +676,5 @@ if __name__ == "__main__":
     try:
         main(server_args, bench_args)
     finally:
-        if server_args.tp_size != 1:
+        if server_args.tp_size != 1 or server_args.cpu_tp_size != 1:
             kill_process_tree(os.getpid(), include_parent=False)
