@@ -175,10 +175,14 @@ class ModelRunner:
         is_draft_worker: bool = False,
         req_to_token_pool: Optional[ReqToTokenPool] = None,
         token_to_kv_pool_allocator: Optional[BaseTokenToKVPoolAllocator] = None,
+        is_cpu_moe: bool = False
     ):
         # Parse args
         self.mem_fraction_static = mem_fraction_static
-        self.device = server_args.device
+        print("my server_args: ", server_args.device)
+        self.device = server_args.device if not is_cpu_moe else "cpu"
+        print("my self.device 111: ", self.device)
+        
         self.gpu_id = gpu_id
         self.tp_rank = tp_rank
         self.tp_size = tp_size
@@ -188,7 +192,8 @@ class ModelRunner:
         self.pp_rank = pp_rank
         self.pp_size = pp_size
         self.model_config = model_config
-        self.dist_port = nccl_port
+        # TODO: fix the hardcoded port for cpu
+        self.dist_port = nccl_port if not is_cpu_moe else 20000
         self.server_args = server_args
         self.is_draft_worker = is_draft_worker
         self.is_generation = model_config.is_generation
@@ -231,7 +236,12 @@ class ModelRunner:
             self.init_threads_binding()
 
         # Get memory before model loading
+        print("my self.device 222: ", self.device)
+        
         min_per_gpu_memory = self.init_torch_distributed()
+
+        # TODO: check why only 1 process live hereSetup Custom allreduce after init_torch_distributed
+        print("my self.device 333: ", self.device)
 
         # CPU offload
         set_offloader(create_offloader_from_server_args(server_args))
@@ -568,6 +578,8 @@ class ModelRunner:
             backend = "gloo"
         elif self.device == "npu":
             backend = "hccl"
+        
+        self.backend = backend
 
         before_avail_memory = get_available_gpu_memory(self.device, self.gpu_id)
         if not self.server_args.enable_p2p_check:
@@ -595,6 +607,9 @@ class ModelRunner:
                     )
 
             # Only initialize the distributed environment on the target model worker.
+            logger.info(
+                f"backend={backend}, dist_init_method={dist_init_method}"
+            )            
             init_distributed_environment(
                 backend=backend,
                 world_size=self.tp_size * self.pp_size,
@@ -608,17 +623,19 @@ class ModelRunner:
                 pipeline_model_parallel_size=self.pp_size,
                 expert_model_parallel_size=self.moe_ep_size,
                 duplicate_tp_group=self.server_args.enable_pdmux,
-            )
+                backend=backend,
+        )
             initialize_dp_attention(
                 server_args=self.server_args,
                 model_config=self.model_config,
+                backend=backend,
             )
 
         min_per_gpu_memory = get_available_gpu_memory(
             self.device,
             self.gpu_id,
-            distributed=get_world_group().world_size > 1,
-            cpu_group=get_world_group().cpu_group,
+            distributed=get_world_group(backend).world_size > 1,
+            cpu_group=get_world_group(backend).cpu_group,
         )
         self.tp_group = get_tp_group()
         self.attention_tp_group = get_attention_tp_group()
@@ -683,6 +700,7 @@ class ModelRunner:
         monkey_patch_isinstance_for_vllm_base_layer()
 
         with self.memory_saver_adapter.region(GPU_MEMORY_TYPE_WEIGHTS):
+            print("device in model loader: ", self.device)
             self.model = get_model(
                 model_config=self.model_config,
                 load_config=self.load_config,
@@ -1044,8 +1062,8 @@ class ModelRunner:
         available_gpu_memory = get_available_gpu_memory(
             self.device,
             self.gpu_id,
-            distributed=get_world_group().world_size > 1,
-            cpu_group=get_world_group().cpu_group,
+            distributed=get_world_group(self.backend).world_size > 1,
+            cpu_group=get_world_group(self.backend).cpu_group,
         )
         if self.is_draft_worker:
             num_layers = getattr(
