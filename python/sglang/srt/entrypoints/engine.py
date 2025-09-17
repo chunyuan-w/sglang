@@ -709,9 +709,15 @@ def _launch_subprocesses(
 
         nnodes_per_tp_group = max(server_args.nnodes // server_args.pp_size, 1)
         tp_size_per_node = server_args.tp_size // nnodes_per_tp_group
+        cpu_tp_size_per_node = server_args.cpu_tp_size // nnodes_per_tp_group
+        
         tp_rank_range = range(
             tp_size_per_node * (server_args.node_rank % nnodes_per_tp_group),
             tp_size_per_node * (server_args.node_rank % nnodes_per_tp_group + 1),
+        )
+        cpu_tp_rank_range = range(
+            cpu_tp_size_per_node * (server_args.node_rank % nnodes_per_tp_group),
+            cpu_tp_size_per_node * (server_args.node_rank % nnodes_per_tp_group + 1),
         )
 
         pp_size_per_node = max(server_args.pp_size // server_args.nnodes, 1)
@@ -741,6 +747,39 @@ def _launch_subprocesses(
                         None,
                         writer,
                         None,
+                    ),
+                )
+
+                with memory_saver_adapter.configure_subprocess():
+                    proc.start()
+                scheduler_procs.append(proc)
+                scheduler_pipe_readers.append(reader)
+    
+            # CPU TP processes
+            for cpu_tp_rank in cpu_tp_rank_range:
+                reader, writer = mp.Pipe(duplex=False)
+
+                gpu_id = (
+                    server_args.base_gpu_id
+                    + ((pp_rank % pp_size_per_node) * cpu_tp_size_per_node)
+                    + (cpu_tp_rank % cpu_tp_size_per_node) * server_args.gpu_id_step
+                )
+
+                cpu_moe_ep_rank = cpu_tp_rank // (server_args.cpu_tp_size // server_args.ep_size)
+
+                proc = mp.Process(
+                    target=run_scheduler_process,
+                    args=(
+                        server_args,
+                        port_args,
+                        gpu_id,
+                        cpu_tp_rank,
+                        cpu_moe_ep_rank,
+                        pp_rank,
+                        None,
+                        writer,
+                        None,
+                        True, # is_cpu_moe
                     ),
                 )
 
