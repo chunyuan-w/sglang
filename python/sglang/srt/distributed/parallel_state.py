@@ -240,6 +240,7 @@ class GroupCoordinator:
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
             cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+            print(f"self.rank={self.rank}, ranks={ranks}, torch_distributed_backend={torch_distributed_backend}")
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
@@ -1172,11 +1173,21 @@ class GroupCoordinator:
 
 
 _WORLD: Optional[GroupCoordinator] = None
+_CPU_WORLD: Optional[GroupCoordinator] = None
 
 
-def get_world_group() -> GroupCoordinator:
-    assert _WORLD is not None, "world group is not initialized"
-    return _WORLD
+def get_world_group(backend) -> GroupCoordinator:
+    if backend == "gloo":
+        global _CPU_WORLD
+        world_holder = "_CPU_WORLD"
+    else:
+        global _WORLD
+        world_holder = "_WORLD"
+
+    world = globals()[world_holder]    
+    
+    assert world is not None, "world group is not initialized"
+    return world
 
 
 def init_world_group(
@@ -1213,9 +1224,9 @@ def init_model_parallel_group(
         group_ranks=group_ranks,
         local_rank=local_rank,
         torch_distributed_backend=backend,
-        use_pynccl=not _is_npu,
+        use_pynccl=not _is_npu and not backend == "gloo",
         use_pymscclpp=use_mscclpp_allreduce,
-        use_custom_allreduce=use_custom_allreduce,
+        use_custom_allreduce=use_custom_allreduce and not backend == "gloo",
         use_hpu_communicator=True,
         use_xpu_communicator=True,
         use_npu_communicator=True,
@@ -1358,13 +1369,21 @@ def init_distributed_environment(
             local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         else:
             local_rank = rank
-    global _WORLD
-    if _WORLD is None:
+    if backend == "gloo":
+        global _CPU_WORLD
+        world_holder = "_CPU_WORLD"
+    else:
+        global _WORLD
+        world_holder = "_WORLD"
+
+    world = globals()[world_holder]
+
+    if world is None:
         ranks = list(range(torch.distributed.get_world_size()))
-        _WORLD = init_world_group(ranks, local_rank, backend)
+        globals()[world_holder] = init_world_group(ranks, local_rank, backend)
     else:
         assert (
-            _WORLD.world_size == torch.distributed.get_world_size()
+            world.world_size == torch.distributed.get_world_size()
         ), "world group already initialized with a different world size"
 
 
@@ -1400,7 +1419,8 @@ def initialize_model_parallel(
     # Get world size and rank. Ensure some consistencies.
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()
-    backend = backend or torch.distributed.get_backend(get_world_group().device_group)
+    backend = backend or torch.distributed.get_backend(get_world_group(backend).device_group)
+    print("my backend: ", backend)
 
     if world_size != tensor_model_parallel_size * pipeline_model_parallel_size:
         raise RuntimeError(
@@ -1423,7 +1443,7 @@ def initialize_model_parallel(
     # message queue broadcaster is only used in tensor model parallel group
     _TP = init_model_parallel_group(
         group_ranks,
-        get_world_group().local_rank,
+        get_world_group(backend).local_rank,
         backend,
         use_message_queue_broadcaster=get_bool_env_var(
             "SGLANG_USE_MESSAGE_QUEUE_BROADCASTER", "true"
@@ -1438,7 +1458,7 @@ def initialize_model_parallel(
         ), "tensor model parallel group for PD-Multiplexing Prefill is already initialized"
         _PDMUX_PREFILL_TP_GROUP = init_model_parallel_group(
             group_ranks,
-            get_world_group().local_rank,
+            get_world_group(backend).local_rank,
             backend,
             use_message_queue_broadcaster=get_bool_env_var(
                 "SGLANG_USE_MESSAGE_QUEUE_BROADCASTER", "true"
@@ -1463,7 +1483,7 @@ def initialize_model_parallel(
 
     _MOE_EP = init_model_parallel_group(
         group_ranks,
-        get_world_group().local_rank,
+        get_world_group(backend).local_rank,
         backend,
         use_custom_allreduce=False,
         group_name="moe_ep",
@@ -1481,7 +1501,7 @@ def initialize_model_parallel(
 
     _MOE_TP = init_model_parallel_group(
         group_ranks,
-        get_world_group().local_rank,
+        get_world_group(backend).local_rank,
         backend,
         use_custom_allreduce=False,
         group_name="moe_tp",
@@ -1498,7 +1518,7 @@ def initialize_model_parallel(
     # pipeline parallel does not need custom allreduce
     _PP = init_model_parallel_group(
         group_ranks,
-        get_world_group().local_rank,
+        get_world_group(backend).local_rank,
         backend,
         use_custom_allreduce=False,
         group_name="pp",
@@ -1515,7 +1535,7 @@ def ensure_model_parallel_initialized(
     or ensure tensor-parallel and pipeline-parallel sizes are equal to expected
     values if the model parallel groups are initialized.
     """
-    backend = backend or torch.distributed.get_backend(get_world_group().device_group)
+    backend = backend or torch.distributed.get_backend(get_world_group(backend).device_group)
     if not model_parallel_is_initialized():
         initialize_model_parallel(
             tensor_model_parallel_size,
@@ -1616,9 +1636,14 @@ def destroy_model_parallel():
 
 def destroy_distributed_environment():
     global _WORLD
+    global _CPU_WORLD
     if _WORLD:
         _WORLD.destroy()
     _WORLD = None
+    
+    if _CPU_WORLD:
+        _CPU_WORLD.destroy()
+    _CPU_WORLD = None
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
 
@@ -1725,6 +1750,7 @@ def monkey_patch_vllm_parallel_state(reverse: bool = False):
     except ImportError:
         return
 
+    # TODO: do we need to handle get_world_group(backend) here?
     global vllm_get_pp_group, vllm_get_tp_group, vllm_get_world_group
     if vllm_get_pp_group is None:
         vllm_get_pp_group = vllm_parrlel_state.get_pp_group
