@@ -63,9 +63,10 @@ class TpModelWorker:
         is_draft_worker: bool = False,
         req_to_token_pool: Optional[ReqToTokenPool] = None,
         token_to_kv_pool_allocator: Optional[BaseTokenToKVPoolAllocator] = None,
+        is_cpu_moe: Optional[bool] = False,
     ):
         # Parse args
-        self.tp_size = server_args.tp_size
+        self.tp_size = server_args.tp_size if not is_cpu_moe else server_args.cpu_tp_size
         self.tp_rank = tp_rank
         self.moe_ep_rank = moe_ep_rank
         self.pp_rank = pp_rank
@@ -83,10 +84,10 @@ class TpModelWorker:
 
         self.model_runner = ModelRunner(
             model_config=self.model_config,
-            mem_fraction_static=server_args.mem_fraction_static,
+            mem_fraction_static=server_args.mem_fraction_static if not is_cpu_moe else server_args.cpu_mem_fraction_static,
             gpu_id=gpu_id,
             tp_rank=tp_rank,
-            tp_size=server_args.tp_size,
+            tp_size=server_args.tp_size if not is_cpu_moe else server_args.cpu_tp_size,
             moe_ep_rank=moe_ep_rank,
             moe_ep_size=server_args.ep_size,
             pp_rank=pp_rank,
@@ -96,6 +97,7 @@ class TpModelWorker:
             is_draft_worker=is_draft_worker,
             req_to_token_pool=req_to_token_pool,
             token_to_kv_pool_allocator=token_to_kv_pool_allocator,
+            is_cpu_moe=is_cpu_moe,
         )
         if server_args.skip_tokenizer_init:
             self.tokenizer = self.processor = None
@@ -116,10 +118,11 @@ class TpModelWorker:
                     revision=server_args.revision,
                 )
         self.device = self.model_runner.device
+        self.backend = self.model_runner.backend
 
         # Init nccl groups
         self.pp_group = get_pp_group()
-        self.world_group = get_world_group()
+        self.world_group = get_world_group(self.backend)
 
         # Profile number of tokens
         self.max_total_num_tokens = self.model_runner.max_total_num_tokens

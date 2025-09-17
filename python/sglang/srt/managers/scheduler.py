@@ -206,6 +206,7 @@ class Scheduler(
         pp_rank: int,
         dp_rank: Optional[int],
         dp_balance_meta: Optional[DPBalanceMeta] = None,
+        is_cpu_moe: Optional[bool] = False,
     ):
         # Parse args
         self.server_args = server_args
@@ -213,7 +214,7 @@ class Scheduler(
         self.moe_ep_rank = moe_ep_rank
         self.pp_rank = pp_rank
         self.dp_rank = dp_rank
-        self.tp_size = server_args.tp_size
+        self.tp_size = server_args.tp_size if not is_cpu_moe else server_args.cpu_tp_size
         self.moe_ep_size = server_args.ep_size
         self.pp_size = server_args.pp_size
         self.dp_size = server_args.dp_size
@@ -326,6 +327,7 @@ class Scheduler(
             pp_rank=pp_rank,
             dp_rank=dp_rank,
             nccl_port=port_args.nccl_port,
+            is_cpu_moe=is_cpu_moe,
         )
 
         # Launch a draft worker for speculative decoding
@@ -369,7 +371,7 @@ class Scheduler(
         self.attn_tp_group = self.tp_worker.get_attention_tp_group()
         self.attn_tp_cpu_group = self.tp_worker.get_attention_tp_cpu_group()
         self.pp_group = get_pp_group()
-        self.world_group = get_world_group()
+        self.world_group = get_world_group(self.tp_worker.backend)
 
         self.pad_input_ids_func = self.tp_worker.get_pad_input_ids_func()
         global_server_args_dict.update(worker_global_server_args_dict)
@@ -2517,6 +2519,7 @@ def run_scheduler_process(
     dp_rank: Optional[int],
     pipe_writer,
     balance_meta: Optional[DPBalanceMeta] = None,
+    is_cpu_moe: Optional[bool] = False,
 ):
     # Generate the prefix
     prefix = ""
@@ -2558,6 +2561,7 @@ def run_scheduler_process(
             pp_rank,
             dp_rank,
             dp_balance_meta=balance_meta,
+            is_cpu_moe=is_cpu_moe,
         )
         pipe_writer.send(
             {
