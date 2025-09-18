@@ -190,6 +190,8 @@ def _initialize_model(
     return model_class(
         config=model_config.hf_config,
         quant_config=quant_config,
+        ready_event=load_config.ready_event,
+        done_event=load_config.done_event,
     )
 
 
@@ -445,8 +447,11 @@ class DefaultModelLoader(BaseModelLoader):
         target_device = torch.device(device_config.device)
         print(f"target_device in load_model: {target_device}")
         
-        self.load_config.run_moe_on_cpu = run_moe_on_cpu
-        self.load_config.device = target_device
+        # self.load_config.run_moe_on_cpu = run_moe_on_cpu
+        # self.load_config.device = target_device
+        
+        self.load_config.ready_event = device_config.ready_event
+        self.load_config.done_event = device_config.done_event
 
         with set_default_torch_dtype(model_config.dtype):
             with target_device:

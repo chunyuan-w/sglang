@@ -1977,12 +1977,17 @@ class DeepseekV2Model(nn.Module):
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        ready_event=None,
+        done_event=None,
     ) -> None:
         super().__init__()
         self.padding_id = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.first_k_dense_replace = config.first_k_dense_replace
         self.pp_group = get_pp_group()
+        
+        print(f"my ready_event: {ready_event}", flush=True)
+        print(f"my done_event: {done_event}", flush=True)
 
         if self.pp_group.is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -2102,6 +2107,8 @@ class DeepseekV2ForCausalLM(nn.Module):
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        ready_event=None,
+        done_event=None,        
     ) -> None:
         super().__init__()
 
@@ -2122,7 +2129,7 @@ class DeepseekV2ForCausalLM(nn.Module):
         self.quant_config = quant_config
         self.determine_num_fused_shared_experts()
         self.model = DeepseekV2Model(
-            config, quant_config, prefix=add_prefix("model", prefix)
+            config, quant_config, prefix=add_prefix("model", prefix), ready_event=ready_event, done_event=done_event
         )
         self.lm_head = ParallelLMHead(
             config.vocab_size,

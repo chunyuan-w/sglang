@@ -175,7 +175,9 @@ class ModelRunner:
         is_draft_worker: bool = False,
         req_to_token_pool: Optional[ReqToTokenPool] = None,
         token_to_kv_pool_allocator: Optional[BaseTokenToKVPoolAllocator] = None,
-        is_cpu_moe: bool = False
+        is_cpu_moe: bool = False,
+        ready_event = None,
+        done_event = None,
     ):
         # Parse args
         self.mem_fraction_static = mem_fraction_static
@@ -194,6 +196,8 @@ class ModelRunner:
         self.model_config = model_config
         # TODO: fix the hardcoded port for cpu
         self.dist_port = nccl_port if not is_cpu_moe else 20000
+        self.ready_event = ready_event
+        self.done_event = done_event
         self.server_args = server_args
         self.is_draft_worker = is_draft_worker
         self.is_generation = model_config.is_generation
@@ -701,10 +705,14 @@ class ModelRunner:
 
         with self.memory_saver_adapter.region(GPU_MEMORY_TYPE_WEIGHTS):
             print("device in model loader: ", self.device)
+            device_config = DeviceConfig(self.device)
+            device_config.ready_event = self.ready_event
+            device_config.done_event = self.done_event
+            
             self.model = get_model(
                 model_config=self.model_config,
                 load_config=self.load_config,
-                device_config=DeviceConfig(self.device),
+                device_config=device_config,
             )
         monkey_patch_vllm_parallel_state(reverse=True)
         monkey_patch_isinstance_for_vllm_base_layer(reverse=True)

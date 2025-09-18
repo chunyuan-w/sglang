@@ -64,6 +64,8 @@ class TpModelWorker:
         req_to_token_pool: Optional[ReqToTokenPool] = None,
         token_to_kv_pool_allocator: Optional[BaseTokenToKVPoolAllocator] = None,
         is_cpu_moe: Optional[bool] = False,
+        ready_event = None,
+        done_event = None,
     ):
         # Parse args
         self.tp_size = server_args.tp_size if not is_cpu_moe else server_args.cpu_tp_size
@@ -99,6 +101,8 @@ class TpModelWorker:
             req_to_token_pool=req_to_token_pool,
             token_to_kv_pool_allocator=token_to_kv_pool_allocator,
             is_cpu_moe=is_cpu_moe,
+            ready_event=ready_event,
+            done_event=done_event,
         )
         if server_args.skip_tokenizer_init:
             self.tokenizer = self.processor = None

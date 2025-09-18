@@ -334,6 +334,8 @@ class Scheduler(
             dp_rank=dp_rank,
             nccl_port=port_args.nccl_port,
             is_cpu_moe=is_cpu_moe,
+            ready_event=ready_event,
+            done_event=done_event,
         )
 
         # Launch a draft worker for speculative decoding
