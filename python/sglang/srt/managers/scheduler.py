@@ -207,8 +207,8 @@ class Scheduler(
         dp_rank: Optional[int],
         dp_balance_meta: Optional[DPBalanceMeta] = None,
         is_cpu_moe: Optional[bool] = False,
-        # ready_event = None,
-        # done_event = None,
+        ready_event = None,
+        done_event = None,
     ):
         print("my init scheduler", flush=True)
         # Parse args
@@ -219,8 +219,8 @@ class Scheduler(
         self.dp_rank = dp_rank
         self.tp_size = server_args.tp_size if not is_cpu_moe else server_args.cpu_tp_size
         self.is_cpu_moe = is_cpu_moe
-        # self.ready_event = ready_event
-        # self.done_event = done_event
+        self.ready_event = ready_event
+        self.done_event = done_event
         self.moe_ep_size = server_args.ep_size
         self.pp_size = server_args.pp_size
         self.dp_size = server_args.dp_size
@@ -781,39 +781,23 @@ class Scheduler(
     def event_loop_normal(self):
         """A normal scheduler loop."""
         while True:
-            # if self.is_cpu_moe:
-            #     self.ready_event.wait()
-            # else:
-            #     recv_reqs = self.recv_requests()
-            #     self.process_input_requests(recv_reqs)
-
-            #     batch = self.get_next_batch_to_run()
-            #     self.cur_batch = batch
-
-            #     if batch:
-            #         result = self.run_batch(batch)
-            #         self.process_batch_result(batch, result)
-            #     else:
-            #         # When the server is idle, do self-check and re-init some states
-            #         self.self_check_during_idle()
-
-            #     self.last_batch = batch
-
-
-            recv_reqs = self.recv_requests()
-            self.process_input_requests(recv_reqs)
-
-            batch = self.get_next_batch_to_run()
-            self.cur_batch = batch
-
-            if batch:
-                result = self.run_batch(batch)
-                self.process_batch_result(batch, result)
+            if self.is_cpu_moe:
+                self.ready_event.wait()
             else:
-                # When the server is idle, do self-check and re-init some states
-                self.self_check_during_idle()
+                recv_reqs = self.recv_requests()
+                self.process_input_requests(recv_reqs)
 
-            self.last_batch = batch
+                batch = self.get_next_batch_to_run()
+                self.cur_batch = batch
+
+                if batch:
+                    result = self.run_batch(batch)
+                    self.process_batch_result(batch, result)
+                else:
+                    # When the server is idle, do self-check and re-init some states
+                    self.self_check_during_idle()
+
+                self.last_batch = batch
 
     @DynamicGradMode()
     def event_loop_overlap(self):
@@ -2561,8 +2545,8 @@ def run_scheduler_process(
     pipe_writer,
     balance_meta: Optional[DPBalanceMeta] = None,
     is_cpu_moe: Optional[bool] = False,
-    # ready_event = None,
-    # done_event = None,
+    ready_event = None,
+    done_event = None,
 ):
     # Generate the prefix
     prefix = ""
@@ -2605,8 +2589,8 @@ def run_scheduler_process(
             dp_rank,
             dp_balance_meta=balance_meta,
             is_cpu_moe=is_cpu_moe,
-            # ready_event=ready_event,
-            # done_event=done_event,
+            ready_event=ready_event,
+            done_event=done_event,
         )
         print(f"my schedule created: {scheduler.device}")
         pipe_writer.send(

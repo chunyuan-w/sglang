@@ -726,8 +726,8 @@ def _launch_subprocesses(
             pp_size_per_node * (server_args.node_rank // nnodes_per_tp_group + 1),
         )
 
-        # ready_event = mp.Event()
-        # done_event = mp.Event()        
+        ready_event = mp.Event()
+        done_event = mp.Event()        
         
         for pp_rank in pp_rank_range:
             for tp_rank in tp_rank_range:
@@ -751,8 +751,8 @@ def _launch_subprocesses(
                         writer,
                         None,
                         False,
-                        # ready_event,
-                        # done_event,
+                        ready_event,
+                        done_event,
                     ),
                 )
 
@@ -787,8 +787,8 @@ def _launch_subprocesses(
                         writer,
                         None,
                         True, # is_cpu_moe
-                        # ready_event,
-                        # done_event,
+                        ready_event,
+                        done_event,
                     ),
                 )
 
