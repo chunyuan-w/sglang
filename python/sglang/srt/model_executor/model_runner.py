@@ -179,9 +179,9 @@ class ModelRunner:
     ):
         # Parse args
         self.mem_fraction_static = mem_fraction_static
-        print("my server_args: ", server_args.device)
+        print(f"my server_args: {server_args.device}", flush=True)
         self.device = server_args.device if not is_cpu_moe else "cpu"
-        print("my self.device 111: ", self.device)
+        print(f"my self.device 111: {self.device}", flush=True)
         
         self.gpu_id = gpu_id
         self.tp_rank = tp_rank
