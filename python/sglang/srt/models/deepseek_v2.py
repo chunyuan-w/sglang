@@ -291,6 +291,8 @@ class DeepseekV2MoE(nn.Module):
         prefix: str = "",
         alt_stream: Optional[torch.cuda.Stream] = None,
         is_nextn: bool = False,
+        ready_event=None,
+        done_event=None,        
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -304,6 +306,9 @@ class DeepseekV2MoE(nn.Module):
         self.config = config
         self.layer_id = layer_id
         self.alt_stream = alt_stream
+        
+        self.ready_event = ready_event
+        self.done_event = done_event
 
         if self.tp_size > config.n_routed_experts:
             raise ValueError(
@@ -484,6 +489,8 @@ class DeepseekV2MoE(nn.Module):
             topk_output = self.topk(hidden_states, router_logits)
             
             # TODO: set ready_event.ready()
+            print(f"my ready_event before moe: {self.ready_event}", flush=True)
+            print(f"my done_event before moe: {self.done_event}", flush=True)            
             final_hidden_states = self.experts(hidden_states, topk_output)
             
             if not _is_cuda:
@@ -1763,6 +1770,8 @@ class DeepseekV2DecoderLayer(nn.Module):
         is_nextn: bool = False,
         prefix: str = "",
         alt_stream: Optional[torch.cuda.Stream] = None,
+        ready_event=None,
+        done_event=None,        
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -1812,6 +1821,8 @@ class DeepseekV2DecoderLayer(nn.Module):
                 layer_id=self.layer_id,
                 alt_stream=alt_stream,
                 is_nextn=is_nextn,
+                ready_event=ready_event,
+                done_event=done_event,
             )
         else:
             if enable_moe_dense_fully_dp():
@@ -1985,9 +1996,6 @@ class DeepseekV2Model(nn.Module):
         self.vocab_size = config.vocab_size
         self.first_k_dense_replace = config.first_k_dense_replace
         self.pp_group = get_pp_group()
-        
-        print(f"my ready_event: {ready_event}", flush=True)
-        print(f"my done_event: {done_event}", flush=True)
 
         if self.pp_group.is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -2007,6 +2015,8 @@ class DeepseekV2Model(nn.Module):
                 quant_config=quant_config,
                 prefix=prefix,
                 alt_stream=self.alt_stream,
+                ready_event=ready_event,
+                done_event=done_event,
             ),
             pp_rank=self.pp_group.rank_in_group,
             pp_size=self.pp_group.world_size,
