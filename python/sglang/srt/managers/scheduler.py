@@ -207,7 +207,10 @@ class Scheduler(
         dp_rank: Optional[int],
         dp_balance_meta: Optional[DPBalanceMeta] = None,
         is_cpu_moe: Optional[bool] = False,
+        # ready_event = None,
+        # done_event = None,
     ):
+        print("my init scheduler", flush=True)
         # Parse args
         self.server_args = server_args
         self.tp_rank = tp_rank
@@ -215,6 +218,9 @@ class Scheduler(
         self.pp_rank = pp_rank
         self.dp_rank = dp_rank
         self.tp_size = server_args.tp_size if not is_cpu_moe else server_args.cpu_tp_size
+        self.is_cpu_moe = is_cpu_moe
+        # self.ready_event = ready_event
+        # self.done_event = done_event
         self.moe_ep_size = server_args.ep_size
         self.pp_size = server_args.pp_size
         self.dp_size = server_args.dp_size
@@ -775,6 +781,25 @@ class Scheduler(
     def event_loop_normal(self):
         """A normal scheduler loop."""
         while True:
+            # if self.is_cpu_moe:
+            #     self.ready_event.wait()
+            # else:
+            #     recv_reqs = self.recv_requests()
+            #     self.process_input_requests(recv_reqs)
+
+            #     batch = self.get_next_batch_to_run()
+            #     self.cur_batch = batch
+
+            #     if batch:
+            #         result = self.run_batch(batch)
+            #         self.process_batch_result(batch, result)
+            #     else:
+            #         # When the server is idle, do self-check and re-init some states
+            #         self.self_check_during_idle()
+
+            #     self.last_batch = batch
+
+
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
 
@@ -976,7 +1001,9 @@ class Scheduler(
             if not self.recv_skipper.handle(last_forward_mode):
                 return []
 
+        # print(f"my ranks: {self.pp_rank}, {self.attn_tp_rank}, {self.device}, {self.is_cpu_moe}")
         if self.pp_rank == 0:
+            # if self.attn_tp_rank == 0 and not self.is_cpu_moe:
             if self.attn_tp_rank == 0:
                 recv_reqs = []
 
@@ -1047,6 +1074,17 @@ class Scheduler(
                 )
             recv_reqs = work_reqs + control_reqs
         elif self.tp_size != 1:
+            # if self.is_cpu_moe:
+            #     recv_reqs = None
+            # else:
+            #     recv_reqs = broadcast_pyobj(
+            #         recv_reqs,
+            #         self.tp_group.rank,
+            #         self.tp_cpu_group,
+            #         src=self.tp_group.ranks[0],
+            #     )
+
+
             recv_reqs = broadcast_pyobj(
                 recv_reqs,
                 self.tp_group.rank,
@@ -1056,6 +1094,9 @@ class Scheduler(
         return recv_reqs
 
     def process_input_requests(self, recv_reqs: List):
+        # if self.is_cpu_moe:
+            # return
+        
         for recv_req in recv_reqs:
             # If it is a health check generation request and there are running requests, ignore it.
             if is_health_check_generate_req(recv_req) and (
@@ -2520,6 +2561,8 @@ def run_scheduler_process(
     pipe_writer,
     balance_meta: Optional[DPBalanceMeta] = None,
     is_cpu_moe: Optional[bool] = False,
+    # ready_event = None,
+    # done_event = None,
 ):
     # Generate the prefix
     prefix = ""
@@ -2562,7 +2605,10 @@ def run_scheduler_process(
             dp_rank,
             dp_balance_meta=balance_meta,
             is_cpu_moe=is_cpu_moe,
+            # ready_event=ready_event,
+            # done_event=done_event,
         )
+        print(f"my schedule created: {scheduler.device}")
         pipe_writer.send(
             {
                 "status": "ready",
@@ -2571,6 +2617,8 @@ def run_scheduler_process(
             }
         )
 
+        print(f"my pipe_writer sent: {scheduler.device}")
+        
         disaggregation_mode: DisaggregationMode = scheduler.disaggregation_mode
         if disaggregation_mode == DisaggregationMode.NULL:
             if server_args.pp_size > 1:

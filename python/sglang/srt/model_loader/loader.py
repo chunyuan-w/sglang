@@ -443,6 +443,11 @@ class DefaultModelLoader(BaseModelLoader):
         device_config: DeviceConfig,
     ) -> nn.Module:
         target_device = torch.device(device_config.device)
+        print(f"target_device in load_model: {target_device}")
+        
+        self.load_config.run_moe_on_cpu = run_moe_on_cpu
+        self.load_config.device = target_device
+
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
                 model = _initialize_model(
@@ -458,6 +463,10 @@ class DefaultModelLoader(BaseModelLoader):
 
     @staticmethod
     def load_weights_and_postprocess(model, weights, target_device):
+        if target_device == torch.device("cpu") and run_moe_on_cpu:
+            # TODO: only load the sharded moe weights for this process
+            print("moe cpu processes")
+        
         model.load_weights(weights)
 
         for _, module in model.named_modules():

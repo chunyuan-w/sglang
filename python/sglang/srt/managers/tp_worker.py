@@ -82,6 +82,7 @@ class TpModelWorker:
             is_draft_model=is_draft_worker,
         )
 
+        print("my tp worker", flush=True)
         self.model_runner = ModelRunner(
             model_config=self.model_config,
             mem_fraction_static=server_args.mem_fraction_static if not is_cpu_moe else server_args.cpu_mem_fraction_static,

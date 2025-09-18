@@ -1309,6 +1309,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         if support_triton(global_server_args_dict.get("attention_backend")):
             # TODO: some tensors can be reused for ForwardBatchInfo (e.g., extend_lens, cumsum_start)
 
+            print(f"my device in ScheduleBatch: {self.device}")
             write_req_to_token_pool_triton[(bs,)](
                 self.req_to_token_pool.req_to_token,
                 req_pool_indices_tensor,

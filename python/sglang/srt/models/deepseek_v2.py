@@ -458,6 +458,7 @@ class DeepseekV2MoE(nn.Module):
                     use_reduce_scatter,
                 )
             else:
+                # TODO: add cpu offload in forward_normal
                 return self.forward_normal(
                     hidden_states,
                     should_allreduce_fusion,
@@ -481,7 +482,10 @@ class DeepseekV2MoE(nn.Module):
             # router_logits: (num_tokens, n_experts)
             router_logits = self.gate(hidden_states)
             topk_output = self.topk(hidden_states, router_logits)
+            
+            # TODO: set ready_event.ready()
             final_hidden_states = self.experts(hidden_states, topk_output)
+            
             if not _is_cuda:
                 final_hidden_states *= self.routed_scaling_factor
 
@@ -521,6 +525,7 @@ class DeepseekV2MoE(nn.Module):
             shared_output = None
             topk_output = self.topk.empty_topk_output(hidden_states.device)
 
+        # offload moe to cpu here?
         final_hidden_states = self.experts(hidden_states, topk_output)
         if not _is_cuda and not _use_aiter:
             # fused in biased_grouped_topk so we can skip here
@@ -2018,6 +2023,9 @@ class DeepseekV2Model(nn.Module):
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> Union[torch.Tensor, PPProxyTensors]:
+        # Use different logic for cpu and gpu process when offload is on?
+        print(f"my in deepseek fwd {input_ids.device}", flush=True)
+        
         total_num_layers = self.end_layer - self.start_layer
         device = input_embeds.device if input_embeds is not None else input_ids.device
         zero_allocator = BumpAllocator(

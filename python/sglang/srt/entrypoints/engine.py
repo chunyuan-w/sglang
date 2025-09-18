@@ -726,6 +726,9 @@ def _launch_subprocesses(
             pp_size_per_node * (server_args.node_rank // nnodes_per_tp_group + 1),
         )
 
+        # ready_event = mp.Event()
+        # done_event = mp.Event()        
+        
         for pp_rank in pp_rank_range:
             for tp_rank in tp_rank_range:
                 reader, writer = mp.Pipe(duplex=False)
@@ -747,6 +750,9 @@ def _launch_subprocesses(
                         None,
                         writer,
                         None,
+                        False,
+                        # ready_event,
+                        # done_event,
                     ),
                 )
 
@@ -757,6 +763,7 @@ def _launch_subprocesses(
     
             # CPU TP processes
             for cpu_tp_rank in cpu_tp_rank_range:
+                print(f"my cpu_tp_rank: {cpu_tp_rank}")
                 reader, writer = mp.Pipe(duplex=False)
 
                 gpu_id = (
@@ -780,6 +787,8 @@ def _launch_subprocesses(
                         writer,
                         None,
                         True, # is_cpu_moe
+                        # ready_event,
+                        # done_event,
                     ),
                 )
 
@@ -798,6 +807,7 @@ def _launch_subprocesses(
         proc.start()
         scheduler_procs.append(proc)
 
+    print(f"my node_rank: {server_args.node_rank}")
     if server_args.node_rank >= 1:
         # In multi-node cases, non-zero rank nodes do not need to run tokenizer or detokenizer,
         # so they can just wait here.
@@ -860,9 +870,11 @@ def _launch_subprocesses(
             raise RuntimeError(
                 "Initialization failed. Please see the error messages above."
             )
+        print(f"my pipe readers {i}")
         scheduler_infos.append(data)
 
     # Assume all schedulers have the same scheduler_info
+    print("my done loading")
     scheduler_info = scheduler_infos[0]
     tokenizer_manager.max_req_input_len = scheduler_info["max_req_input_len"]
     return tokenizer_manager, template_manager, scheduler_info
