@@ -178,6 +178,7 @@ class ModelRunner:
         is_cpu_moe: bool = False,
         ready_event = None,
         done_event = None,
+        shared_tensors = None,
     ):
         # Parse args
         self.mem_fraction_static = mem_fraction_static
@@ -198,6 +199,7 @@ class ModelRunner:
         self.dist_port = nccl_port if not is_cpu_moe else 20000
         self.ready_event = ready_event
         self.done_event = done_event
+        self.shared_tensors = shared_tensors
         self.server_args = server_args
         self.is_draft_worker = is_draft_worker
         self.is_generation = model_config.is_generation
@@ -708,6 +710,7 @@ class ModelRunner:
             device_config = DeviceConfig(self.device)
             device_config.ready_event = self.ready_event
             device_config.done_event = self.done_event
+            device_config.shared_tensors = self.shared_tensors
             
             self.model = get_model(
                 model_config=self.model_config,

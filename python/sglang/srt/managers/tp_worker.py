@@ -66,6 +66,7 @@ class TpModelWorker:
         is_cpu_moe: Optional[bool] = False,
         ready_event = None,
         done_event = None,
+        shared_tensors = None,
     ):
         # Parse args
         self.tp_size = server_args.tp_size if not is_cpu_moe else server_args.cpu_tp_size
@@ -103,6 +104,7 @@ class TpModelWorker:
             is_cpu_moe=is_cpu_moe,
             ready_event=ready_event,
             done_event=done_event,
+            shared_tensors=shared_tensors,
         )
         if server_args.skip_tokenizer_init:
             self.tokenizer = self.processor = None

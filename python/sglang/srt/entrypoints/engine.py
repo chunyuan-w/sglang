@@ -729,6 +729,18 @@ def _launch_subprocesses(
         ready_event = mp.Event()
         done_event = mp.Event()        
         
+        # TODO: we don't know M, K, topk and dtype here
+        M = 160
+        K = 2048
+        topk = 6
+        dtype = torch.bfloat16
+        shared_hidden_states = torch.empty(M, K, dtype=dtype, pin_memory=True).share_memory_()
+        shared_topk_weights = torch.empty(M, topk, dtype=torch.float32, pin_memory=True).share_memory_()
+        shared_topk_ids = torch.empty(M, topk, dtype=torch.int32, pin_memory=True).share_memory_()
+        shared_output = torch.empty(M, K, dtype=dtype, pin_memory=True).share_memory_()
+
+        shared_tensors = [shared_hidden_states, shared_topk_weights, shared_topk_ids, shared_output]
+        
         for pp_rank in pp_rank_range:
             for tp_rank in tp_rank_range:
                 reader, writer = mp.Pipe(duplex=False)
@@ -753,6 +765,7 @@ def _launch_subprocesses(
                         False,
                         ready_event,
                         done_event,
+                        shared_tensors,
                     ),
                 )
 
@@ -789,6 +802,7 @@ def _launch_subprocesses(
                         True, # is_cpu_moe
                         ready_event,
                         done_event,
+                        shared_tensors,
                     ),
                 )
 

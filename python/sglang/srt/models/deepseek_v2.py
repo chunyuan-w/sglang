@@ -293,6 +293,7 @@ class DeepseekV2MoE(nn.Module):
         is_nextn: bool = False,
         ready_event=None,
         done_event=None,        
+        shared_tensors=None,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -309,6 +310,7 @@ class DeepseekV2MoE(nn.Module):
         
         self.ready_event = ready_event
         self.done_event = done_event
+        self.shared_tensors = shared_tensors
 
         if self.tp_size > config.n_routed_experts:
             raise ValueError(
@@ -489,8 +491,58 @@ class DeepseekV2MoE(nn.Module):
             topk_output = self.topk(hidden_states, router_logits)
             
             # TODO: set ready_event.ready()
-            print(f"my ready_event before moe: {self.ready_event}", flush=True)
-            print(f"my done_event before moe: {self.done_event}", flush=True)            
+            # print(f"my ready_event before moe: {self.ready_event}", flush=True)
+            # print(f"my done_event before moe: {self.done_event}", flush=True)   
+            
+            M = hidden_states.size(0)
+            # K = hidden_states.size(1)
+            # dtype = hidden_states.dtype
+            
+            # topk = topk_output[0].size(1)
+            # dtype_topk_weights = topk_output[0].dtype
+            # dtype_topk_ids = topk_output[1].dtype
+
+            # # TODO: how to allocate this once instead of during runtime
+            # shared_hidden_states = torch.empty(M, K, dtype=dtype, pin_memory=True).share_memory_()
+            # shared_output = torch.empty(M, K, dtype=dtype, pin_memory=True).share_memory_()
+            # shared_topk_weights = torch.empty(M, topk, dtype=dtype_topk_weights, pin_memory=True).share_memory_()
+            # shared_topk_ids = torch.empty(M, topk, dtype=dtype_topk_ids, pin_memory=True).share_memory_()            
+            
+            # print(f"shared meta: {self.shared_tensors}", flush=True)
+            
+            # self.shared_meta[0] = shared_hidden_states
+            # self.shared_meta[1] = shared_output
+            # self.shared_meta[2] = shared_topk_weights
+            # self.shared_meta[3] = shared_topk_ids
+            
+            print(hidden_states.size())
+            print(topk_output[0].size())
+            print(topk_output[1].size())
+            shared_hidden_states = self.shared_tensors[0]
+            shared_hidden_states_view = shared_hidden_states[:M, :]
+            shared_hidden_states_view.copy_(hidden_states)
+            
+            shared_topk_weights = self.shared_tensors[1]
+            shared_topk_weights_view = shared_topk_weights[:M, :]
+            shared_topk_weights_view.copy_(topk_output[0])
+            
+            shared_topk_ids = self.shared_tensors[2]
+            shared_topk_ids_view = shared_topk_ids[:M, :]
+            shared_topk_ids_view.copy_(topk_output[1])
+            
+            print("my gpu moe inputs:", flush=True)
+            print(hidden_states[0][:5], flush=True)
+            print(topk_output[0][0][:5], flush=True)
+            print(topk_output[1][0][:5], flush=True)
+            
+            self.ready_event.set()
+            
+            # print("gpu process set ready event", flush=True)
+            # print("gpu process wait for done event", flush=True)
+            self.done_event.wait()    
+            # print("gpu process get done signal", flush=True)
+            
+            
             final_hidden_states = self.experts(hidden_states, topk_output)
             
             if not _is_cuda:
@@ -1772,6 +1824,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         alt_stream: Optional[torch.cuda.Stream] = None,
         ready_event=None,
         done_event=None,        
+        shared_tensors=None,        
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -1823,6 +1876,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 is_nextn=is_nextn,
                 ready_event=ready_event,
                 done_event=done_event,
+                shared_tensors=shared_tensors,
             )
         else:
             if enable_moe_dense_fully_dp():
@@ -1990,6 +2044,7 @@ class DeepseekV2Model(nn.Module):
         prefix: str = "",
         ready_event=None,
         done_event=None,
+        shared_tensors=None,
     ) -> None:
         super().__init__()
         self.padding_id = config.pad_token_id
@@ -2017,6 +2072,7 @@ class DeepseekV2Model(nn.Module):
                 alt_stream=self.alt_stream,
                 ready_event=ready_event,
                 done_event=done_event,
+                shared_tensors=shared_tensors,
             ),
             pp_rank=self.pp_group.rank_in_group,
             pp_size=self.pp_group.world_size,
@@ -2118,7 +2174,8 @@ class DeepseekV2ForCausalLM(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         ready_event=None,
-        done_event=None,        
+        done_event=None,    
+        shared_tensors=None,    
     ) -> None:
         super().__init__()
 
@@ -2139,7 +2196,7 @@ class DeepseekV2ForCausalLM(nn.Module):
         self.quant_config = quant_config
         self.determine_num_fused_shared_experts()
         self.model = DeepseekV2Model(
-            config, quant_config, prefix=add_prefix("model", prefix), ready_event=ready_event, done_event=done_event
+            config, quant_config, prefix=add_prefix("model", prefix), ready_event=ready_event, done_event=done_event, shared_tensors=shared_tensors,
         )
         self.lm_head = ParallelLMHead(
             config.vocab_size,
