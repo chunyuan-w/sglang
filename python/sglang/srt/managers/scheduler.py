@@ -261,7 +261,6 @@ class Scheduler(
         context = zmq.Context(2)
         self.idle_sleeper = None
 
-        print(f"my check rank: {self.attn_tp_rank}, {self.is_cpu_moe}", flush=True)
         if self.pp_rank == 0 and self.attn_tp_rank == 0 and not self.is_cpu_moe:
             self.recv_from_tokenizer = get_zmq_socket(
                 context, zmq.PULL, port_args.scheduler_input_ipc_name, False
@@ -801,25 +800,16 @@ class Scheduler(
                 self.done_event.set()
                 # print("cpu moe process set done event", flush=True)
             else:
-                print("gpu processs", flush=True)
-                
                 recv_reqs = self.recv_requests()
-                print("done recv_requests", flush=True)
-                
                 self.process_input_requests(recv_reqs)
-                print("done process_input_requests", flush=True)
-                
 
                 batch = self.get_next_batch_to_run()
-                print("done get_next_batch_to_run", flush=True)
                 self.cur_batch = batch
 
                 if batch:
                     result = self.run_batch(batch)
-                    print("done run_batch", flush=True)
                     self.process_batch_result(batch, result)
                 else:
-                    print("idle", flush=True)
                     # When the server is idle, do self-check and re-init some states
                     self.self_check_during_idle()
 
@@ -1002,13 +992,9 @@ class Scheduler(
                 self.self_check_during_idle()
 
     def recv_requests(self) -> List[Req]:
-        print("enter recv_requests", flush=True)
-        
-        
         """Receive results at tp_rank = 0 and broadcast it to all other TP ranks."""
 
         if self.recv_skipper is not None:
-            print("self.recv_skipper is not None", flush=True)
             last_forward_mode = (
                 self.last_batch.forward_mode if self.last_batch is not None else None
             )
@@ -1019,38 +1005,24 @@ class Scheduler(
         if self.pp_rank == 0:
             # if self.attn_tp_rank == 0 and not self.is_cpu_moe:
             if self.attn_tp_rank == 0 and not self.is_cpu_moe:
-                print("enter rank 0", flush=True)
-                
                 recv_reqs = []
 
                 while True:
-                    print(f"self.recv_from_tokenizer={self.recv_from_tokenizer}", flush=True)
-
                     try:
                         recv_req = self.recv_from_tokenizer.recv_pyobj(zmq.NOBLOCK)
                     except zmq.ZMQError:
-                        print("recv_from_tokenizer error", flush=True)
                         break
-                    
-                    print("hit recv_reqs append 111", flush=True)
                     recv_reqs.append(recv_req)
 
                 while True:
                     try:
                         recv_rpc = self.recv_from_rpc.recv_pyobj(zmq.NOBLOCK)
                     except zmq.ZMQError:
-                        print("recv_from_rpc error", flush=True)
-                        
                         break
-                    print("hit recv_reqs append 222", flush=True)
                     recv_reqs.append(recv_rpc)
             else:
-                print("recv_reqs = None", flush=True)
-                
                 recv_reqs = None
         else:
-            print("self.pp_rank != 0", flush=True)
-            
             if self.attn_tp_rank == 0:
                 dp_offset = self.attn_dp_rank * self.attn_tp_size
                 recv_reqs = point_to_point_pyobj(
@@ -1064,13 +1036,9 @@ class Scheduler(
                 recv_reqs = None
 
         if self.input_blocker is not None:
-            print("self.input_blocker is not None", flush=True)
-            
             recv_reqs = self.input_blocker.handle(recv_reqs)
 
         if self.server_args.enable_dp_attention:
-            print("self.server_args.enable_dp_attention", flush=True)
-            
             if self.attn_tp_rank == 0:
                 work_reqs = [
                     req
@@ -1123,7 +1091,6 @@ class Scheduler(
                 self.tp_cpu_group,
                 src=self.tp_group.ranks[0],
             )
-        print(f"recv_reqs {recv_reqs}", flush=True)
         return recv_reqs
 
     def process_input_requests(self, recv_reqs: List):
@@ -1603,13 +1570,10 @@ class Scheduler(
         if self.grammar_queue:
             self.move_ready_grammar_requests()
 
-        print(f"in get_new_batch_prefill: self.running_batch.batch_is_full={self.running_batch.batch_is_full}, len(self.waiting_queue)={len(self.waiting_queue)}, self.chunked_req is None={self.chunked_req is None}", flush=True)
         # Handle the cases where prefill is not allowed
         if (
             self.running_batch.batch_is_full or len(self.waiting_queue) == 0
         ) and self.chunked_req is None:
-            print("None 111", flush=True)
-            
             return None
 
         running_bs = len(self.running_batch.reqs)
@@ -1715,8 +1679,6 @@ class Scheduler(
             self.log_prefill_stats(adder, can_run_list, running_bs)
 
         # Create a new batch
-        print("init_new", flush=True)
-        
         new_batch = ScheduleBatch.init_new(
             can_run_list,
             self.req_to_token_pool,
@@ -1734,8 +1696,6 @@ class Scheduler(
             )
 
         new_batch.prepare_for_extend()
-        print("done prepare_for_extend", flush=True)
-        
 
         # Mixed-style chunked prefill
         if (
@@ -1755,8 +1715,6 @@ class Scheduler(
         else:
             new_batch.decoding_reqs = None
 
-        print("before return new_batch", flush=True)
-        
         return new_batch
 
     def update_running_batch(self, batch: ScheduleBatch) -> Optional[ScheduleBatch]:
@@ -2151,8 +2109,6 @@ class Scheduler(
             tp_group = self.tp_cpu_group
 
         if tp_size > 1:
-            print(f"is_cpu_moe: {self.is_cpu_moe}, tp_size: {tp_size} > 1", flush=True)
-            
             # Sync across TP ranks to make sure they have the same number of ready requests
             tensor = torch.tensor([num_ready_reqs, num_timeout_reqs], dtype=torch.int32)
             torch.distributed.all_reduce(
@@ -2171,8 +2127,6 @@ class Scheduler(
                         f"Invalid grammar request: {req.grammar_key=}"
                     )
         else:
-            print(f"is_cpu_moe: {self.is_cpu_moe}, tp_size: {tp_size} == 1", flush=True)
-            
             num_ready_reqs_max = num_ready_reqs
             num_timeout_reqs_max = num_timeout_reqs
 
@@ -2184,8 +2138,6 @@ class Scheduler(
             self.grammar_backend.set_cache(req.grammar_key, INVALID_GRAMMAR_OBJ)
         num_ready_reqs = num_ready_reqs_max + num_timeout_reqs_max
 
-        print(f"is_cpu_moe: {self.is_cpu_moe}, num_ready_reqs: {num_ready_reqs}", flush=True)
-        
         self._extend_requests_to_queue(self.grammar_queue[:num_ready_reqs])
         self.grammar_queue = self.grammar_queue[num_ready_reqs:]
 
