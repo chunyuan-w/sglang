@@ -262,7 +262,7 @@ class Scheduler(
         self.idle_sleeper = None
 
         print(f"my check rank: {self.attn_tp_rank}, {self.is_cpu_moe}", flush=True)
-        if self.pp_rank == 0 and self.attn_tp_rank == 0:
+        if self.pp_rank == 0 and self.attn_tp_rank == 0 and not self.is_cpu_moe:
             self.recv_from_tokenizer = get_zmq_socket(
                 context, zmq.PULL, port_args.scheduler_input_ipc_name, False
             )
