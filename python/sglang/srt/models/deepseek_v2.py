@@ -535,7 +535,7 @@ class DeepseekV2MoE(nn.Module):
             # print(topk_output[0][0][:5], flush=True)
             # print(topk_output[1][0][:5], flush=True)
             
-            self.ready_event.set()
+            self.ready_event.wait()
             
             # print("gpu process set ready event", flush=True)
             # print("gpu process wait for done event", flush=True)
@@ -545,12 +545,11 @@ class DeepseekV2MoE(nn.Module):
             
             # final_hidden_states = self.experts(hidden_states, topk_output)
             
-            shared_output = self.shared_tensors[3]
-            shared_output_view = shared_output[:M, :]
+            shared_output_tensor = self.shared_tensors[3]
+            shared_output_view = shared_output_tensor[:M, :]
             final_hidden_states = shared_output_view.to("cuda", non_blocking=True)
             print(f"gpu  shared_output_view: {shared_output_view[0][:5]}", flush=True)
             print(f"gpu final_hidden_states: {final_hidden_states[0][:5]}", flush=True)
-            
             
             if not _is_cuda:
                 final_hidden_states *= self.routed_scaling_factor
@@ -2138,8 +2137,9 @@ class DeepseekV2Model(nn.Module):
         for i in range(normal_start_layer, normal_end_layer):
             with get_global_expert_distribution_recorder().with_current_layer(i):
                 layer = self.layers[i]
-                print(f"gpu layer_id: {i}", flush=True)
+                print(f"gpu layer_id: {i} is sparse: {layer.is_layer_sparse}", flush=True)
                 
+                # TODO: do we ned to set event here?
                 self.shared_tensors[4].fill_(i)
                 hidden_states, residual = layer(
                     positions, hidden_states, forward_batch, residual, zero_allocator
@@ -2295,13 +2295,23 @@ class DeepseekV2ForCausalLM(nn.Module):
     ) -> torch.Tensor:
         print(f"cpu layer_id: {layer_id.item()}", flush=True)
         
-        moe_output = self.model.layers[layer_id.item()].mlp.experts(
-            shared_hidden_states, [shared_topk_weights, shared_topk_ids]
-        )
+        decoder_layer = self.model.layers[layer_id.item()]
+        if decoder_layer.is_layer_sparse:
+        # if True:
+            
+            print(f"cpu input on rank {decoder_layer.mlp.experts.moe_tp_rank}: {shared_hidden_states[0][:5]} {shared_topk_weights[0][:5]} {shared_topk_ids[0][:5]}", flush=True)
+            
+            
+            moe_output = decoder_layer.mlp.experts(
+                shared_hidden_states, [shared_topk_weights, shared_topk_ids]
+            )
+            
+            print(f"cpu compute result on rank {decoder_layer.mlp.experts.moe_tp_rank}: {moe_output[0][:5]}", flush=True)
+            
 
-        M = shared_hidden_states.size(0)
-        shared_output_view = shared_output[:M, :]
-        shared_output_view.copy_(moe_output)
+            M = shared_hidden_states.size(0)
+            shared_output_view = shared_output[:M, :]
+            shared_output_view.copy_(moe_output)
 
     @property
     def start_layer(self):

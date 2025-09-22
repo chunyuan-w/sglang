@@ -788,6 +788,7 @@ class Scheduler(
         while True:
             if self.is_cpu_moe:
                 print("is cpu moe", flush=True)
+                
                 self.ready_event.wait()
                 
                 # print("my cpu moe inputs:", flush=True)
@@ -798,9 +799,9 @@ class Scheduler(
                 # TODO: call cpu moe here
                 
                 self.tp_worker.model_runner.model.forward_moe_cpu(*self.shared_tensors)
-                print(f"cpu moe output: {self.shared_tensors[3][0][:5]}", flush=True)
+                print(f"cpu moe output on rank {self.tp_rank}: {self.shared_tensors[3][0][:5]}", flush=True)
                 
-                self.done_event.set()
+                self.done_event.wait()
                 # print("cpu moe process set done event", flush=True)
             else:
                 recv_reqs = self.recv_requests()

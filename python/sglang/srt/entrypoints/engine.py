@@ -726,8 +726,10 @@ def _launch_subprocesses(
             pp_size_per_node * (server_args.node_rank // nnodes_per_tp_group + 1),
         )
 
-        ready_event = mp.Event()
-        done_event = mp.Event()        
+        # TODO: test if server_args.tp_size works well
+        assert server_args.tp_size == 1
+        ready_event = mp.Barrier(server_args.cpu_tp_size + server_args.tp_size)  # tp CPUs + 1 GPU
+        done_event = mp.Barrier(server_args.cpu_tp_size + server_args.tp_size)      
         
         # TODO: we don't know M, K, topk and dtype here
         M = 160
