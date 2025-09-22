@@ -2305,6 +2305,8 @@ class DeepseekV2ForCausalLM(nn.Module):
             moe_output = decoder_layer.mlp.experts(
                 shared_hidden_states, [shared_topk_weights, shared_topk_ids]
             )
+            if decoder_layer.mlp.tp_size > 1:
+                moe_output = tensor_model_parallel_all_reduce(moe_output)
             
             print(f"cpu compute result on rank {decoder_layer.mlp.experts.moe_tp_rank}: {moe_output[0][:5]}", flush=True)
             
