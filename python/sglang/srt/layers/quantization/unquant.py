@@ -335,18 +335,19 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             moe_runner_config.activation == "silu"
         ), f"activation = {moe_runner_config.activation} is not supported."
 
+        # TODO: do we still need run_moe_on_cpu here?
         if run_moe_on_cpu:
             assert (
                 use_intel_amx_backend(layer)
                 and not moe_runner_config.apply_router_weight_on_input
             )
 
-            ori_device = x.device
+            # ori_device = x.device
 
             # TODO: use torch.ops.sgl_kernel
             from sglang.srt.layers.moe.topk import apply_topk_weights_cpu
 
-            topk_weights, topk_ids, _ = topk_output
+            topk_weights, topk_ids = topk_output
             x, topk_weights = apply_topk_weights_cpu(
                 moe_runner_config.apply_router_weight_on_input, topk_weights, x
             )
@@ -354,8 +355,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 x.cpu(),
                 layer.w13_weight,
                 layer.w2_weight,
-                topk_weights.cpu(),
-                topk_ids.cpu(),
+                topk_weights,
+                topk_ids,
                 False,  # inplace See [Note] inplace should be False in fused_experts.
                 False,  # use_int8_w8a8
                 False,  # use_fp8_w8a16
@@ -366,7 +367,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 None,  # a2_scale
                 True,  # is_vnni
             )
-            return cpuout.to(ori_device)
+            return cpuout
 
         if (
             use_intel_amx_backend(layer)

@@ -515,9 +515,9 @@ class DeepseekV2MoE(nn.Module):
             # self.shared_meta[2] = shared_topk_weights
             # self.shared_meta[3] = shared_topk_ids
             
-            print(hidden_states.size())
-            print(topk_output[0].size())
-            print(topk_output[1].size())
+            # print(hidden_states.size())
+            # print(topk_output[0].size())
+            # print(topk_output[1].size())
             shared_hidden_states = self.shared_tensors[0]
             shared_hidden_states_view = shared_hidden_states[:M, :]
             shared_hidden_states_view.copy_(hidden_states)
@@ -530,10 +530,10 @@ class DeepseekV2MoE(nn.Module):
             shared_topk_ids_view = shared_topk_ids[:M, :]
             shared_topk_ids_view.copy_(topk_output[1])
             
-            print("my gpu moe inputs:", flush=True)
-            print(hidden_states[0][:5], flush=True)
-            print(topk_output[0][0][:5], flush=True)
-            print(topk_output[1][0][:5], flush=True)
+            # print("my gpu moe inputs:", flush=True)
+            # print(hidden_states[0][:5], flush=True)
+            # print(topk_output[0][0][:5], flush=True)
+            # print(topk_output[1][0][:5], flush=True)
             
             self.ready_event.set()
             
@@ -543,7 +543,14 @@ class DeepseekV2MoE(nn.Module):
             # print("gpu process get done signal", flush=True)
             
             
-            final_hidden_states = self.experts(hidden_states, topk_output)
+            # final_hidden_states = self.experts(hidden_states, topk_output)
+            
+            shared_output = self.shared_tensors[3]
+            shared_output_view = shared_output[:M, :]
+            final_hidden_states = shared_output_view.to("cuda", non_blocking=True)
+            print(f"gpu  shared_output_view: {shared_output_view[0][:5]}", flush=True)
+            print(f"gpu final_hidden_states: {final_hidden_states[0][:5]}", flush=True)
+            
             
             if not _is_cuda:
                 final_hidden_states *= self.routed_scaling_factor
@@ -2051,6 +2058,7 @@ class DeepseekV2Model(nn.Module):
         self.vocab_size = config.vocab_size
         self.first_k_dense_replace = config.first_k_dense_replace
         self.pp_group = get_pp_group()
+        self.shared_tensors=shared_tensors
 
         if self.pp_group.is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -2130,6 +2138,9 @@ class DeepseekV2Model(nn.Module):
         for i in range(normal_start_layer, normal_end_layer):
             with get_global_expert_distribution_recorder().with_current_layer(i):
                 layer = self.layers[i]
+                print(f"gpu layer_id: {i}", flush=True)
+                
+                self.shared_tensors[4].fill_(i)
                 hidden_states, residual = layer(
                     positions, hidden_states, forward_batch, residual, zero_allocator
                 )
@@ -2272,6 +2283,25 @@ class DeepseekV2ForCausalLM(nn.Module):
             )
         else:
             return hidden_states
+
+    @torch.no_grad()
+    def forward_moe_cpu(
+        self,
+        shared_hidden_states: torch.Tensor,
+        shared_topk_weights: torch.Tensor,
+        shared_topk_ids: torch.Tensor,
+        shared_output: torch.Tensor,
+        layer_id: int,
+    ) -> torch.Tensor:
+        print(f"cpu layer_id: {layer_id.item()}", flush=True)
+        
+        moe_output = self.model.layers[layer_id.item()].mlp.experts(
+            shared_hidden_states, [shared_topk_weights, shared_topk_ids]
+        )
+
+        M = shared_hidden_states.size(0)
+        shared_output_view = shared_output[:M, :]
+        shared_output_view.copy_(moe_output)
 
     @property
     def start_layer(self):

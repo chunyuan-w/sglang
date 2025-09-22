@@ -738,8 +738,9 @@ def _launch_subprocesses(
         shared_topk_weights = torch.empty(M, topk, dtype=torch.float32, pin_memory=True).share_memory_()
         shared_topk_ids = torch.empty(M, topk, dtype=torch.int32, pin_memory=True).share_memory_()
         shared_output = torch.empty(M, K, dtype=dtype, pin_memory=True).share_memory_()
+        shared_layer_id = torch.tensor(-1, dtype=torch.int)
 
-        shared_tensors = [shared_hidden_states, shared_topk_weights, shared_topk_ids, shared_output]
+        shared_tensors = [shared_hidden_states, shared_topk_weights, shared_topk_ids, shared_output, shared_layer_id]
         
         for pp_rank in pp_rank_range:
             for tp_rank in tp_rank_range:
