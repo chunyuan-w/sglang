@@ -2952,6 +2952,11 @@ class DeepseekV2ForCausalLM(nn.Module):
                                 # modelopt ckpt contains not needed weights for MTP module:
                                 # model.decoder.self_attn.attn_mqa.v_scale and
                                 # model.decoder.self_attn.attn_mqa.k_scale
+                                
+                                # when moe offload is on, for non-cpu processes, moe weight params won't be loaded
+                                if "mlp.experts." in name and run_moe_on_cpu and not self.is_cpu_moe:
+                                    continue
+                                    
                                 logger.warning(f"{name} not found in params_dict.")
                                 continue
                             param = params_dict[name]
