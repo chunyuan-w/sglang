@@ -163,7 +163,7 @@ logger = logging.getLogger(__name__)
 run_moe_on_cpu = bool(int(os.getenv("RUN_MOE_ON_CPU", "0")))
 
 
-class MoEPlaceHolder:
+class GpuDeepseekV2MoEPlaceHolder:
     # TODO: This is ported from layer.py. Refactor code to remove duplications
     def __init__(self, quant_config, prefix: str = "",):
         self.use_triton_kernels = get_moe_runner_backend().is_triton_kernel()
@@ -180,6 +180,132 @@ class MoEPlaceHolder:
         return isinstance(self.quant_method, ModelOptNvFp4FusedMoEMethod) or (
             isinstance(self.quant_method, Fp8MoEMethod)
             and self.quant_method.use_cutlass_fused_experts_fp8
+        )        
+
+
+class DeepseekV2MoEPlaceHolder(nn.Module):
+
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        layer_id: int,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        alt_stream: Optional[torch.cuda.Stream] = None,
+        is_nextn: bool = False,
+        ready_event=None,
+        done_event=None,        
+        shared_tensors=None,
+    ):
+        super().__init__()
+        
+        # TODO: can we inherit DeepseekV2MoE directly? similar problems for all the PlaceHolder classes
+        # We need to set the attr but we don't want to init all the submodules
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.routed_scaling_factor = config.routed_scaling_factor
+        self.n_shared_experts = config.n_shared_experts
+        self.num_fused_shared_experts = (
+            0
+            if global_server_args_dict["disable_shared_experts_fusion"]
+            else config.n_shared_experts
+        )
+        self.config = config
+        self.layer_id = layer_id
+        self.alt_stream = alt_stream
+        
+        self.ready_event = ready_event
+        self.done_event = done_event
+        self.shared_tensors = shared_tensors
+
+        self.experts = get_moe_impl_class(quant_config)(
+            num_experts=config.n_routed_experts
+            + self.num_fused_shared_experts
+            + global_server_args_dict["ep_num_redundant_experts"],
+            num_fused_shared_experts=self.num_fused_shared_experts,
+            top_k=config.num_experts_per_tok + self.num_fused_shared_experts,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            layer_id=self.layer_id,
+            quant_config=quant_config,
+            routed_scaling_factor=self.routed_scaling_factor,
+            prefix=add_prefix("experts", prefix),
+        )
+
+class DeepseekV2DecoderLayerPlaceHolder(nn.Module):
+
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        layer_id: int,
+        quant_config: Optional[QuantizationConfig] = None,
+        is_nextn: bool = False,
+        prefix: str = "",
+        alt_stream: Optional[torch.cuda.Stream] = None,
+        ready_event=None,
+        done_event=None,        
+        shared_tensors=None,        
+    ) -> None:
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        self.config = config
+        self.layer_id = layer_id
+        self.is_layer_sparse = self._is_layer_sparse(layer_id, is_nextn=is_nextn)
+        if self.is_layer_sparse:
+            self.mlp = DeepseekV2MoEPlaceHolder(
+                config=config,
+                quant_config=quant_config,
+                prefix=add_prefix("mlp", prefix),
+                layer_id=self.layer_id,
+                alt_stream=alt_stream,
+                is_nextn=is_nextn,
+                ready_event=ready_event,
+                done_event=done_event,
+                shared_tensors=shared_tensors,
+            )
+        else:
+            self.mlp = None        
+        
+    # TODO: this is copied from DeepseekV2DecoderLayer
+    def _is_layer_sparse(self, layer_id: int, is_nextn: bool) -> bool:
+        return is_nextn or (
+            self.config.n_routed_experts is not None
+            and layer_id >= self.config.first_k_dense_replace
+            and layer_id % self.config.moe_layer_freq == 0
+        )        
+        
+
+class DeepseekV2ModelPlaceHolder(nn.Module):
+    fall_back_to_pt_during_load = False
+    
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        ready_event=None,
+        done_event=None,
+        shared_tensors=None,
+    ) -> None:
+        super().__init__()
+        self.pp_group = get_pp_group()
+        self.shared_tensors=shared_tensors
+        
+        self.alt_stream = torch.cuda.Stream() if _is_cuda else None
+        self.layers, self.start_layer, self.end_layer = make_layers(
+            config.num_hidden_layers,
+            lambda idx, prefix: DeepseekV2DecoderLayerPlaceHolder(
+                config=config,
+                layer_id=idx,
+                quant_config=quant_config,
+                prefix=prefix,
+                alt_stream=self.alt_stream,
+                ready_event=ready_event,
+                done_event=done_event,
+                shared_tensors=shared_tensors,
+            ),
+            pp_rank=self.pp_group.rank_in_group,
+            pp_size=self.pp_group.world_size,
+            prefix=add_prefix("layers", prefix),
         )        
 
 
@@ -356,7 +482,7 @@ class DeepseekV2MoE(nn.Module):
         orig_device = self.gate.weight.device
         # When cpu offload is on, for gpu rank, don't load moe
         if run_moe_on_cpu and  orig_device != torch.device("cpu"):
-            self.experts = MoEPlaceHolder(quant_config, prefix=add_prefix("experts", prefix))
+            self.experts = GpuDeepseekV2MoEPlaceHolder(quant_config, prefix=add_prefix("experts", prefix))
         else:
             self.experts = get_moe_impl_class(quant_config)(
                 num_experts=config.n_routed_experts
@@ -2232,10 +2358,19 @@ class DeepseekV2ForCausalLM(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.quant_config = quant_config
         self.determine_num_fused_shared_experts()
+        self.is_cpu_moe = is_cpu_moe
+        
+        # TODO: define cpu model structure and load_weights functions??
+        # do we need to define a completely new class for cpu deepseek model??
+        if run_moe_on_cpu and self.is_cpu_moe:
+            self.model = DeepseekV2ModelPlaceHolder(
+                config, quant_config, prefix=add_prefix("model", prefix), ready_event=ready_event, done_event=done_event, shared_tensors=shared_tensors,
+            )
+            return
+        
         self.model = DeepseekV2Model(
             config, quant_config, prefix=add_prefix("model", prefix), ready_event=ready_event, done_event=done_event, shared_tensors=shared_tensors,
         )
-        self.is_cpu_moe = is_cpu_moe
         self.lm_head = ParallelLMHead(
             config.vocab_size,
             config.hidden_size,
@@ -2655,6 +2790,12 @@ class DeepseekV2ForCausalLM(nn.Module):
                         f"mlp.experts.{self.config.n_routed_experts}",
                     )
 
+                # For cpu process, we only load moe weights and skip other layers
+                # TODO: refactor the code here.
+                if run_moe_on_cpu and self.is_cpu_moe:
+                    if "mlp.experts." not in name:
+                        continue
+                
                 weight_names.append(name)
 
                 if not is_nextn:
