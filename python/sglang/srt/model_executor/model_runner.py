@@ -200,6 +200,7 @@ class ModelRunner:
         self.ready_event = ready_event
         self.done_event = done_event
         self.shared_tensors = shared_tensors
+        self.is_cpu_moe = is_cpu_moe
         self.server_args = server_args
         self.is_draft_worker = is_draft_worker
         self.is_generation = model_config.is_generation
@@ -711,6 +712,7 @@ class ModelRunner:
             device_config.ready_event = self.ready_event
             device_config.done_event = self.done_event
             device_config.shared_tensors = self.shared_tensors
+            device_config.is_cpu_moe = self.is_cpu_moe
             
             self.model = get_model(
                 model_config=self.model_config,

@@ -193,6 +193,7 @@ def _initialize_model(
         ready_event=load_config.ready_event,
         done_event=load_config.done_event,
         shared_tensors=load_config.shared_tensors,
+        is_cpu_moe=load_config.is_cpu_moe,
     )
 
 
@@ -454,6 +455,7 @@ class DefaultModelLoader(BaseModelLoader):
         self.load_config.ready_event = device_config.ready_event
         self.load_config.done_event = device_config.done_event
         self.load_config.shared_tensors = device_config.shared_tensors
+        self.load_config.is_cpu_moe = device_config.is_cpu_moe
 
         with set_default_torch_dtype(model_config.dtype):
             with target_device:

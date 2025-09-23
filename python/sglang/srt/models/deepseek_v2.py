@@ -76,6 +76,11 @@ from sglang.srt.layers.quantization.fp8_kernel import (
     per_tensor_quant_mla_fp8,
     per_token_group_quant_mla_deep_gemm_masked_fp8,
 )
+from sglang.srt.layers.quantization.modelopt_quant import ModelOptNvFp4FusedMoEMethod
+from sglang.srt.layers.quantization.fp8 import Fp8MoEMethod
+from sglang.srt.layers.moe import get_moe_runner_backend
+from sglang.srt.layers.quantization.base_config import QuantizeMethodBase
+from sglang.srt.layers.quantization.unquant import UnquantizedFusedMoEMethod
 from sglang.srt.layers.quantization.fp8_utils import (
     block_quant_dequant,
     block_quant_to_tensor_quant,
@@ -156,6 +161,26 @@ _is_sm100_supported = is_cuda() and is_sm100_supported()
 logger = logging.getLogger(__name__)
 
 run_moe_on_cpu = bool(int(os.getenv("RUN_MOE_ON_CPU", "0")))
+
+
+class MoEPlaceHolder:
+    # TODO: This is ported from layer.py. Refactor code to remove duplications
+    def __init__(self, quant_config, prefix: str = "",):
+        self.use_triton_kernels = get_moe_runner_backend().is_triton_kernel()
+        
+        if quant_config is None:
+            self.quant_method: Optional[QuantizeMethodBase] = UnquantizedFusedMoEMethod(
+                self.use_triton_kernels
+            )
+        else:
+            self.quant_method = quant_config.get_quant_method(self, prefix)
+        assert self.quant_method is not None        
+        
+    def should_fuse_routed_scaling_factor_in_topk(self):
+        return isinstance(self.quant_method, ModelOptNvFp4FusedMoEMethod) or (
+            isinstance(self.quant_method, Fp8MoEMethod)
+            and self.quant_method.use_cutlass_fused_experts_fp8
+        )        
 
 
 class AttnForwardMethod(IntEnum):
@@ -329,10 +354,10 @@ class DeepseekV2MoE(nn.Module):
         )
 
         orig_device = self.gate.weight.device
-        moe_device = orig_device
-        if run_moe_on_cpu:
-            moe_device = torch.device("cpu")
-        with moe_device:
+        # When cpu offload is on, for gpu rank, don't load moe
+        if run_moe_on_cpu and  orig_device != torch.device("cpu"):
+            self.experts = MoEPlaceHolder(quant_config, prefix=add_prefix("experts", prefix))
+        else:
             self.experts = get_moe_impl_class(quant_config)(
                 num_experts=config.n_routed_experts
                 + self.num_fused_shared_experts
@@ -548,8 +573,8 @@ class DeepseekV2MoE(nn.Module):
             shared_output_tensor = self.shared_tensors[3]
             shared_output_view = shared_output_tensor[:M, :]
             final_hidden_states = shared_output_view.to("cuda", non_blocking=True)
-            print(f"gpu  shared_output_view: {shared_output_view[0][:5]}", flush=True)
-            print(f"gpu final_hidden_states: {final_hidden_states[0][:5]}", flush=True)
+            # print(f"gpu  shared_output_view: {shared_output_view[0][:5]}", flush=True)
+            # print(f"gpu final_hidden_states: {final_hidden_states[0][:5]}", flush=True)
             
             if not _is_cuda:
                 final_hidden_states *= self.routed_scaling_factor
@@ -2102,7 +2127,7 @@ class DeepseekV2Model(nn.Module):
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> Union[torch.Tensor, PPProxyTensors]:
         # Use different logic for cpu and gpu process when offload is on?
-        print(f"my in deepseek fwd {input_ids.device}", flush=True)
+        # print(f"my in deepseek fwd {input_ids.device}", flush=True)
         
         total_num_layers = self.end_layer - self.start_layer
         device = input_embeds.device if input_embeds is not None else input_ids.device
@@ -2137,7 +2162,7 @@ class DeepseekV2Model(nn.Module):
         for i in range(normal_start_layer, normal_end_layer):
             with get_global_expert_distribution_recorder().with_current_layer(i):
                 layer = self.layers[i]
-                print(f"gpu layer_id: {i} is sparse: {layer.is_layer_sparse}", flush=True)
+                # print(f"gpu layer_id: {i} is sparse: {layer.is_layer_sparse}", flush=True)
                 
                 # TODO: do we ned to set event here?
                 self.shared_tensors[4].fill_(i)
@@ -2186,7 +2211,8 @@ class DeepseekV2ForCausalLM(nn.Module):
         prefix: str = "",
         ready_event=None,
         done_event=None,    
-        shared_tensors=None,    
+        shared_tensors=None,
+        is_cpu_moe=False,
     ) -> None:
         super().__init__()
 
@@ -2209,6 +2235,7 @@ class DeepseekV2ForCausalLM(nn.Module):
         self.model = DeepseekV2Model(
             config, quant_config, prefix=add_prefix("model", prefix), ready_event=ready_event, done_event=done_event, shared_tensors=shared_tensors,
         )
+        self.is_cpu_moe = is_cpu_moe
         self.lm_head = ParallelLMHead(
             config.vocab_size,
             config.hidden_size,
@@ -2293,13 +2320,13 @@ class DeepseekV2ForCausalLM(nn.Module):
         shared_output: torch.Tensor,
         layer_id: int,
     ) -> torch.Tensor:
-        print(f"cpu layer_id: {layer_id.item()}", flush=True)
+        # print(f"cpu layer_id: {layer_id.item()}", flush=True)
         
         decoder_layer = self.model.layers[layer_id.item()]
         if decoder_layer.is_layer_sparse:
         # if True:
             
-            print(f"cpu input on rank {decoder_layer.mlp.experts.moe_tp_rank}: {shared_hidden_states[0][:5]} {shared_topk_weights[0][:5]} {shared_topk_ids[0][:5]}", flush=True)
+            # print(f"cpu input on rank {decoder_layer.mlp.experts.moe_tp_rank}: {shared_hidden_states[0][:5]} {shared_topk_weights[0][:5]} {shared_topk_ids[0][:5]}", flush=True)
             
             
             moe_output = decoder_layer.mlp.experts(
@@ -2308,7 +2335,7 @@ class DeepseekV2ForCausalLM(nn.Module):
             if decoder_layer.mlp.tp_size > 1:
                 moe_output = tensor_model_parallel_all_reduce(moe_output)
             
-            print(f"cpu compute result on rank {decoder_layer.mlp.experts.moe_tp_rank}: {moe_output[0][:5]}", flush=True)
+            # print(f"cpu compute result on rank {decoder_layer.mlp.experts.moe_tp_rank}: {moe_output[0][:5]}", flush=True)
             
 
             M = shared_hidden_states.size(0)
@@ -2689,6 +2716,11 @@ class DeepseekV2ForCausalLM(nn.Module):
                         if weight_name not in name:
                             continue
                         name = name.replace(weight_name, param_name)
+                        
+                        # When cpu offload is on, for gpu rank, don't load moe
+                        if "mlp.experts." in name and run_moe_on_cpu and not self.is_cpu_moe:
+                            continue
+
                         param = params_dict[name]
                         weight_loader = param.weight_loader
                         futures.append(
