@@ -66,6 +66,8 @@ class TpModelWorker:
         is_cpu_moe: Optional[bool] = False,
         ready_event = None,
         done_event = None,
+        tensor_queue = None,
+        gpu_path_flag = None,
         shared_tensors = None,
     ):
         # Parse args
@@ -104,6 +106,8 @@ class TpModelWorker:
             is_cpu_moe=is_cpu_moe,
             ready_event=ready_event,
             done_event=done_event,
+            tensor_queue=tensor_queue,
+            gpu_path_flag=gpu_path_flag,
             shared_tensors=shared_tensors,
         )
         if server_args.skip_tokenizer_init:

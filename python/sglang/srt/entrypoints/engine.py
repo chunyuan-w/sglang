@@ -730,9 +730,14 @@ def _launch_subprocesses(
         assert server_args.tp_size == 1
         ready_event = mp.Barrier(server_args.cpu_tp_size + server_args.tp_size)  # tp CPUs + 1 GPU
         done_event = mp.Barrier(server_args.cpu_tp_size + server_args.tp_size)      
+        tensor_queue = mp.Queue()
+        
+        # Shared integer: 0 = use preallocated, 1 = use queue
+        gpu_path_flag = mp.Value('i', 0)
+        
         
         # TODO: we don't know M, K, topk and dtype here
-        M = 160
+        M = 6
         K = 2048
         topk = 6
         dtype = torch.bfloat16
@@ -768,6 +773,8 @@ def _launch_subprocesses(
                         False,
                         ready_event,
                         done_event,
+                        tensor_queue,
+                        gpu_path_flag,
                         shared_tensors,
                     ),
                 )
@@ -805,6 +812,8 @@ def _launch_subprocesses(
                         True, # is_cpu_moe
                         ready_event,
                         done_event,
+                        tensor_queue,
+                        gpu_path_flag,
                         shared_tensors,
                     ),
                 )

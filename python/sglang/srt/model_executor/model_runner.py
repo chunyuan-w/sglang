@@ -178,6 +178,8 @@ class ModelRunner:
         is_cpu_moe: bool = False,
         ready_event = None,
         done_event = None,
+        tensor_queue = None,
+        gpu_path_flag = None,
         shared_tensors = None,
     ):
         # Parse args
@@ -199,6 +201,8 @@ class ModelRunner:
         self.dist_port = nccl_port if not is_cpu_moe else 20000
         self.ready_event = ready_event
         self.done_event = done_event
+        self.tensor_queue = tensor_queue
+        self.gpu_path_flag = gpu_path_flag
         self.shared_tensors = shared_tensors
         self.is_cpu_moe = is_cpu_moe
         self.server_args = server_args
@@ -711,6 +715,8 @@ class ModelRunner:
             device_config = DeviceConfig(self.device)
             device_config.ready_event = self.ready_event
             device_config.done_event = self.done_event
+            device_config.tensor_queue = self.tensor_queue
+            device_config.gpu_path_flag = self.gpu_path_flag
             device_config.shared_tensors = self.shared_tensors
             device_config.is_cpu_moe = self.is_cpu_moe
             

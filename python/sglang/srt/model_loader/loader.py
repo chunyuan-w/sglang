@@ -192,6 +192,8 @@ def _initialize_model(
         quant_config=quant_config,
         ready_event=load_config.ready_event,
         done_event=load_config.done_event,
+        tensor_queue=load_config.tensor_queue,
+        gpu_path_flag=load_config.gpu_path_flag,
         shared_tensors=load_config.shared_tensors,
         is_cpu_moe=load_config.is_cpu_moe,
     )
@@ -454,6 +456,8 @@ class DefaultModelLoader(BaseModelLoader):
         
         self.load_config.ready_event = device_config.ready_event
         self.load_config.done_event = device_config.done_event
+        self.load_config.tensor_queue = device_config.tensor_queue
+        self.load_config.gpu_path_flag = device_config.gpu_path_flag
         self.load_config.shared_tensors = device_config.shared_tensors
         self.load_config.is_cpu_moe = device_config.is_cpu_moe
 

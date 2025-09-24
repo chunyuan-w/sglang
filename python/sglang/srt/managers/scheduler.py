@@ -209,6 +209,8 @@ class Scheduler(
         is_cpu_moe: Optional[bool] = False,
         ready_event = None,
         done_event = None,
+        tensor_queue = None,
+        gpu_path_flag=None,
         shared_tensors = None,
     ):
         print("my init scheduler", flush=True)
@@ -222,6 +224,8 @@ class Scheduler(
         self.is_cpu_moe = is_cpu_moe
         self.ready_event = ready_event
         self.done_event = done_event
+        self.tensor_queue = tensor_queue
+        self.gpu_path_flag = gpu_path_flag
         self.shared_tensors = shared_tensors
         self.moe_ep_size = server_args.ep_size
         self.pp_size = server_args.pp_size
@@ -338,6 +342,8 @@ class Scheduler(
             is_cpu_moe=is_cpu_moe,
             ready_event=ready_event,
             done_event=done_event,
+            tensor_queue=tensor_queue,
+            gpu_path_flag=gpu_path_flag,
             shared_tensors=shared_tensors,
         )
 
@@ -797,9 +803,12 @@ class Scheduler(
                 # print(self.shared_tensors[2][0][:5], flush=True)
 
                 # TODO: call cpu moe here
+                print("my cpu get inputs to moe", flush=True)
                 
-                self.tp_worker.model_runner.model.forward_moe_cpu(*self.shared_tensors)
+                self.tp_worker.model_runner.model.forward_moe_cpu(self.tensor_queue, self.gpu_path_flag, *self.shared_tensors)
                 # print(f"cpu moe output on rank {self.tp_rank}: {self.shared_tensors[3][0][:5]}", flush=True)
+                
+                print("my cpu done moe compute", flush=True)
                 
                 self.done_event.wait()
                 # print("cpu moe process set done event", flush=True)
@@ -2568,6 +2577,8 @@ def run_scheduler_process(
     is_cpu_moe: Optional[bool] = False,
     ready_event = None,
     done_event = None,
+    tensor_queue=None,
+    gpu_path_flag=None,
     shared_tensors = None,
 ):
     # Generate the prefix
@@ -2613,6 +2624,8 @@ def run_scheduler_process(
             is_cpu_moe=is_cpu_moe,
             ready_event=ready_event,
             done_event=done_event,
+            tensor_queue=tensor_queue,
+            gpu_path_flag=gpu_path_flag,
             shared_tensors=shared_tensors,
         )
         print(f"my schedule created: {scheduler.device}")

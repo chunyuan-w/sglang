@@ -107,6 +107,7 @@ GLOBAL_SERVER_ARGS_KEYS = [
     "quantization",
     "enable_custom_logit_processor",
     "disaggregation_mode",
+    "cpu_tp_size",
 ]
 
 # Put some global args for easy access
