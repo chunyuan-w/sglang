@@ -2568,10 +2568,25 @@ class DeepseekV2ForCausalLM(nn.Module):
                 
                 
                 moe_output_shm = decoder_layer.mlp.experts(
+                    # shared_hidden_states[:M, :], [shared_topk_weights[:M, :], shared_topk_ids[:M, :]]
                     shared_hidden_states, [shared_topk_weights, shared_topk_ids]
                 )                
                 
-                assert torch.all(moe_output == moe_output_shm[:M, :])
+                if not torch.all(moe_output == moe_output_shm[:M, :]):
+                    mask = moe_output != moe_output_shm[:M, :]
+
+
+                    positions = mask.nonzero(as_tuple=False)   # shape [num_diffs, ndim]
+
+                    # Get values from both tensors at those positions
+                    a_vals = moe_output[mask]
+                    b_vals = moe_output_shm[:M, :][mask]
+
+                    # Print
+                    for pos, av, bv in zip(positions, a_vals, b_vals):
+                        print(f"Position {tuple(pos.tolist())}: a={av.item()}, b={bv.item()}")
+                    
+                    assert False
                 
                 
                 print(f"my cpu done moe kernel rank {decoder_layer.mlp.experts.moe_tp_rank}", flush=True)
