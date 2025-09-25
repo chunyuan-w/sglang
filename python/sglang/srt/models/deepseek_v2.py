@@ -2547,8 +2547,8 @@ class DeepseekV2ForCausalLM(nn.Module):
                 # TODO: only rank0 needs to write this?
                 print(f"cpu compute result on rank {decoder_layer.mlp.experts.moe_tp_rank}: {moe_output[0][:5]}", flush=True)
                 
-                # if decoder_layer.mlp.experts.moe_tp_rank == 0:
-                output.copy_(moe_output)  
+                if decoder_layer.mlp.experts.moe_tp_rank == 0:
+                    output.copy_(moe_output)  
                 print(f"cpu output after copy_ {decoder_layer.mlp.experts.moe_tp_rank}: {output[0][:5]}", flush=True)
                      
             else:
@@ -2573,8 +2573,8 @@ class DeepseekV2ForCausalLM(nn.Module):
                 shared_output_view = shared_output[:M, :]
                 print(f"cpu shared mem result on rank {decoder_layer.mlp.experts.moe_tp_rank}: {moe_output[0][:5]}", flush=True)
                 
-                
-                shared_output_view.copy_(moe_output)
+                if decoder_layer.mlp.experts.moe_tp_rank == 0:
+                    shared_output_view.copy_(moe_output)
                 print(f"cpu shared_output_view after copy_ {decoder_layer.mlp.experts.moe_tp_rank}: {shared_output_view[0][:5]}", flush=True)
                 
 
