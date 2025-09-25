@@ -675,11 +675,10 @@ class DeepseekV2MoE(nn.Module):
             # print(topk_output[1].size())
             shared_hidden_states = self.shared_tensors[0]
             
-            # if M > shared_hidden_states.size(0):
-            if True:
+            if M > shared_hidden_states.size(0):
                 # Fallback: allocate tensor during runtime
                 print("my gpu allocate memory", flush=True)
-                self.gpu_path_flag.value = 1  # CPU should read from queue
+                self.gpu_path_flag.value = -1  # CPU should read from queue
                 new_shared_hidden_states = hidden_states.cpu().pin_memory().share_memory_()
                 new_shared_topk_weights  = topk_output[0].cpu().pin_memory().share_memory_()
                 new_shared_topk_ids      = topk_output[1].cpu().pin_memory().share_memory_()
@@ -691,25 +690,6 @@ class DeepseekV2MoE(nn.Module):
                     new_shared_topk_ids,
                     new_shared_output,
                 )
-
-
-
-                shared_hidden_states_view = shared_hidden_states[:M, :]
-                shared_hidden_states_view.copy_(hidden_states)
-                
-                shared_topk_weights = self.shared_tensors[1]
-                shared_topk_weights_view = shared_topk_weights[:M, :]
-                shared_topk_weights_view.copy_(topk_output[0])
-                
-                shared_topk_ids = self.shared_tensors[2]
-                shared_topk_ids_view = shared_topk_ids[:M, :]
-                shared_topk_ids_view.copy_(topk_output[1])
-
-                assert torch.all(new_shared_hidden_states == shared_hidden_states[:M, :])
-                assert torch.all(new_shared_topk_weights == shared_topk_weights[:M, :])
-                assert torch.all(new_shared_topk_ids == shared_topk_ids[:M, :])
-
-
 
                 print("my gpu moe inputs:", flush=True)
                 print(new_shared_hidden_states[0][:5], flush=True)
@@ -737,7 +717,7 @@ class DeepseekV2MoE(nn.Module):
             else:
             
                 print("my gpu use shared mem", flush=True)
-                self.gpu_path_flag.value = 0  # CPU should use preallocated buffer
+                self.gpu_path_flag.value = M  # CPU should use preallocated buffer
                 
                 shared_hidden_states_view = shared_hidden_states[:M, :]
                 shared_hidden_states_view.copy_(hidden_states)
@@ -2545,8 +2525,7 @@ class DeepseekV2ForCausalLM(nn.Module):
         # if True:
             
             # print(f"cpu input on rank {decoder_layer.mlp.experts.moe_tp_rank}: {shared_hidden_states[0][:5]} {shared_topk_weights[0][:5]} {shared_topk_ids[0][:5]}", flush=True)
-            # if gpu_path_flag.value == 1:
-            if True:
+            if gpu_path_flag.value == -1:
                 print("my cpu get queue", flush=True)
                 
                 hidden_states, topk_weights, topk_ids, output = tensor_queue.get()
@@ -2554,41 +2533,9 @@ class DeepseekV2ForCausalLM(nn.Module):
                 print(f"cpu input on rank {decoder_layer.mlp.experts.moe_tp_rank}: {hidden_states[0][:5]} {topk_weights[0][:5]} {topk_ids[0][:5]}", flush=True)
                 
                 
-                M = hidden_states.size(0)
-                
-                assert torch.all(hidden_states == shared_hidden_states[:M, :])
-                assert torch.all(topk_weights == shared_topk_weights[:M, :])
-                assert torch.all(topk_ids == shared_topk_ids[:M, :])
-                
-                
-                
                 moe_output = decoder_layer.mlp.experts(
                     hidden_states, [topk_weights, topk_ids]
                 )
-                
-                
-                moe_output_shm = decoder_layer.mlp.experts(
-                    # shared_hidden_states[:M, :], [shared_topk_weights[:M, :], shared_topk_ids[:M, :]]
-                    shared_hidden_states, [shared_topk_weights, shared_topk_ids]
-                )                
-                
-                if not torch.all(moe_output == moe_output_shm[:M, :]):
-                    mask = moe_output != moe_output_shm[:M, :]
-
-
-                    positions = mask.nonzero(as_tuple=False)   # shape [num_diffs, ndim]
-
-                    # Get values from both tensors at those positions
-                    a_vals = moe_output[mask]
-                    b_vals = moe_output_shm[:M, :][mask]
-
-                    # Print
-                    for pos, av, bv in zip(positions, a_vals, b_vals):
-                        print(f"Position {tuple(pos.tolist())}: a={av.item()}, b={bv.item()}")
-                    
-                    assert False
-                
-                
                 print(f"my cpu done moe kernel rank {decoder_layer.mlp.experts.moe_tp_rank}", flush=True)
                 
                 if decoder_layer.mlp.tp_size > 1:
@@ -2600,8 +2547,8 @@ class DeepseekV2ForCausalLM(nn.Module):
                 # TODO: only rank0 needs to write this?
                 print(f"cpu compute result on rank {decoder_layer.mlp.experts.moe_tp_rank}: {moe_output[0][:5]}", flush=True)
                 
-                if decoder_layer.mlp.experts.moe_tp_rank == 0:
-                    output.copy_(moe_output)  
+                # if decoder_layer.mlp.experts.moe_tp_rank == 0:
+                output.copy_(moe_output)  
                 print(f"cpu output after copy_ {decoder_layer.mlp.experts.moe_tp_rank}: {output[0][:5]}", flush=True)
                      
             else:
@@ -2610,12 +2557,11 @@ class DeepseekV2ForCausalLM(nn.Module):
                 
                 print(f"cpu input on rank {decoder_layer.mlp.experts.moe_tp_rank}: {shared_hidden_states[0][:5]} {shared_topk_weights[0][:5]} {shared_topk_ids[0][:5]}", flush=True)
                 
+                M = gpu_path_flag.value
                 
                 moe_output = decoder_layer.mlp.experts(
-                    shared_hidden_states, [shared_topk_weights, shared_topk_ids]
+                    shared_hidden_states[:M, :], [shared_topk_weights[:M, :], shared_topk_ids[:M, :]]
                 )
-                print(f"cpu shared mem before allreduce on rank {decoder_layer.mlp.experts.moe_tp_rank}: {moe_output[0][:5]}", flush=True)
-                
                 if decoder_layer.mlp.tp_size > 1:
                     moe_output = tensor_model_parallel_all_reduce(moe_output)
             
@@ -2623,7 +2569,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                 
 
                 # TODO: only rank0 needs to write this?
-                M = shared_hidden_states.size(0)
+                # M = shared_hidden_states.size(0)
                 shared_output_view = shared_output[:M, :]
                 print(f"cpu shared mem result on rank {decoder_layer.mlp.experts.moe_tp_rank}: {moe_output[0][:5]}", flush=True)
                 
