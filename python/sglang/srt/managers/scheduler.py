@@ -802,13 +802,12 @@ class Scheduler(
                 # print(self.shared_tensors[1][0][:5], flush=True)
                 # print(self.shared_tensors[2][0][:5], flush=True)
 
-                # TODO: call cpu moe here
-                print("my cpu get inputs to moe", flush=True)
+                # print("my cpu get inputs to moe", flush=True)
                 
                 self.tp_worker.model_runner.model.forward_moe_cpu(self.tensor_queue, self.gpu_path_flag, *self.shared_tensors)
                 # print(f"cpu moe output on rank {self.tp_rank}: {self.shared_tensors[3][0][:5]}", flush=True)
                 
-                print("my cpu done moe compute", flush=True)
+                # print("my cpu done moe compute", flush=True)
                 
                 self.done_event.wait()
                 # print("cpu moe process set done event", flush=True)

@@ -677,7 +677,6 @@ class DeepseekV2MoE(nn.Module):
             
             if M > shared_hidden_states.size(0):
                 # Fallback: allocate tensor during runtime
-                print("my gpu allocate memory", flush=True)
                 self.gpu_path_flag.value = -1  # CPU should read from queue
                 new_shared_hidden_states = hidden_states.cpu().pin_memory().share_memory_()
                 new_shared_topk_weights  = topk_output[0].cpu().pin_memory().share_memory_()
@@ -691,32 +690,27 @@ class DeepseekV2MoE(nn.Module):
                     new_shared_output,
                 )
 
-                print("my gpu moe inputs:", flush=True)
-                print(new_shared_hidden_states[0][:5], flush=True)
-                print(new_shared_topk_weights[0][:5], flush=True)
-                print(new_shared_topk_ids[0][:5], flush=True)
+                # print("my gpu moe inputs:", flush=True)
+                # print(new_shared_hidden_states[0][:5], flush=True)
+                # print(new_shared_topk_weights[0][:5], flush=True)
+                # print(new_shared_topk_ids[0][:5], flush=True)
 
                 # send to CPU via queue
                 for _ in range(global_server_args_dict["cpu_tp_size"]):
                     self.tensor_queue.put(new_tensors)
                 
-                # for barriers: still call wait so sync stays correct
-                print("my gpu done allocate", flush=True)
-                
                 self.ready_event.wait()
-                
-                print("my gpu wait", flush=True)
                 
                 self.done_event.wait()
 
                 # CPU will fill new_shared_output, grab it back:
-                print("my gpu get output from cpu", flush=True)
-                print(f"gpu  new_shared_output: {new_shared_output[0][:5]}", flush=True)
+                # print("my gpu get output from cpu", flush=True)
+                # print(f"gpu  new_shared_output: {new_shared_output[0][:5]}", flush=True)
                 
                 final_hidden_states = new_shared_output.to("cuda", non_blocking=True)             
             else:
             
-                print("my gpu use shared mem", flush=True)
+                # print("my gpu use shared mem", flush=True)
                 self.gpu_path_flag.value = M  # CPU should use preallocated buffer
                 
                 shared_hidden_states_view = shared_hidden_states[:M, :]
@@ -730,10 +724,10 @@ class DeepseekV2MoE(nn.Module):
                 shared_topk_ids_view = shared_topk_ids[:M, :]
                 shared_topk_ids_view.copy_(topk_output[1])
                 
-                print("my gpu moe shared inputs:", flush=True)
-                print(shared_hidden_states_view[0][:5], flush=True)
-                print(shared_topk_weights_view[0][:5], flush=True)
-                print(shared_topk_ids_view[0][:5], flush=True)
+                # print("my gpu moe shared inputs:", flush=True)
+                # print(shared_hidden_states_view[0][:5], flush=True)
+                # print(shared_topk_weights_view[0][:5], flush=True)
+                # print(shared_topk_ids_view[0][:5], flush=True)
                 
                 self.ready_event.wait()
                 
@@ -749,7 +743,7 @@ class DeepseekV2MoE(nn.Module):
                 shared_output_view = shared_output_tensor[:M, :]
                 final_hidden_states = shared_output_view.to("cuda", non_blocking=True)
                 # print(f"gpu  shared_output_view: {shared_output_view[0][:5]}", flush=True)
-                print(f"gpu final_hidden_states: {final_hidden_states[0][:5]}", flush=True)
+                # print(f"gpu final_hidden_states: {final_hidden_states[0][:5]}", flush=True)
             
             if not _is_cuda:
                 final_hidden_states *= self.routed_scaling_factor
@@ -2526,36 +2520,36 @@ class DeepseekV2ForCausalLM(nn.Module):
             
             # print(f"cpu input on rank {decoder_layer.mlp.experts.moe_tp_rank}: {shared_hidden_states[0][:5]} {shared_topk_weights[0][:5]} {shared_topk_ids[0][:5]}", flush=True)
             if gpu_path_flag.value == -1:
-                print("my cpu get queue", flush=True)
+                # print("my cpu get queue", flush=True)
                 
                 hidden_states, topk_weights, topk_ids, output = tensor_queue.get()
                 
-                print(f"cpu input on rank {decoder_layer.mlp.experts.moe_tp_rank}: {hidden_states[0][:5]} {topk_weights[0][:5]} {topk_ids[0][:5]}", flush=True)
+                # print(f"cpu input on rank {decoder_layer.mlp.experts.moe_tp_rank}: {hidden_states[0][:5]} {topk_weights[0][:5]} {topk_ids[0][:5]}", flush=True)
                 
                 
                 moe_output = decoder_layer.mlp.experts(
                     hidden_states, [topk_weights, topk_ids]
                 )
-                print(f"my cpu done moe kernel rank {decoder_layer.mlp.experts.moe_tp_rank}", flush=True)
+                # print(f"my cpu done moe kernel rank {decoder_layer.mlp.experts.moe_tp_rank}", flush=True)
                 
                 if decoder_layer.mlp.tp_size > 1:
-                    print(f"my cpu before allreduce rank {decoder_layer.mlp.experts.moe_tp_rank}", flush=True)
+                    # print(f"my cpu before allreduce rank {decoder_layer.mlp.experts.moe_tp_rank}", flush=True)
                     
                     moe_output = tensor_model_parallel_all_reduce(moe_output)                
-                    print(f"my cpu after allreduce rank {decoder_layer.mlp.experts.moe_tp_rank}", flush=True)
+                    # print(f"my cpu after allreduce rank {decoder_layer.mlp.experts.moe_tp_rank}", flush=True)
                     
                 # TODO: only rank0 needs to write this?
-                print(f"cpu compute result on rank {decoder_layer.mlp.experts.moe_tp_rank}: {moe_output[0][:5]}", flush=True)
+                # print(f"cpu compute result on rank {decoder_layer.mlp.experts.moe_tp_rank}: {moe_output[0][:5]}", flush=True)
                 
                 if decoder_layer.mlp.experts.moe_tp_rank == 0:
                     output.copy_(moe_output)  
-                print(f"cpu output after copy_ {decoder_layer.mlp.experts.moe_tp_rank}: {output[0][:5]}", flush=True)
+                # print(f"cpu output after copy_ {decoder_layer.mlp.experts.moe_tp_rank}: {output[0][:5]}", flush=True)
                      
             else:
-                print("my cpu use shared mem", flush=True)
+                # print("my cpu use shared mem", flush=True)
                 
                 
-                print(f"cpu input on rank {decoder_layer.mlp.experts.moe_tp_rank}: {shared_hidden_states[0][:5]} {shared_topk_weights[0][:5]} {shared_topk_ids[0][:5]}", flush=True)
+                # print(f"cpu input on rank {decoder_layer.mlp.experts.moe_tp_rank}: {shared_hidden_states[0][:5]} {shared_topk_weights[0][:5]} {shared_topk_ids[0][:5]}", flush=True)
                 
                 M = gpu_path_flag.value
                 
@@ -2571,11 +2565,11 @@ class DeepseekV2ForCausalLM(nn.Module):
                 # TODO: only rank0 needs to write this?
                 # M = shared_hidden_states.size(0)
                 shared_output_view = shared_output[:M, :]
-                print(f"cpu shared mem result on rank {decoder_layer.mlp.experts.moe_tp_rank}: {moe_output[0][:5]}", flush=True)
+                # print(f"cpu shared mem result on rank {decoder_layer.mlp.experts.moe_tp_rank}: {moe_output[0][:5]}", flush=True)
                 
                 if decoder_layer.mlp.experts.moe_tp_rank == 0:
                     shared_output_view.copy_(moe_output)
-                print(f"cpu shared_output_view after copy_ {decoder_layer.mlp.experts.moe_tp_rank}: {shared_output_view[0][:5]}", flush=True)
+                # print(f"cpu shared_output_view after copy_ {decoder_layer.mlp.experts.moe_tp_rank}: {shared_output_view[0][:5]}", flush=True)
                 
 
     @property
