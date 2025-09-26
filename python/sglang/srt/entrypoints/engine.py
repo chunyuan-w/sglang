@@ -737,7 +737,8 @@ def _launch_subprocesses(
         
         
         # TODO: we don't know M, K, topk and dtype here
-        M = 6
+        # M = 6
+        M = 160
         K = 2048
         topk = 6
         dtype = torch.bfloat16
