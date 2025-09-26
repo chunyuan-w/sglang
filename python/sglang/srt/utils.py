@@ -208,6 +208,7 @@ def support_triton(backend: str) -> bool:
 
 try:
     import sgl_kernel
+    from sgl_kernel_cpu import common_ops
 
     is_intel_amx_backend_available = hasattr(
         torch.ops.sgl_kernel, "convert_weight_packed"
