@@ -785,7 +785,57 @@ class DeepseekV2MoE(nn.Module):
             topk_output = self.topk.empty_topk_output(hidden_states.device)
 
         # offload moe to cpu here?
-        final_hidden_states = self.experts(hidden_states, topk_output)
+        # TODO: the below code is the same as the one in forward_normal_dual_stream
+        M = hidden_states.size(0)
+        shared_hidden_states = self.shared_tensors[0]
+        if M > shared_hidden_states.size(0):
+            # Fallback: allocate tensor during runtime
+            self.gpu_path_flag.value = -1  # CPU should read from queue
+            new_shared_hidden_states = hidden_states.cpu().pin_memory().share_memory_()
+            new_shared_topk_weights  = topk_output[0].cpu().pin_memory().share_memory_()
+            new_shared_topk_ids      = topk_output[1].cpu().pin_memory().share_memory_()
+            new_shared_output        = torch.empty(new_shared_hidden_states.shape, dtype=new_shared_hidden_states.dtype, pin_memory=True).share_memory_()
+
+            new_tensors = (
+                new_shared_hidden_states,
+                new_shared_topk_weights,
+                new_shared_topk_ids,
+                new_shared_output,
+            )
+
+            # send to CPU via queue
+            for _ in range(global_server_args_dict["cpu_tp_size"]):
+                self.tensor_queue.put(new_tensors)
+            
+            self.ready_event.wait()
+            
+            self.done_event.wait()
+            
+            final_hidden_states = new_shared_output.to("cuda", non_blocking=True)             
+        else:
+            self.gpu_path_flag.value = M  # CPU should use preallocated buffer
+            
+            shared_hidden_states_view = shared_hidden_states[:M, :]
+            shared_hidden_states_view.copy_(hidden_states)
+            
+            shared_topk_weights = self.shared_tensors[1]
+            shared_topk_weights_view = shared_topk_weights[:M, :]
+            shared_topk_weights_view.copy_(topk_output[0])
+            
+            shared_topk_ids = self.shared_tensors[2]
+            shared_topk_ids_view = shared_topk_ids[:M, :]
+            shared_topk_ids_view.copy_(topk_output[1])
+
+            self.ready_event.wait()
+
+            self.done_event.wait()    
+            
+            shared_output_tensor = self.shared_tensors[3]
+            shared_output_view = shared_output_tensor[:M, :]
+            final_hidden_states = shared_output_view.to("cuda", non_blocking=True)
+        
+        # final_hidden_states = self.experts(hidden_states, topk_output)
+        
         if not _is_cuda and not _use_aiter:
             # fused in biased_grouped_topk so we can skip here
             final_hidden_states *= self.routed_scaling_factor
