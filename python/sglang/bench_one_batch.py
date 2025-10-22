@@ -394,6 +394,7 @@ def latency_test_run_once(
     profile,
     profile_record_shapes,
     profile_filename_prefix,
+    tp_rank = None,
 ):
     max_batch_size = model_runner.max_total_num_tokens // (input_len + output_len)
     if batch_size > max_batch_size:
@@ -443,10 +444,10 @@ def latency_test_run_once(
 
     if profile:
         profiler.stop()
-        profile_filename = f"{profile_filename_prefix}_batch{batch_size}_input{input_len}_output{output_len}_prefill.trace.json.gz"
+        profile_filename = f"{profile_filename_prefix}_batch{batch_size}_input{input_len}_output{output_len}_rank{tp_rank}_prefill.trace.json.gz"
         _save_profile_trace_results(profiler, profile_filename)
         rank_print(
-            f"torch profiler chrome trace for prefill saved to {profile_filename}"
+            f"torch profiler chrome trace for prefill (rank {tp_rank}) saved to {profile_filename}"
         )
 
     # Decode
@@ -479,10 +480,10 @@ def latency_test_run_once(
 
         if profile and i == output_len / 2:
             profiler.stop()
-            profile_filename = f"{profile_filename_prefix}_batch{batch_size}_input{input_len}_output{output_len}_decode.trace.json.gz"
+            profile_filename = f"{profile_filename_prefix}_batch{batch_size}_input{input_len}_output{output_len}_rank{tp_rank}_decode.trace.json.gz"
             _save_profile_trace_results(profiler, profile_filename)
             rank_print(
-                f"torch profiler chrome trace for decoding 1 token saved to {profile_filename}"
+                f"torch profiler chrome trace for decoding 1 token (rank {tp_rank}) saved to {profile_filename}"
             )
 
     # Record decode timing from 2nd output
@@ -587,9 +588,12 @@ def latency_test(
             ol,
             server_args.device,
             bench_args.log_decode_step,
-            bench_args.profile if tp_rank == 0 else None,
-            bench_args.profile_record_shapes if tp_rank == 0 else None,
+            bench_args.profile,
+            # bench_args.profile if tp_rank == 0 else None,
+            bench_args.profile_record_shapes,
+            # bench_args.profile_record_shapes if tp_rank == 0 else None,
             bench_args.profile_filename_prefix,
+            tp_rank,
         )
         if ret is not None:
             result_list.append(ret)
