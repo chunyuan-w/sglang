@@ -1267,8 +1267,10 @@ class ProfileReqInput(BaseReq):
     # If it is set, profiling is automatically stopped after this step, and
     # the caller doesn't need to run stop_profile.
     start_step: Optional[int] = None
+    # num_steps: Optional[int] = 3 # the decode steps that we want to profile
     num_steps: Optional[int] = None
     activities: Optional[List[str]] = None
+    # profile_by_stage: bool = True
     profile_by_stage: bool = False
     with_stack: Optional[bool] = None
     record_shapes: Optional[bool] = None

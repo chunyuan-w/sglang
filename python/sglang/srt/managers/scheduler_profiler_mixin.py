@@ -55,6 +55,11 @@ class SchedulerProfilerMixin:
         profile_id: str,
         merge_profiles: bool = False,
     ) -> ProfileReqOutput:
+        
+        # profile_by_stage = True
+        # num_steps = 4 # set to output-len?
+        # start_step = 2
+        
         if self.profile_in_progress:
             return ProfileReqOutput(
                 success=False,
@@ -281,6 +286,7 @@ class SchedulerProfilerMixin:
     def _profile_batch_predicate(self, batch):
         if self.profile_by_stage:
             if batch.forward_mode.is_prefill():
+
                 if self.profiler_prefill_ct == 0:
                     self.start_profile(batch.forward_mode)
                 self.profiler_prefill_ct += 1
@@ -317,6 +323,7 @@ class SchedulerProfilerMixin:
     def profile(self, recv_req: ProfileReq):
         if recv_req.type == ProfileReqType.START_PROFILE:
             if recv_req.profile_by_stage or recv_req.start_step:
+                print("in init_profile if")
                 return self.init_profile(
                     recv_req.output_dir,
                     recv_req.start_step,
@@ -329,6 +336,8 @@ class SchedulerProfilerMixin:
                     recv_req.merge_profiles,
                 )
             else:
+                print("in init_profile else")
+                
                 self.init_profile(
                     recv_req.output_dir,
                     recv_req.start_step,
