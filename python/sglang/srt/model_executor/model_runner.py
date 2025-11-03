@@ -2104,11 +2104,33 @@ class ModelRunner:
             forward_batch.prepare_mlp_sync_batch(self)
 
         if forward_batch.forward_mode.is_decode():
+            # add profile here:
+            profile_activities = [torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+            profiler = torch.profiler.profile(
+                activities=profile_activities,
+                with_stack=True,
+            )
+            profiler.start()
+            
+            
             ret = self.forward_decode(
                 forward_batch,
                 skip_attn_backend_init=skip_attn_backend_init,
                 pp_proxy_tensors=pp_proxy_tensors,
             )
+            
+            profiler.stop()
+
+            print(
+                profiler.key_averages().table(
+                    sort_by="self_cpu_time_total"
+                )
+            )
+            dirs = os.environ["SGLANG_TORCH_PROFILER_DIR"]
+            assert dirs is not None
+            filename = f"{dirs}/rank{self.tp_rank}.trace.json.gz"
+            profiler.export_chrome_trace(filename)
+            
         elif forward_batch.forward_mode.is_extend():
             ret = self.forward_extend(
                 forward_batch,
