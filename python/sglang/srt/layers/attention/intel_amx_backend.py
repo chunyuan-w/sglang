@@ -52,6 +52,10 @@ class IntelAMXAttnBackend(AttentionBackend):
     def get_graph_seq_len_fill_value(self):
         return 1
 
+    # TODO: check why we used get_graph_seq_len_fill_value
+    def get_cuda_graph_seq_len_fill_value(self):
+        return 1
+
     def forward_extend(
         self,
         q,
