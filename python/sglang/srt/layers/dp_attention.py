@@ -20,7 +20,7 @@ from sglang.srt.distributed import (
 from sglang.srt.distributed.device_communicators.pynccl_allocator import (
     use_symmetric_memory,
 )
-from sglang.srt.utils import get_bool_env_var, is_hip
+from sglang.srt.utils import get_bool_env_var, is_cpu, is_hip
 
 if TYPE_CHECKING:
     from sglang.srt.configs.model_config import ModelConfig
@@ -42,6 +42,7 @@ _ENABLE_DP_ATTENTION_FLAG: bool = False
 
 _is_hip = is_hip()
 _USE_ROCM700A_WA = _is_hip and get_bool_env_var("SGLANG_USE_ROCM700A")
+_is_cpu = is_cpu()
 
 
 class DpPaddingMode(IntEnum):
@@ -425,7 +426,47 @@ def prod(x):
     return functools.reduce(lambda a, b: a * b, x, 1)
 
 
+# TODO: write kernel for cpu
+def memcpy_cpu(dst, src, dim, offset, sz, offset_src):
+    """
+    CPU fallback for memcpy_triton.
+    Copies a slice from `src` to `dst` along the given dimension (only dim=0 supported).
+    """
+    assert dim == 0, "Only dim=0 supported"
+    assert src.shape[1:] == dst.shape[1:], "src and dst must have same trailing shape"
+    assert (
+        dst.device.type == "cpu" and src.device.type == "cpu"
+    ), "CPU fallback requires CPU tensors"
+
+    total_rows_dst = dst.shape[0]
+    total_rows_src = src.shape[0]
+
+    src_offset = int(offset_src) if isinstance(offset_src, (bool, int)) else 0
+
+    # Compute intended copy length
+    dst_start = offset
+    src_start = src_offset
+
+    # Clamp to avoid going out of bounds
+    dst_end = min(dst_start + sz, total_rows_dst)
+    src_end = min(src_start + sz, total_rows_src)
+
+    # Compute effective copy size
+    actual_sz = min(dst_end - dst_start, src_end - src_start)
+    if actual_sz <= 0:
+        # Nothing to copy
+        return
+
+    # Perform safe copy
+    dst[dst_start : dst_start + actual_sz].copy_(src[src_start : src_start + actual_sz])
+
+
 def memcpy_triton(dst, src, dim, offset, sz, offset_src):
+    # TODO: write kernel for cpu
+    if _is_cpu:
+        memcpy_cpu(dst, src, dim, offset, sz, offset_src)
+        return
+
     max_size = min(src.numel(), dst.numel())
     assert dim == 0, "dim != 0 unsupported"
     assert src.shape[1:] == dst.shape[1:], "src and dst must have same shape"
