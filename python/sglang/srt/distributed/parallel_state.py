@@ -735,6 +735,10 @@ class GroupCoordinator:
                 enable=True, stream=get_current_device_stream_fast()
             ):
                 pynccl_comm.all_gather(output, input)
+        elif _is_cpu and is_shm_available(
+            input.dtype, self.world_size, self.local_size
+        ):
+            torch.ops.sgl_kernel.shm_allgather_into_tensor(output, input)
         else:
             torch.distributed.all_gather_into_tensor(
                 output, input, group=self.device_group
@@ -742,7 +746,6 @@ class GroupCoordinator:
 
     def all_gather_into_tensor(self, output: torch.Tensor, input: torch.Tensor):
         if _is_npu or _is_xpu or _is_cpu or not _supports_custom_op:
-            # TODO: add optimized all_gather_into_tensor kernel for cpu
             self._all_gather_into_tensor(output, input)
         else:
             torch.ops.sglang.reg_all_gather_into_tensor(
