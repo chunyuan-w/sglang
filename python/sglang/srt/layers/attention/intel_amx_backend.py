@@ -22,8 +22,7 @@ class IntelAMXAttnBackend(AttentionBackend):
         self.device = model_runner.device
 
         self.num_head = (
-            model_runner.model_config.num_attention_heads
-            // get_attention_tp_size()  # follow TritonAttnBackend
+            model_runner.model_config.num_attention_heads // get_attention_tp_size()
         )
 
         self.v_head_dim = model_runner.token_to_kv_pool.get_value_buffer(0).shape[-1]
@@ -52,10 +51,6 @@ class IntelAMXAttnBackend(AttentionBackend):
         self.forward_metadata = (attn_logits, max_extend_len)
 
     def get_graph_seq_len_fill_value(self):
-        return 1
-
-    # TODO: check why we used get_graph_seq_len_fill_value
-    def get_cuda_graph_seq_len_fill_value(self):
         return 1
 
     def forward_extend(

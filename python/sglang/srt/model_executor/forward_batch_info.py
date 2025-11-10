@@ -753,8 +753,12 @@ class ForwardBatch:
         self.input_ids = self._pad_tensor_to_size(self.input_ids, num_tokens)
         self.req_pool_indices = self._pad_tensor_to_size(self.req_pool_indices, bs)
 
+        from sglang.srt.layers.attention.intel_amx_backend import IntelAMXAttnBackend
+
         seq_len_fill_value = (
-            model_runner.attn_backend.get_cuda_graph_seq_len_fill_value()
+            model_runner.attn_backend.get_graph_seq_len_fill_value()
+            if isinstance(model_runner.attn_backend, IntelAMXAttnBackend)
+            else model_runner.attn_backend.get_cuda_graph_seq_len_fill_value()
         )
         self.seq_lens_sum = self.seq_lens_sum + seq_len_fill_value * (
             bs - self.seq_lens.shape[0]
@@ -773,7 +777,9 @@ class ForwardBatch:
         self.positions = self._pad_tensor_to_size(self.positions, num_tokens)
         self.global_num_tokens_cpu = global_num_tokens
 
-        if not _is_cpu:
+        if _is_cpu:
+            self.global_num_tokens_gpu.copy_(torch.tensor(global_num_tokens))
+        else:
             global_num_tokens_pinned = torch.tensor(global_num_tokens, pin_memory=True)
             self.global_num_tokens_gpu.copy_(
                 global_num_tokens_pinned, non_blocking=True
