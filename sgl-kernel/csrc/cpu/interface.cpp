@@ -72,3 +72,12 @@ torch::Tensor shm_allgather(torch::Tensor& data, int64_t dim) {
   torch::Tensor result_tensor = torch::empty(result_shape, data.options());
   return all_gather(result_tensor, data, dim, numel, data_size);
 }
+
+void shm_allgather_into_tensor(torch::Tensor& output_tensor, torch::Tensor& data) {
+  RECORD_FUNCTION("sgl-kernel::shm_allgather_into_tensor", std::vector<c10::IValue>({data}));
+
+  auto numel = data.numel();
+  int data_size = numel * data.element_size();
+  int64_t dim = 0;
+  all_gather(output_tensor, data, dim, numel, data_size);
+}

@@ -221,6 +221,9 @@ void shm_allreduce(at::Tensor& data, int64_t op);
 // shared memory all_gather
 at::Tensor shm_allgather(at::Tensor& data, int64_t dim);
 
+// shared memory all_gather
+void shm_allgather_into_tensor(at::Tensor& output_tensor, at::Tensor& data);
+
 // rope
 std::tuple<at::Tensor, at::Tensor> rotary_embedding_cpu(
     at::Tensor& positions,
@@ -354,6 +357,8 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   m.impl("shm_allreduce", torch::kCPU, &shm_allreduce);
   m.def("shm_allgather(Tensor data, int dim) -> Tensor");
   m.impl("shm_allgather", torch::kCPU, &shm_allgather);
+  m.def("shm_allgather_into_tensor(Tensor(a!) output_tensor, Tensor data) -> ()");
+  m.impl("shm_allgather_into_tensor", torch::kCPU, &shm_allgather_into_tensor);
 
   // rope
   m.def(
