@@ -81,3 +81,18 @@ void shm_allgather_into_tensor(torch::Tensor& output_tensor, torch::Tensor& data
   int64_t dim = 0;
   all_gather(output_tensor, data, dim, numel, data_size);
 }
+
+void shm_reduce_scatter_tensor(at::Tensor& output_tensor, at::Tensor& data, int64_t op) {
+  RECORD_FUNCTION("sgl-kernel::shm_reduce_scatter_tensor", std::vector<c10::IValue>({data}));
+
+  TORCH_CHECK(op == c10d::ReduceOp::SUM, "Only torch.distributed.ReduceOp.SUM is supported");
+
+  auto numel = data.numel();
+  int data_size = numel * data.element_size();
+
+  // TODO: add reduce and scatter
+
+  // all_reduce_outer_loop(data, numel, data_size);
+
+  return;
+}
