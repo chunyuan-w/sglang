@@ -77,6 +77,23 @@ def all_gather_fn(rank, world_size):
         torch.testing.assert_close(output_tensor, output_shm)
 
 
+def all_gather_into_tensor_fn(rank, world_size):
+    for dtype in [torch.float32, torch.bfloat16, torch.float16]:
+        tensor = torch.randn(2, 10, dtype=dtype)
+
+        input_size = tensor.size()
+        output_size = (input_size[0] * world_size,) + input_size[1:]
+        output_tensor = torch.empty(
+            output_size, dtype=tensor.dtype, device=tensor.device
+        )
+        output_shm = torch.empty(output_size, dtype=tensor.dtype, device=tensor.device)
+        dist.all_gather_into_tensor(output_tensor, tensor)
+
+        torch.ops.sgl_kernel.shm_allgather_into_tensor(output_shm, tensor)
+
+        torch.testing.assert_close(output_tensor, output_shm)
+
+
 class TestComm(CustomTestCase):
     def _spawn_and_check(self, fn, world_size=2):
         mp.set_start_method("spawn", force=True)
@@ -110,6 +127,9 @@ class TestComm(CustomTestCase):
 
     def test_all_gather(self):
         self._spawn_and_check(all_gather_fn)
+
+    def test_all_gather_into_tensor(self):
+        self._spawn_and_check(all_gather_into_tensor_fn)
 
 
 if __name__ == "__main__":
