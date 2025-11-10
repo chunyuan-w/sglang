@@ -221,7 +221,7 @@ void shm_allreduce(at::Tensor& data, int64_t op);
 // shared memory all_gather
 at::Tensor shm_allgather(at::Tensor& data, int64_t dim);
 
-// shared memory all_gather
+// shared memory all_gather_into_tensor
 void shm_allgather_into_tensor(at::Tensor& output_tensor, at::Tensor& data);
 
 // rope
