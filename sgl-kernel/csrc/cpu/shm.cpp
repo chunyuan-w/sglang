@@ -724,6 +724,15 @@ void naive_reduce_scatter(
                                     // output_ptr is already the local buffer for one rank. Adjust it here.
       distributed_buffer[current_buffer]);
 
+  // Step 4: fence and mark reduce done
+  std::atomic_thread_fence(std::memory_order_release);
+  workspace[world_rank]->states[state_group] = reduce_current;
+
+  // Step 5: wait for everyone to finish reduce
+  for (int i = 0; i < world_size; i++) {
+    if (i != world_rank) wait_buffer_state_until_2(i, reduce_current, copy_next, state_group);
+  }
+
   // done
   current_buffer = 1 - current_buffer;
 }
