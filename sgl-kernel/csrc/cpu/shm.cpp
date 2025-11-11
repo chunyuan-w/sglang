@@ -674,11 +674,8 @@ void naive_reduce_scatter(
     char* data_ptr,
     c10::ScalarType scalar_type,
     size_t chunk_size,
-    size_t chunk_el) {
-
-  printf("enter naive_reduce_scatter %d\n", world_rank);
-
-
+    size_t chunk_el,
+    int element_size) {
   const int state_group = 1;
   static int current_buffer = 0;
   static int state_idx = 0;
@@ -686,8 +683,6 @@ void naive_reduce_scatter(
   enum coll_state copy_current = coll_reduce_scatter_naive__copy_in_done;
   enum coll_state reduce_current = coll_reduce_scatter_naive__reduce_done;
   enum coll_state copy_next = coll_alt1_reduce_scatter_naive__copy_in_done;
-  
-  printf("after init state %d\n", world_rank);
 
   switch (state_idx) {
     case 0:
@@ -705,73 +700,29 @@ void naive_reduce_scatter(
   }
   state_idx = (state_idx + 1) % 2;
 
-  int data_size = chunk_size / chunk_el;
-
-  printf("before first memcpy %d\n", world_rank);
-
-
   // Step 1: copy local data to shared buffer
   parallel_memcpy(distributed_buffer[current_buffer][world_rank], data_ptr, chunk_size);
   std::atomic_thread_fence(std::memory_order_release);
   workspace[world_rank]->states[state_group] = copy_current;
-  
-  
-  printf("after parallel_memcpy %d\n", world_rank);
 
-  // // Step 2: wait for all ranks to copy in
-  // for (int i = 0; i < world_size; i++) {
-  //   if (i != world_rank) {
-  //     // if (world_rank == 1) { 
-  //     //   printf("before wait state 111 i = %d\n", i);
-  //     // };
-  //     wait_buffer_state_until_2(i, copy_current, reduce_current, state_group);
-  //     // if (world_rank == 1) { 
-  //     //   printf("after wait state 111 i = %d\n", i);
-  //     // };
-
-  //   }
-  // }
-  // printf("after wait 1 %d\n", world_rank);
+  // Step 2: wait for all ranks to copy in
+  for (int i = 0; i < world_size; i++) {
+    if (i != world_rank) wait_buffer_state_until_2(i, copy_current, reduce_current, state_group);
+  }
 
   // // Step 3: do local reduce on this rank’s slice only
-  // int start_el = slice_el_start(chunk_el, world_rank);
+  int start_el = slice_el_start(chunk_el, world_rank);
   // each rank reduce its slice of buffer independently so therre is no need for
   // synchronization afterward
-  // reduce_all_buffers(
-  //     start_el,
-  //     slice_size(chunk_el, world_rank),
-  //     scalar_type,
-  //     world_rank,
-  //     output_ptr -
-  //         start_el * data_size,  // TODO: in reduce_all_buffers, the output_ptr is the buffer for all ranks, but here
-  //                                   // output_ptr is already the local buffer for one rank. Adjust it here.
-  //     distributed_buffer[current_buffer]);
-
-  // // Step 4: fence and mark reduce done
-  // std::atomic_thread_fence(std::memory_order_release);
-  // workspace[world_rank]->states[state_group] = reduce_current;
-  
-  // printf("after reduce_all_buffers %d\n", world_rank);
-
-  // // Step 5: wait for everyone to finish reduce
-  // for (int i = 0; i < world_size; i++) {
-  //   if (i != world_rank) {
-  //     // if (world_rank == 1) { 
-  //     //   printf("before wait state 2 i = %d\n", i);
-  //     // };
-
-  //     wait_buffer_state_until_2(i, reduce_current, copy_next, state_group);
-      
-  //     // if (world_rank == 1) { 
-  //     //   printf("after wait state 2 i = %d\n", i);
-  //     // };
-
-  //   }
-  // }
-
-  printf("after wait2 %d\n", world_rank);
-
-  printf("final %d\n", world_rank);
+  reduce_all_buffers(
+      start_el,
+      slice_size(chunk_el, world_rank),
+      scalar_type,
+      world_rank,
+      output_ptr -
+          start_el * element_size,  // TODO: in reduce_all_buffers, the output_ptr is the buffer for all ranks, but here
+                                    // output_ptr is already the local buffer for one rank. Adjust it here.
+      distributed_buffer[current_buffer]);
 
   // done
   current_buffer = 1 - current_buffer;
@@ -784,6 +735,6 @@ void reduce_scatter_outer_loop(torch::Tensor& output, torch::Tensor& data, size_
     size_t chunk_size = std::min((size_t)MAX_BUF_SIZE, (size_t)(data_size - offset));
     size_t chunk_el = chunk_size / (data_size / numel);
 
-    naive_reduce_scatter(output_ptr, data_ptr, data.scalar_type(), chunk_size, chunk_el);
+    naive_reduce_scatter(output_ptr, data_ptr, data.scalar_type(), chunk_size, chunk_el, data.element_size());
   }
 }
