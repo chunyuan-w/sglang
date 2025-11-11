@@ -26,7 +26,8 @@ enum coll_state {
   coll_reduce_scatter_naive__copy_in_done,
   coll_reduce_scatter_naive__reduce_done,
   coll_alt1_reduce_scatter_naive__copy_in_done,
-  coll_alt1_reduce_scatter_naive__reduce_done,
+  coll_alt2_reduce_scatter_naive__copy_in_done
+  // coll_alt1_reduce_scatter_naive__reduce_done,
 };
 
 // SHM building blocks
@@ -684,7 +685,7 @@ void naive_reduce_scatter(
   static int state_idx = 0;
 
   enum coll_state copy_current = coll_reduce_scatter_naive__copy_in_done;
-  enum coll_state reduce_current = coll_reduce_scatter_naive__reduce_done;
+  // enum coll_state reduce_current = coll_reduce_scatter_naive__reduce_done;
   enum coll_state copy_next = coll_alt1_reduce_scatter_naive__copy_in_done;
   
   printf("after init state %d\n", world_rank);
@@ -692,18 +693,23 @@ void naive_reduce_scatter(
   switch (state_idx) {
     case 0:
       copy_current = coll_reduce_scatter_naive__copy_in_done;
-      reduce_current = coll_reduce_scatter_naive__reduce_done;
+      // reduce_current = coll_reduce_scatter_naive__reduce_done;
       copy_next = coll_alt1_reduce_scatter_naive__copy_in_done;
       break;
     case 1:
       copy_current = coll_alt1_reduce_scatter_naive__copy_in_done;
-      reduce_current = coll_alt1_reduce_scatter_naive__reduce_done;
+      // reduce_current = coll_alt1_reduce_scatter_naive__reduce_done;
+      copy_next = coll_alt2_reduce_scatter_naive__copy_in_done;
+      break;
+    case 2:
+      copy_current = coll_alt2_reduce_scatter_naive__copy_in_done;
+      // reduce_current = coll_alt2_reduce_scatter_naive__reduce_done;
       copy_next = coll_reduce_scatter_naive__copy_in_done;
       break;
     default:
       assert(!"Should not get here.");
   }
-  state_idx = (state_idx + 1) % 2;
+  state_idx = (state_idx + 1) % 3;
 
   int data_size = chunk_size / chunk_el;
 
@@ -718,19 +724,19 @@ void naive_reduce_scatter(
   
   printf("after parallel_memcpy %d\n", world_rank);
 
-  // // Step 2: wait for all ranks to copy in
-  // for (int i = 0; i < world_size; i++) {
-  //   if (i != world_rank) {
-  //     // if (world_rank == 1) { 
-  //     //   printf("before wait state 111 i = %d\n", i);
-  //     // };
-  //     wait_buffer_state_until_2(i, copy_current, reduce_current, state_group);
-  //     // if (world_rank == 1) { 
-  //     //   printf("after wait state 111 i = %d\n", i);
-  //     // };
+  // Step 2: wait for all ranks to copy in
+  for (int i = 0; i < world_size; i++) {
+    if (i != world_rank) {
+      // if (world_rank == 1) { 
+      //   printf("before wait state 111 i = %d\n", i);
+      // };
+      wait_buffer_state_until_2(i, copy_current, copy_next, state_group);
+      // if (world_rank == 1) { 
+      //   printf("after wait state 111 i = %d\n", i);
+      // };
 
-  //   }
-  // }
+    }
+  }
   // printf("after wait 1 %d\n", world_rank);
 
   // // Step 3: do local reduce on this rank’s slice only
