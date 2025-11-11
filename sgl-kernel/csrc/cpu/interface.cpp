@@ -90,9 +90,7 @@ void shm_reduce_scatter_tensor(at::Tensor& output_tensor, at::Tensor& data, int6
   auto numel = data.numel();
   int data_size = numel * data.element_size();
 
-  // TODO: add reduce and scatter
-
-  // all_reduce_outer_loop(data, numel, data_size);
+  reduce_scatter_outer_loop(output_tensor, data, numel, data_size);
 
   return;
 }

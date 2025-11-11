@@ -23,6 +23,10 @@ enum coll_state {
   coll_allgather_naive__copy_in_done,
   coll_alt1_allgather_naive__copy_in_done,
   coll_alt2_allgather_naive__copy_in_done,
+  coll_reduce_scatter_naive__copy_in_done,
+  coll_reduce_scatter_naive__reduce_done,
+  coll_alt1_reduce_scatter_naive__copy_in_done,
+  coll_alt1_reduce_scatter_naive__reduce_done,
 };
 
 // SHM building blocks
@@ -663,4 +667,144 @@ torch::Tensor& all_gather(torch::Tensor& result, torch::Tensor& data, int dim, s
     }
   }
   return result;
+}
+
+void symmetric_naive_reduce_scatter(
+    char* output_ptr, char* data_ptr, c10::ScalarType scalar_type, size_t chunk_size, size_t chunk_el) {
+  const int state_group = 0;
+  static int current_buffer = 0;
+  static int state_idx = 0;
+
+  // avoid uninitialized warning
+  enum coll_state copy_current = coll_allreduce_naive__copy_in_done;
+  enum coll_state copy_next = coll_alt1_allreduce_naive__copy_in_done;
+
+  switch (state_idx) {
+    case 0:
+      copy_current = coll_allreduce_naive__copy_in_done;
+      copy_next = coll_alt1_allreduce_naive__copy_in_done;
+      break;
+    case 1:
+      copy_current = coll_alt1_allreduce_naive__copy_in_done;
+      copy_next = coll_alt2_allreduce_naive__copy_in_done;
+      break;
+    case 2:
+      copy_current = coll_alt2_allreduce_naive__copy_in_done;
+      copy_next = coll_allreduce_naive__copy_in_done;
+      break;
+    default:
+      assert(!"Should not get here.");
+  }
+  state_idx = (state_idx + 1) % 3;
+
+  // Step 1: each rank copies its input tensor into shared symmetric buffer
+  parallel_memcpy(symmetric_buffer[current_buffer][world_rank], data_ptr, chunk_size);
+  std::atomic_thread_fence(std::memory_order_release);
+  workspace[world_rank]->states[state_group] = copy_current;
+
+  // Step 2: wait until all ranks have copied
+  for (int i = 0; i < world_size; i++) {
+    if (i != world_rank) {
+      wait_buffer_state_until_2(i, copy_current, copy_next, state_group);
+    }
+  }
+
+  // Step 3: each rank reduces only its slice
+  // (slice_el_start / slice_size already defined in your code)
+  reduce_all_buffers(
+      slice_el_start(chunk_el, world_rank),
+      slice_size(chunk_el, world_rank),
+      scalar_type,
+      world_rank,
+      output_ptr,
+      symmetric_buffer[current_buffer]);
+
+  // Step 4: done, switch to next buffer
+  current_buffer = 1 - current_buffer;
+}
+
+void naive_reduce_scatter(
+    char* output_ptr,
+    char* data_ptr,
+    c10::ScalarType scalar_type,
+    size_t chunk_size,
+    size_t chunk_el,
+    int element_size) {
+  const int state_group = 1;
+  static int current_buffer = 0;
+  static int state_idx = 0;
+
+  enum coll_state copy_current = coll_reduce_scatter_naive__copy_in_done;
+  enum coll_state reduce_current = coll_reduce_scatter_naive__reduce_done;
+  enum coll_state copy_next = coll_alt1_reduce_scatter_naive__copy_in_done;
+
+  switch (state_idx) {
+    case 0:
+      copy_current = coll_reduce_scatter_naive__copy_in_done;
+      reduce_current = coll_reduce_scatter_naive__reduce_done;
+      copy_next = coll_alt1_reduce_scatter_naive__copy_in_done;
+      break;
+    case 1:
+      copy_current = coll_alt1_reduce_scatter_naive__copy_in_done;
+      reduce_current = coll_alt1_reduce_scatter_naive__reduce_done;
+      copy_next = coll_reduce_scatter_naive__copy_in_done;
+      break;
+    default:
+      assert(!"Should not get here.");
+  }
+  state_idx = (state_idx + 1) % 2;
+
+  // Step 1: copy local data to shared buffer
+  parallel_memcpy(distributed_buffer[current_buffer][world_rank], data_ptr, chunk_size);
+  std::atomic_thread_fence(std::memory_order_release);
+  workspace[world_rank]->states[state_group] = copy_current;
+
+  // Step 2: wait for all ranks to copy in
+  for (int i = 0; i < world_size; i++) {
+    if (i != world_rank) wait_buffer_state_until_2(i, copy_current, reduce_current, state_group);
+  }
+
+  // // Step 3: do local reduce on this rank’s slice only
+  int start_el = slice_el_start(chunk_el, world_rank);
+  reduce_all_buffers(
+      start_el,
+      slice_size(chunk_el, world_rank),
+      scalar_type,
+      world_rank,
+      output_ptr -
+          start_el * element_size,  // TODO: in reduce_all_buffers, the output_ptr is the buffer for all ranks, but here
+                                    // output_ptr is already the local buffer for one rank. Adjust it here.
+      distributed_buffer[current_buffer]);
+
+  // Step 4: fence and mark reduce done
+  std::atomic_thread_fence(std::memory_order_release);
+  workspace[world_rank]->states[state_group] = reduce_current;
+
+  // Step 5: wait for everyone to finish reduce
+  for (int i = 0; i < world_size; i++) {
+    if (i != world_rank) wait_buffer_state_until_2(i, reduce_current, copy_next, state_group);
+  }
+
+  // done
+  current_buffer = 1 - current_buffer;
+}
+
+void reduce_scatter_outer_loop(torch::Tensor& output, torch::Tensor& data, size_t numel, int data_size) {
+  for (int offset = 0; offset < data_size; offset += MAX_BUF_SIZE) {
+    printf("reduce_scatter_outer_loop offset %d on rank %d\n", offset, world_rank);
+    auto data_ptr = ((char*)(data.data_ptr()) + offset);
+    auto output_ptr = ((char*)(output.data_ptr()) + offset);
+    size_t chunk_size = std::min((size_t)MAX_BUF_SIZE, (size_t)(data_size - offset));
+    size_t chunk_el = chunk_size / (data_size / numel);
+
+    // TODO: add symmetric_naive_reduce_scatter
+    // // if (chunk_size < NAIVE_ALLREDUCE_THRESHOLD) {
+    // if (false) {
+    //   // small tensor → symmetric version
+    //   symmetric_naive_reduce_scatter(output_ptr, data_ptr, data.scalar_type(), chunk_size, chunk_el);
+    // } else {
+    //   // large tensor → distributed version
+    naive_reduce_scatter(output_ptr, data_ptr, data.scalar_type(), chunk_size, chunk_el, data.element_size());
+    // }
+  }
 }
