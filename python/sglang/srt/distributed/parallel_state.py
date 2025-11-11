@@ -668,6 +668,10 @@ class GroupCoordinator:
                 enable=True, stream=get_current_device_stream_fast()
             ):
                 pynccl_comm.reduce_scatter(output, input)
+        elif _is_cpu and is_shm_available(
+            input.dtype, self.world_size, self.local_size
+        ):
+            torch.ops.sgl_kernel.shm_reduce_scatter_tensor(output, input, REDUCE_OP_SUM)
         else:
             torch.distributed.reduce_scatter_tensor(
                 output, input, group=self.device_group
@@ -676,7 +680,6 @@ class GroupCoordinator:
 
     def reduce_scatter_tensor(self, output: torch.Tensor, input: torch.Tensor):
         if _is_npu or _is_cpu or not supports_custom_op():
-            # TODO: add optimized reduce_scatter_tensor kernel for cpu
             self._reduce_scatter_tensor(output, input)
         else:
             torch.ops.sglang.reg_reduce_scatter_tensor(
