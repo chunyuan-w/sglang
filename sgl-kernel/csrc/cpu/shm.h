@@ -9,6 +9,5 @@ void shm_initialize(int size, int rank, const char* addr_string, const char* por
 void all_reduce_outer_loop(torch::Tensor& data, size_t numel, int data_size);
 torch::Tensor&
 all_gather(torch::Tensor& result, torch::Tensor& data, int dim, size_t numel, int data_size, int state_group);
-void all_gather_into_tensor(torch::Tensor& result, torch::Tensor& data, int dim, size_t numel, int data_size, int state_group);
 void reduce_scatter_outer_loop(torch::Tensor& output, torch::Tensor& data, size_t numel, int data_size);
 #endif
