@@ -70,7 +70,8 @@ torch::Tensor shm_allgather(torch::Tensor& data, int64_t dim) {
   std::vector<int64_t> result_shape = data.sizes().vec();
   result_shape[dim] *= world_size;
   torch::Tensor result_tensor = torch::empty(result_shape, data.options());
-  return all_gather(result_tensor, data, dim, numel, data_size);
+  const int state_group = 2;
+  return all_gather(result_tensor, data, dim, numel, data_size, state_group);
 }
 
 void shm_allgather_into_tensor(torch::Tensor& output_tensor, torch::Tensor& data) {
@@ -79,7 +80,8 @@ void shm_allgather_into_tensor(torch::Tensor& output_tensor, torch::Tensor& data
   auto numel = data.numel();
   int data_size = numel * data.element_size();
   int64_t dim = 0;
-  all_gather(output_tensor, data, dim, numel, data_size);
+  const int state_group = 3;
+  all_gather(output_tensor, data, dim, numel, data_size, state_group);
 }
 
 void shm_reduce_scatter_tensor(at::Tensor& output_tensor, at::Tensor& data, int64_t op) {
