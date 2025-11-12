@@ -76,8 +76,11 @@ static int world_size;
 #define NAIVE_ALLREDUCE_THRESHOLD 1048576
 #define SHM_BUFFER_NAME "deepspeed_allreduce_buffer"
 struct allreduce_workspace {
-  enum coll_state states[2];  // idx=0 -- state for symmetric_naive_all_reduce
+  enum coll_state states[5];  // idx=0 -- state for symmetric_naive_all_reduce
                               // idx=1 -- state for distributed_naive_all_reduce
+                              // idx=2 -- state for all_gather
+                              // idx=3 -- state for all_gather_into_tensor
+                              // idx=4 -- state for reduce_scatter
   // double buffer to avoid syncing between rounds
   // offset=0 -- 2*NAIVE_ALLREDUCE_THRESHOLD : buffer for
   // symmetric_naive_all_reduce after that : buffer for
@@ -417,8 +420,11 @@ void shm_initialize(int size, int rank, const char* addr_string, const char* por
   snprintf(shm_name, NAME_BUF_SIZE, "%.900s_%d", shm_name_prefix, rank);
   shared_create(&allreduce_buffer, shm_name, workspace_buf, sizeof(struct allreduce_workspace));
   workspace_buf = (struct allreduce_workspace*)allreduce_buffer.bytes;
-  workspace_buf->states[0] = coll_alt2_allreduce_naive__copy_in_done;
-  workspace_buf->states[1] = coll_begin;
+  workspace_buf->states[0] = coll_alt2_allreduce_naive__copy_in_done;  // symmetric_naive_all_reduce
+  workspace_buf->states[1] = coll_begin;                               // distributed_naive_reduce
+  workspace_buf->states[2] = coll_alt2_allgather_naive__copy_in_done;  // all_gather
+  workspace_buf->states[3] = coll_alt2_allgather_naive__copy_in_done;  // all_gather_into_tensor
+  workspace_buf->states[4] = coll_begin;                               // reduce_scatter
 
   // create the workspace pointer list
   workspace = (struct allreduce_workspace**)malloc(size * sizeof(struct allreduce_workspace*));
@@ -606,8 +612,8 @@ void all_reduce_outer_loop(torch::Tensor& data, size_t numel, int data_size) {
   }
 }
 
-void naive_all_gather(char* result_ptr, char* data_ptr, size_t res_stride, size_t chunk_size, size_t chunk_el) {
-  const int state_group = 1;
+void naive_all_gather(
+    char* result_ptr, char* data_ptr, size_t res_stride, size_t chunk_size, size_t chunk_el, int state_group) {
   static int current_buffer = 0;
   static int state_idx = 0;
 
@@ -647,7 +653,8 @@ void naive_all_gather(char* result_ptr, char* data_ptr, size_t res_stride, size_
   current_buffer = 1 - current_buffer;
 }
 
-torch::Tensor& all_gather(torch::Tensor& result, torch::Tensor& data, int dim, size_t numel, int data_size) {
+torch::Tensor&
+all_gather(torch::Tensor& result, torch::Tensor& data, int dim, size_t numel, int data_size, int state_group) {
   size_t dim_el = data.stride(dim) * data.size(dim);
   int dtype_size = data_size / numel;
   size_t dim_size = dim_el * dtype_size;
@@ -663,7 +670,8 @@ torch::Tensor& all_gather(torch::Tensor& result, torch::Tensor& data, int dim, s
           data_ptr + i * dim_size + offset,
           dim_size,
           chunk_size,
-          chunk_el);
+          chunk_el,
+          state_group);
     }
   }
   return result;
@@ -676,7 +684,7 @@ void naive_reduce_scatter(
     size_t chunk_size,
     size_t chunk_el,
     int element_size) {
-  const int state_group = 1;
+  const int state_group = 4;
   static int current_buffer = 0;
   static int state_idx = 0;
 
