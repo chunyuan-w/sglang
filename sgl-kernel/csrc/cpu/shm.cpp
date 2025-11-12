@@ -643,40 +643,21 @@ void all_reduce_outer_loop(torch::Tensor& data, size_t numel, int data_size) {
   }
 }
 
+template <int STATE_GROUP>
 void naive_all_gather(
-    char* result_ptr, char* data_ptr, size_t res_stride, size_t chunk_size, size_t chunk_el, int state_group) {
-  // --- static double-buffer indices for each op ---
-  static int current_buffer_all_gather = 0;
-  static int current_buffer_all_gather_into_tensor = 0;
+    char* result_ptr, char* data_ptr, size_t res_stride, size_t chunk_size, size_t chunk_el) {
+  
+  static int current_buffer = 0;
+  static int state_idx = 0;  
 
-  // --- static state_idx for copy_current/copy_next rotation per op ---
-  static int state_idx_all_gather = 0;
-  static int state_idx_all_gather_into_tensor = 0;
-
-  // --- select SHM buffer and current_buffer reference based on state_group ---
-  char** buffer[2] = {nullptr, nullptr};
-  int* current_buffer_ptr = nullptr;
-  int* state_idx_ptr = nullptr;
-
-  switch (state_group) {
-      case 2:  // all_gather
-          buffer[0] = allgather_buffer[0];
-          buffer[1] = allgather_buffer[1];
-          current_buffer_ptr = &current_buffer_all_gather;
-          state_idx_ptr = &state_idx_all_gather;
-          break;
-      case 3:  // all_gather_into_tensor
-          buffer[0] = allgather_into_tensor_buffer[0];
-          buffer[1] = allgather_into_tensor_buffer[1];
-          current_buffer_ptr = &current_buffer_all_gather_into_tensor;
-          state_idx_ptr = &state_idx_all_gather_into_tensor;
-          break;
-      default:
-          assert(false && "Unsupported state_group for naive_all_gather_merged");
+  char*** buffer = nullptr;
+  if constexpr (STATE_GROUP == 2) {
+      buffer = allgather_buffer;
+  } else if constexpr (STATE_GROUP == 3) {
+      buffer = allgather_into_tensor_buffer;
+  } else {
+      static_assert(STATE_GROUP == 2 || STATE_GROUP == 3, "Unsupported STATE_GROUP");
   }
-
-  int& current_buffer = *current_buffer_ptr;
-  int& state_idx = *state_idx_ptr;
 
   // init states to case 0 to get rid of "maybe-uninitialized" warning.
   enum coll_state copy_current = coll_allgather_naive__copy_in_done;
@@ -702,11 +683,11 @@ void naive_all_gather(
 
   parallel_memcpy(buffer[current_buffer][world_rank], data_ptr, chunk_size);
   std::atomic_thread_fence(std::memory_order_release);
-  workspace[world_rank]->states[state_group] = copy_current;
+  workspace[world_rank]->states[STATE_GROUP] = copy_current;
 
   for (int i = 0; i < world_size; i++) {
     // wait until all the other ranks copy the buffer
-    if (i != world_rank) wait_buffer_state_until_2(i, copy_current, copy_next, state_group);
+    if (i != world_rank) wait_buffer_state_until_2(i, copy_current, copy_next, STATE_GROUP);
   }
   for (int i = 0; i < world_size; i++) {
     parallel_memcpy(result_ptr + i * res_stride, buffer[current_buffer][i], chunk_size);
@@ -714,8 +695,9 @@ void naive_all_gather(
   current_buffer = 1 - current_buffer;
 }
 
+template <int STATE_GROUP>
 torch::Tensor&
-all_gather(torch::Tensor& result, torch::Tensor& data, int dim, size_t numel, int data_size, int state_group) {
+all_gather(torch::Tensor& result, torch::Tensor& data, int dim, size_t numel, int data_size) {
   size_t dim_el = data.stride(dim) * data.size(dim);
   int dtype_size = data_size / numel;
   size_t dim_size = dim_el * dtype_size;
@@ -726,17 +708,19 @@ all_gather(torch::Tensor& result, torch::Tensor& data, int dim, size_t numel, in
     for (size_t offset = 0; offset < dim_size; offset += MAX_BUF_SIZE) {
       size_t chunk_size = dim_size - offset > MAX_BUF_SIZE ? MAX_BUF_SIZE : dim_size - offset;
       size_t chunk_el = chunk_size / dtype_size;
-      naive_all_gather(
+      naive_all_gather<STATE_GROUP>(
           result_ptr + i * dim_size * world_size + offset,
           data_ptr + i * dim_size + offset,
           dim_size,
           chunk_size,
-          chunk_el,
-          state_group);
+          chunk_el);
     }
   }
   return result;
 }
+
+template torch::Tensor& all_gather<STATE_GROUP_ALL_GATHER>(torch::Tensor&, torch::Tensor&, int, size_t, int);
+template torch::Tensor& all_gather<STATE_GROUP_ALL_GATHER_INTO_TENSOR>(torch::Tensor&, torch::Tensor&, int, size_t, int);
 
 void naive_reduce_scatter(
     char* output_ptr,
