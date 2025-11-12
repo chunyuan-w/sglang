@@ -81,7 +81,7 @@ void shm_allgather_into_tensor(torch::Tensor& output_tensor, torch::Tensor& data
   int data_size = numel * data.element_size();
   int64_t dim = 0;
   const int state_group = 3;
-  all_gather_into_tensor(output_tensor, data, dim, numel, data_size, state_group);
+  all_gather(output_tensor, data, dim, numel, data_size, state_group);
 }
 
 void shm_reduce_scatter_tensor(at::Tensor& output_tensor, at::Tensor& data, int64_t op) {
