@@ -434,11 +434,11 @@ void shm_initialize(int size, int rank, const char* addr_string, const char* por
   snprintf(shm_name, NAME_BUF_SIZE, "%.900s_%d", shm_name_prefix, rank);
   shared_create(&allreduce_buffer, shm_name, workspace_buf, sizeof(struct allreduce_workspace));
   workspace_buf = (struct allreduce_workspace*)allreduce_buffer.bytes;
-  workspace_buf->states[0] = coll_alt2_allreduce_naive__copy_in_done;  // symmetric_naive_all_reduce
-  workspace_buf->states[1] = coll_begin;                               // distributed_naive_reduce
-  workspace_buf->states[2] = coll_alt2_allgather_naive__copy_in_done;  // all_gather
-  workspace_buf->states[3] = coll_alt2_allgather_naive__copy_in_done;  // all_gather_into_tensor
-  workspace_buf->states[4] = coll_begin;                               // reduce_scatter
+  workspace_buf->states[STATE_GROUP_SYMMETRIC_ALLREDUCE] = coll_alt2_allreduce_naive__copy_in_done;  // symmetric_naive_all_reduce
+  workspace_buf->states[STATE_GROUP_DISTRIBUTED_ALLREDUCE] = coll_begin;                               // distributed_naive_reduce
+  workspace_buf->states[STATE_GROUP_ALL_GATHER] = coll_alt2_allgather_naive__copy_in_done;  // all_gather
+  workspace_buf->states[STATE_GROUP_ALL_GATHER_INTO_TENSOR] = coll_alt2_allgather_naive__copy_in_done;  // all_gather_into_tensor
+  workspace_buf->states[STATE_GROUP_REDUCE_SCATTER] = coll_begin;                               // reduce_scatter
 
   // create the workspace pointer list
   workspace = (struct allreduce_workspace**)malloc(size * sizeof(struct allreduce_workspace*));
@@ -520,7 +520,7 @@ size_t slice_el_start(size_t chunk_el, int slice_idx) {
 }
 
 void symmetric_naive_all_reduce(char* data_ptr, c10::ScalarType scalar_type, size_t chunk_size, size_t chunk_el) {
-  const int state_group = 0;
+  const int state_group = STATE_GROUP_DISTRIBUTED_ALLREDUCE;
   static int current_buffer = 0;
   static int state_idx = 0;
 
@@ -567,7 +567,7 @@ void symmetric_naive_all_reduce(char* data_ptr, c10::ScalarType scalar_type, siz
 
 // naive allreduce distributed, each rank do naive reduce on its slice
 void distributed_naive_reduce(char* data_ptr, c10::ScalarType scalar_type, size_t chunk_size, size_t chunk_el) {
-  const int state_group = 1;
+  const int state_group = STATE_GROUP_DISTRIBUTED_ALLREDUCE;
   static int current_buffer = 0;
   static int state_idx = 0;
 
@@ -652,12 +652,12 @@ void naive_all_gather(
   static int state_idx = 0;  
 
   char*** buffer = nullptr;
-  if constexpr (STATE_GROUP == 2) {
+  if constexpr (STATE_GROUP == STATE_GROUP_ALL_GATHER) {
       buffer = allgather_buffer;
-  } else if constexpr (STATE_GROUP == 3) {
+  } else if constexpr (STATE_GROUP == STATE_GROUP_ALL_GATHER_INTO_TENSOR) {
       buffer = allgather_into_tensor_buffer;
   } else {
-      static_assert(STATE_GROUP == 2 || STATE_GROUP == 3, "Unsupported STATE_GROUP");
+      static_assert(STATE_GROUP == STATE_GROUP_ALL_GATHER || STATE_GROUP == STATE_GROUP_ALL_GATHER_INTO_TENSOR, "Unsupported STATE_GROUP");
   }
 
   // init states to case 0 to get rid of "maybe-uninitialized" warning.
@@ -730,7 +730,7 @@ void naive_reduce_scatter(
     size_t chunk_size,
     size_t chunk_el,
     int element_size) {
-  const int state_group = 4;
+  const int state_group = STATE_GROUP_REDUCE_SCATTER;
   static int current_buffer = 0;
   static int state_idx = 0;
 
