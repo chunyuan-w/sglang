@@ -26,7 +26,7 @@ enum coll_state {
   coll_reduce_scatter_naive__copy_in_done,
   coll_reduce_scatter_naive__reduce_done,
   coll_alt1_reduce_scatter_naive__copy_in_done,
-  coll_alt1_reduce_scatter_naive__reduce_done,
+  coll_alt2_reduce_scatter_naive__copy_in_done,
 };
 
 // SHM building blocks
@@ -85,6 +85,7 @@ struct allreduce_workspace {
   // offset=0 -- 2*NAIVE_ALLREDUCE_THRESHOLD : buffer for
   // symmetric_naive_all_reduce after that : buffer for
   // distributed_naive_all_reduce
+  // TODO: check the total buffer size needed here
   char buffer[
     2 * NAIVE_ALLREDUCE_THRESHOLD +  // symmetric allreduce
     2 * MAX_BUF_SIZE +                // distributed naive reduce
@@ -734,24 +735,25 @@ void naive_reduce_scatter(
   static int state_idx = 0;
 
   enum coll_state copy_current = coll_reduce_scatter_naive__copy_in_done;
-  enum coll_state reduce_current = coll_reduce_scatter_naive__reduce_done;
   enum coll_state copy_next = coll_alt1_reduce_scatter_naive__copy_in_done;
 
   switch (state_idx) {
     case 0:
       copy_current = coll_reduce_scatter_naive__copy_in_done;
-      reduce_current = coll_reduce_scatter_naive__reduce_done;
       copy_next = coll_alt1_reduce_scatter_naive__copy_in_done;
       break;
     case 1:
       copy_current = coll_alt1_reduce_scatter_naive__copy_in_done;
-      reduce_current = coll_alt1_reduce_scatter_naive__reduce_done;
+      copy_next = coll_alt2_reduce_scatter_naive__copy_in_done;
+      break;
+    case 2:
+      copy_current = coll_alt2_reduce_scatter_naive__copy_in_done;
       copy_next = coll_reduce_scatter_naive__copy_in_done;
       break;
     default:
       assert(!"Should not get here.");
   }
-  state_idx = (state_idx + 1) % 2;
+  state_idx = (state_idx + 1) % 3;
 
   // Step 1: copy local data to shared buffer
   parallel_memcpy(reduce_scatter_buffer[current_buffer][world_rank], data_ptr, chunk_size);
@@ -760,7 +762,7 @@ void naive_reduce_scatter(
 
   // Step 2: wait for all ranks to copy in
   for (int i = 0; i < world_size; i++) {
-    if (i != world_rank) wait_buffer_state_until_2(i, copy_current, reduce_current, state_group);
+    if (i != world_rank) wait_buffer_state_until_2(i, copy_current, copy_next, state_group);
   }
 
   // // Step 3: do local reduce on this rank’s slice only
@@ -776,15 +778,6 @@ void naive_reduce_scatter(
           start_el * element_size,  // TODO: in reduce_all_buffers, the output_ptr is the buffer for all ranks, but here
                                     // output_ptr is already the local buffer for one rank. Adjust it here.
       reduce_scatter_buffer[current_buffer]);
-
-  // Step 4: fence and mark reduce done
-  std::atomic_thread_fence(std::memory_order_release);
-  workspace[world_rank]->states[state_group] = reduce_current;
-
-  // Step 5: wait for everyone to finish reduce
-  for (int i = 0; i < world_size; i++) {
-    if (i != world_rank) wait_buffer_state_until_2(i, reduce_current, copy_next, state_group);
-  }
 
   // done
   current_buffer = 1 - current_buffer;
