@@ -85,21 +85,23 @@ struct allreduce_workspace {
   // offset=0 -- 2*NAIVE_ALLREDUCE_THRESHOLD : buffer for
   // symmetric_naive_all_reduce after that : buffer for
   // distributed_naive_all_reduce
-  // TODO: check the total buffer size needed here
-  char buffer[
-    2 * NAIVE_ALLREDUCE_THRESHOLD +  // symmetric allreduce
-    2 * MAX_BUF_SIZE +                // distributed naive reduce
-    2 * MAX_BUF_SIZE +                // allgather
-    2 * MAX_BUF_SIZE +                // allgather_into_tensor
-    2 * MAX_BUF_SIZE                  // reduce_scatter
+  char buffer
+      [2 * NAIVE_ALLREDUCE_THRESHOLD +  // symmetric allreduce
+       2 * MAX_BUF_SIZE +               // distributed naive reduce
+       2 * MAX_BUF_SIZE +               // allgather
+       2 * MAX_BUF_SIZE +               // allgather_into_tensor
+       2 * MAX_BUF_SIZE                 // reduce_scatter
   ];
 };
 
 #define BUFFER0_OFFSET(current_buffer) current_buffer* NAIVE_ALLREDUCE_THRESHOLD
 #define BUFFER1_OFFSET(current_buffer) 2 * NAIVE_ALLREDUCE_THRESHOLD + current_buffer* MAX_BUF_SIZE
-#define BUFFER2_OFFSET(current_buffer) (2*NAIVE_ALLREDUCE_THRESHOLD + 2*MAX_BUF_SIZE + current_buffer*MAX_BUF_SIZE)  // allgather
-#define BUFFER3_OFFSET(current_buffer) (2*NAIVE_ALLREDUCE_THRESHOLD + 4*MAX_BUF_SIZE + current_buffer*MAX_BUF_SIZE)  // allgather_into_tensor
-#define BUFFER4_OFFSET(current_buffer) (2*NAIVE_ALLREDUCE_THRESHOLD + 6*MAX_BUF_SIZE + current_buffer*MAX_BUF_SIZE)  // reduce_scatter
+#define BUFFER2_OFFSET(current_buffer) \
+  (2 * NAIVE_ALLREDUCE_THRESHOLD + 2 * MAX_BUF_SIZE + current_buffer * MAX_BUF_SIZE)  // allgather
+#define BUFFER3_OFFSET(current_buffer) \
+  (2 * NAIVE_ALLREDUCE_THRESHOLD + 4 * MAX_BUF_SIZE + current_buffer * MAX_BUF_SIZE)  // allgather_into_tensor
+#define BUFFER4_OFFSET(current_buffer) \
+  (2 * NAIVE_ALLREDUCE_THRESHOLD + 6 * MAX_BUF_SIZE + current_buffer * MAX_BUF_SIZE)  // reduce_scatter
 
 struct allreduce_workspace** workspace;
 
@@ -434,11 +436,13 @@ void shm_initialize(int size, int rank, const char* addr_string, const char* por
   snprintf(shm_name, NAME_BUF_SIZE, "%.900s_%d", shm_name_prefix, rank);
   shared_create(&allreduce_buffer, shm_name, workspace_buf, sizeof(struct allreduce_workspace));
   workspace_buf = (struct allreduce_workspace*)allreduce_buffer.bytes;
-  workspace_buf->states[STATE_GROUP_SYMMETRIC_ALLREDUCE] = coll_alt2_allreduce_naive__copy_in_done;  // symmetric_naive_all_reduce
-  workspace_buf->states[STATE_GROUP_DISTRIBUTED_ALLREDUCE] = coll_begin;                               // distributed_naive_reduce
+  workspace_buf->states[STATE_GROUP_SYMMETRIC_ALLREDUCE] =
+      coll_alt2_allreduce_naive__copy_in_done;                            // symmetric_naive_all_reduce
+  workspace_buf->states[STATE_GROUP_DISTRIBUTED_ALLREDUCE] = coll_begin;  // distributed_naive_reduce
   workspace_buf->states[STATE_GROUP_ALL_GATHER] = coll_alt2_allgather_naive__copy_in_done;  // all_gather
-  workspace_buf->states[STATE_GROUP_ALL_GATHER_INTO_TENSOR] = coll_alt2_allgather_naive__copy_in_done;  // all_gather_into_tensor
-  workspace_buf->states[STATE_GROUP_REDUCE_SCATTER] = coll_begin;                               // reduce_scatter
+  workspace_buf->states[STATE_GROUP_ALL_GATHER_INTO_TENSOR] =
+      coll_alt2_allgather_naive__copy_in_done;                     // all_gather_into_tensor
+  workspace_buf->states[STATE_GROUP_REDUCE_SCATTER] = coll_begin;  // reduce_scatter
 
   // create the workspace pointer list
   workspace = (struct allreduce_workspace**)malloc(size * sizeof(struct allreduce_workspace*));
@@ -473,7 +477,7 @@ void shm_initialize(int size, int rank, const char* addr_string, const char* por
     symmetric_buffer[1][i] = workspace[i]->buffer + BUFFER0_OFFSET(1);
     distributed_buffer[0][i] = workspace[i]->buffer + BUFFER1_OFFSET(0);
     distributed_buffer[1][i] = workspace[i]->buffer + BUFFER1_OFFSET(1);
-    
+
     allgather_buffer[0][i] = workspace[i]->buffer + BUFFER2_OFFSET(0);
     allgather_buffer[1][i] = workspace[i]->buffer + BUFFER2_OFFSET(1);
 
@@ -481,7 +485,7 @@ void shm_initialize(int size, int rank, const char* addr_string, const char* por
     allgather_into_tensor_buffer[1][i] = workspace[i]->buffer + BUFFER3_OFFSET(1);
 
     reduce_scatter_buffer[0][i] = workspace[i]->buffer + BUFFER4_OFFSET(0);
-    reduce_scatter_buffer[1][i] = workspace[i]->buffer + BUFFER4_OFFSET(1);    
+    reduce_scatter_buffer[1][i] = workspace[i]->buffer + BUFFER4_OFFSET(1);
   }
 }
 
@@ -645,19 +649,19 @@ void all_reduce_outer_loop(torch::Tensor& data, size_t numel, int data_size) {
 }
 
 template <int STATE_GROUP>
-void naive_all_gather(
-    char* result_ptr, char* data_ptr, size_t res_stride, size_t chunk_size, size_t chunk_el) {
-  
+void naive_all_gather(char* result_ptr, char* data_ptr, size_t res_stride, size_t chunk_size, size_t chunk_el) {
   static int current_buffer = 0;
-  static int state_idx = 0;  
+  static int state_idx = 0;
 
   char*** buffer = nullptr;
   if constexpr (STATE_GROUP == STATE_GROUP_ALL_GATHER) {
-      buffer = allgather_buffer;
+    buffer = allgather_buffer;
   } else if constexpr (STATE_GROUP == STATE_GROUP_ALL_GATHER_INTO_TENSOR) {
-      buffer = allgather_into_tensor_buffer;
+    buffer = allgather_into_tensor_buffer;
   } else {
-      static_assert(STATE_GROUP == STATE_GROUP_ALL_GATHER || STATE_GROUP == STATE_GROUP_ALL_GATHER_INTO_TENSOR, "Unsupported STATE_GROUP");
+    static_assert(
+        STATE_GROUP == STATE_GROUP_ALL_GATHER || STATE_GROUP == STATE_GROUP_ALL_GATHER_INTO_TENSOR,
+        "Unsupported STATE_GROUP");
   }
 
   // init states to case 0 to get rid of "maybe-uninitialized" warning.
@@ -697,8 +701,7 @@ void naive_all_gather(
 }
 
 template <int STATE_GROUP>
-torch::Tensor&
-all_gather(torch::Tensor& result, torch::Tensor& data, int dim, size_t numel, int data_size) {
+torch::Tensor& all_gather(torch::Tensor& result, torch::Tensor& data, int dim, size_t numel, int data_size) {
   size_t dim_el = data.stride(dim) * data.size(dim);
   int dtype_size = data_size / numel;
   size_t dim_size = dim_el * dtype_size;
@@ -721,7 +724,8 @@ all_gather(torch::Tensor& result, torch::Tensor& data, int dim, size_t numel, in
 }
 
 template torch::Tensor& all_gather<STATE_GROUP_ALL_GATHER>(torch::Tensor&, torch::Tensor&, int, size_t, int);
-template torch::Tensor& all_gather<STATE_GROUP_ALL_GATHER_INTO_TENSOR>(torch::Tensor&, torch::Tensor&, int, size_t, int);
+template torch::Tensor&
+all_gather<STATE_GROUP_ALL_GATHER_INTO_TENSOR>(torch::Tensor&, torch::Tensor&, int, size_t, int);
 
 void naive_reduce_scatter(
     char* output_ptr,
@@ -775,7 +779,7 @@ void naive_reduce_scatter(
       scalar_type,
       world_rank,
       output_ptr -
-          start_el * element_size,  // TODO: in reduce_all_buffers, the output_ptr is the buffer for all ranks, but here
+          start_el * element_size,  // in reduce_all_buffers, the output_ptr is the buffer for all ranks, but here
                                     // output_ptr is already the local buffer for one rank. Adjust it here.
       reduce_scatter_buffer[current_buffer]);
 
