@@ -524,7 +524,7 @@ size_t slice_el_start(size_t chunk_el, int slice_idx) {
 }
 
 void symmetric_naive_all_reduce(char* data_ptr, c10::ScalarType scalar_type, size_t chunk_size, size_t chunk_el) {
-  const int state_group = STATE_GROUP_DISTRIBUTED_ALLREDUCE;
+  const int state_group = STATE_GROUP_SYMMETRIC_ALLREDUCE;
   static int current_buffer = 0;
   static int state_idx = 0;
 
