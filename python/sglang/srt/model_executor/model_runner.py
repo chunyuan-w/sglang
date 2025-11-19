@@ -2232,11 +2232,21 @@ class ModelRunner:
             forward_batch.prepare_attn_tp_scatter_input(self)
 
         if forward_batch.forward_mode.is_decode():
-            ret = self.forward_decode(
-                forward_batch,
-                skip_attn_backend_init=skip_attn_backend_init,
-                pp_proxy_tensors=pp_proxy_tensors,
-            )
+            # using 1024 (input) + 128 (output) here
+            should_profile_decode = forward_batch.seq_lens[0] == 1152
+            
+            if should_profile_decode:
+                print(f"my rank {self.tp_rank}: shape {forward_batch.seq_lens.shape}, value {forward_batch.seq_lens}", flush=True)
+            
+            with torch.autograd.profiler.profile(should_profile_decode) as prof:
+                ret = self.forward_decode(
+                    forward_batch,
+                    skip_attn_backend_init=skip_attn_backend_init,
+                    pp_proxy_tensors=pp_proxy_tensors,
+                )
+            if should_profile_decode:
+                print(prof.key_averages().table(sort_by="self_cpu_time_total"))
+            
         elif forward_batch.forward_mode.is_split_prefill():
             ret = self.forward_split_prefill(
                 forward_batch,
