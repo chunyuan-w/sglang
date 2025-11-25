@@ -373,6 +373,26 @@ class TpModelWorker(BaseTpWorker):
                 pp_proxy_tensors=pp_proxy_tensors,
                 skip_attn_backend_init=skip_attn_backend_init,
             )
+            
+            
+            
+            # ################ profiling ################
+            # record_shapes = True
+
+            # should_profile_decode = forward_batch.forward_mode.is_decode() and forward_batch.seq_lens[0] == 1084
+            # with torch.autograd.profiler.profile(should_profile_decode, record_shapes=record_shapes) as prof:
+            #     logits_output, can_run_cuda_graph = self.model_runner.forward(
+            #         forward_batch,
+            #         pp_proxy_tensors=pp_proxy_tensors,
+            #         skip_attn_backend_init=skip_attn_backend_init,
+            #     )         
+            # if should_profile_decode:
+            #     print(prof.key_averages(group_by_input_shape=record_shapes).table(sort_by="self_cpu_time_total"))
+            # ################ profiling ################
+            
+            
+            
+            
             batch_result = GenerationBatchResult(
                 logits_output=logits_output,
                 can_run_cuda_graph=can_run_cuda_graph,
@@ -420,6 +440,8 @@ class TpModelWorker(BaseTpWorker):
 
             return batch_result
         else:
+            # print("my forward else", flush=True)
+            
             pp_proxy_tensors, can_run_cuda_graph = self.model_runner.forward(
                 forward_batch,
                 pp_proxy_tensors=pp_proxy_tensors,
