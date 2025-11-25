@@ -55,11 +55,12 @@ class MLPSyncBatchInfo:
             device=device,
         )
 
-        torch.distributed.all_gather_into_tensor(
-            global_info_tensor.flatten(),
-            local_info_tensor,
-            group=group,
-        )
+        torch.ops.sgl_kernel.shm_allgather_into_tensor(global_info_tensor.flatten(), local_info_tensor)
+        # torch.distributed.all_gather_into_tensor(
+        #     global_info_tensor.flatten(),
+        #     local_info_tensor,
+        #     group=group,
+        # )
 
         tp0_info = global_info_tensor[:, 0, :]
         self.tp0_info = tp0_info
@@ -186,6 +187,32 @@ class SchedulerDPAttnMixin:
             disable_overlap_schedule=self.server_args.disable_overlap_schedule,
             offload_tags=self.offload_tags,
         )
+        
+        
+        # ################ profiling ################
+        
+        # record_shapes = True
+        # should_profile_decode = local_batch is not None and local_batch.seq_lens[0] == 1084
+        # with torch.autograd.profiler.profile(should_profile_decode, record_shapes=record_shapes) as prof:
+
+        #     out = prepare_mlp_sync_batch_raw(
+        #         local_batch,
+        #         dp_size=self.server_args.dp_size,
+        #         attn_tp_size=self.attn_tp_size,
+        #         tp_group=self.tp_group,
+        #         get_idle_batch=self.get_idle_batch,
+        #         disable_cuda_graph=self.server_args.disable_cuda_graph,
+        #         require_mlp_tp_gather=require_mlp_tp_gather(self.server_args),
+        #         disable_overlap_schedule=self.server_args.disable_overlap_schedule,
+        #         offload_tags=self.offload_tags,
+        #     )
+        # if should_profile_decode:
+        #     print(prof.key_averages(group_by_input_shape=record_shapes).table(sort_by="self_cpu_time_total"))
+        
+        # return out
+        # ################ profiling ################
+        
+        
 
     def get_idle_batch(self: Scheduler) -> ScheduleBatch:
         idle_batch = ScheduleBatch.init_new(
