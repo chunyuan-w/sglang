@@ -2234,32 +2234,32 @@ class ModelRunner:
 
         record_shapes = True
         if forward_batch.forward_mode.is_decode():
-            # ret = self.forward_decode(
-            #     forward_batch,
-            #     skip_attn_backend_init=skip_attn_backend_init,
-            #     pp_proxy_tensors=pp_proxy_tensors,
-            # )            
+            ret = self.forward_decode(
+                forward_batch,
+                skip_attn_backend_init=skip_attn_backend_init,
+                pp_proxy_tensors=pp_proxy_tensors,
+            )            
             
-            ################ profiling ################
-            # using 1024 (input) + 128 (output) here
-            should_profile_decode = forward_batch.seq_lens[0] == 1084
+            # ################ profiling ################
+            # # using 1024 (input) + 128 (output) here
+            # should_profile_decode = forward_batch.seq_lens[0] == 1084
             
-            if should_profile_decode:
-                print(f"my rank {self.tp_rank} decode: shape {forward_batch.seq_lens.shape}, value {forward_batch.seq_lens}", flush=True)
+            # if should_profile_decode:
+            #     print(f"my rank {self.tp_rank} decode: shape {forward_batch.seq_lens.shape}, value {forward_batch.seq_lens}", flush=True)
             
-            with torch.autograd.profiler.profile(should_profile_decode, record_shapes=record_shapes) as prof:
-                ret = self.forward_decode(
-                    forward_batch,
-                    skip_attn_backend_init=skip_attn_backend_init,
-                    pp_proxy_tensors=pp_proxy_tensors,
-                )
-            if should_profile_decode:
-                print(prof.key_averages(group_by_input_shape=record_shapes).table(sort_by="self_cpu_time_total"))
+            # with torch.autograd.profiler.profile(should_profile_decode, record_shapes=record_shapes) as prof:
+            #     ret = self.forward_decode(
+            #         forward_batch,
+            #         skip_attn_backend_init=skip_attn_backend_init,
+            #         pp_proxy_tensors=pp_proxy_tensors,
+            #     )
+            # if should_profile_decode:
+            #     print(prof.key_averages(group_by_input_shape=record_shapes).table(sort_by="self_cpu_time_total"))
                 
-                profile_path = os.environ.get("SGLANG_TORCH_PROFILER_DIR")
-                # prof.export_chrome_trace(f"{profile_path}/decode_tp.trace.json.gz")
+            #     profile_path = os.environ.get("SGLANG_TORCH_PROFILER_DIR")
+            #     # prof.export_chrome_trace(f"{profile_path}/decode_tp.trace.json.gz")
 
-            ################ profiling ################
+            # ################ profiling ################
             
         elif forward_batch.forward_mode.is_split_prefill():
             ret = self.forward_split_prefill(
@@ -2268,24 +2268,24 @@ class ModelRunner:
                 forward_count=split_forward_count,
             )
         elif forward_batch.forward_mode.is_extend(include_draft_extend_v2=True):
-            # ret = self.forward_extend(
-            #     forward_batch,
-            #     skip_attn_backend_init=skip_attn_backend_init,
-            #     pp_proxy_tensors=pp_proxy_tensors,
-            # )            
+            ret = self.forward_extend(
+                forward_batch,
+                skip_attn_backend_init=skip_attn_backend_init,
+                pp_proxy_tensors=pp_proxy_tensors,
+            )            
             
             
-            ################ profiling ################
-            print(f"my rank {self.tp_rank} extend: shape {forward_batch.seq_lens.shape}, value {forward_batch.seq_lens}", flush=True)
+            # ################ profiling ################
+            # print(f"my rank {self.tp_rank} extend: shape {forward_batch.seq_lens.shape}, value {forward_batch.seq_lens}", flush=True)
             
-            with torch.autograd.profiler.profile(record_shapes=record_shapes) as prof:
-                ret = self.forward_extend(
-                    forward_batch,
-                    skip_attn_backend_init=skip_attn_backend_init,
-                    pp_proxy_tensors=pp_proxy_tensors,
-                )
-            print(prof.key_averages(group_by_input_shape=record_shapes).table(sort_by="self_cpu_time_total"))
-            ################ profiling ################
+            # with torch.autograd.profiler.profile(record_shapes=record_shapes) as prof:
+            #     ret = self.forward_extend(
+            #         forward_batch,
+            #         skip_attn_backend_init=skip_attn_backend_init,
+            #         pp_proxy_tensors=pp_proxy_tensors,
+            #     )
+            # print(prof.key_averages(group_by_input_shape=record_shapes).table(sort_by="self_cpu_time_total"))
+            # ################ profiling ################
         elif forward_batch.forward_mode.is_idle():
             ret = self.forward_idle(forward_batch, pp_proxy_tensors=pp_proxy_tensors)
         else:
