@@ -379,7 +379,7 @@ class TpModelWorker(BaseTpWorker):
             # ################ profiling ################
             # record_shapes = True
 
-            # should_profile_decode = forward_batch.forward_mode.is_decode() and forward_batch.seq_lens[0] == 1084
+            # should_profile_decode = forward_batch.forward_mode.is_decode() and forward_batch.seq_lens[0] == 1536
             # with torch.autograd.profiler.profile(should_profile_decode, record_shapes=record_shapes) as prof:
             #     logits_output, can_run_cuda_graph = self.model_runner.forward(
             #         forward_batch,

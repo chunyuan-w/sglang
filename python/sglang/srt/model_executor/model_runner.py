@@ -2242,7 +2242,7 @@ class ModelRunner:
             
             # ################ profiling ################
             # # using 1024 (input) + 128 (output) here
-            # should_profile_decode = forward_batch.seq_lens[0] == 1084
+            # should_profile_decode = forward_batch.seq_lens[0] == 1536
             
             # if should_profile_decode:
             #     print(f"my rank {self.tp_rank} decode: shape {forward_batch.seq_lens.shape}, value {forward_batch.seq_lens}", flush=True)

@@ -192,7 +192,7 @@ class SchedulerDPAttnMixin:
         # ################ profiling ################
         
         # record_shapes = True
-        # should_profile_decode = local_batch is not None and local_batch.seq_lens[0] == 1084
+        # should_profile_decode = local_batch is not None and local_batch.seq_lens[0] == 1536
         # with torch.autograd.profiler.profile(should_profile_decode, record_shapes=record_shapes) as prof:
 
         #     out = prepare_mlp_sync_batch_raw(
