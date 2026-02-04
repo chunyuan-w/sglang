@@ -88,6 +88,39 @@ inline void copy_stub<at::BFloat16>(at::BFloat16* __restrict__ out, const float*
 }
 #endif
 
+template <typename scalar_t>
+inline void bias_add_stub(
+    float* __restrict__ s_row,
+    const scalar_t* __restrict__ bias_row,
+    int64_t n_size,
+    int64_t bias_strideN) {
+
+  using fVec = at::vec::Vectorized<float>;
+  using bVec = at::vec::Vectorized<scalar_t>;
+  constexpr int kVecSize = fVec::size();
+
+  int64_t col = 0;
+
+#pragma GCC unroll 4
+    for (col = 0; col <= n_size - kVecSize; col += kVecSize) {
+
+      bVec b_vec = bVec::loadu(bias_row + col);
+      fVec b0, b1;
+      std::tie(b0, b1) = at::vec::convert_to_float(b_vec);
+
+      fVec data0 = fVec::loadu(s_row + col) + b0;
+      fVec data1 = fVec::loadu(s_row + col + fVec::size()) + b1;
+
+      data0.store(s_row + col);
+      data1.store(s_row + col + fVec::size());
+    }
+
+  for (; col < n_size; ++col) {
+    s_row[col] += static_cast<float>(
+        bias_row[col * bias_strideN]);
+  }
+}
+
 template <typename scalar_t, int BLOCK_M, int BLOCK_N>
 struct flash_attn_softmax {
   static inline void apply(

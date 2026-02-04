@@ -114,6 +114,7 @@ at::Tensor flash_attn_varlen_func(
     const at::Tensor& q,
     const at::Tensor& k,
     const at::Tensor& v,
+    const at::Tensor& bias,
     const at::Tensor& cu_seqlens_q,
     const at::Tensor& cu_seqlens_k,
     int64_t max_seqlen_q,
@@ -400,7 +401,7 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
 
   // flash attn
   m.def(
-      "flash_attn_varlen_func(Tensor q, Tensor k, Tensor v, Tensor cu_seqlens_q, Tensor cu_seqlens_k, "
+      "flash_attn_varlen_func(Tensor q, Tensor k, Tensor v, Tensor bias, Tensor cu_seqlens_q, Tensor cu_seqlens_k, "
       "int max_seqlen_q, int max_seqlen_k, bool causal) -> Tensor");
   m.impl("flash_attn_varlen_func", torch::kCPU, &flash_attn_varlen_func);
 

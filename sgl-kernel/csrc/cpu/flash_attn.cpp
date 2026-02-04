@@ -44,6 +44,7 @@ void flash_attn_kernel_impl(
     const scalar_t* __restrict__ q,
     const scalar_t* __restrict__ k,
     const scalar_t* __restrict__ v,
+    const scalar_t* __restrict__ bias,
     void* __restrict__ buffer,
     int seqlen_q,
     int seqlen_k,
@@ -58,6 +59,9 @@ void flash_attn_kernel_impl(
     int k_strideH,
     int v_strideN,
     int v_strideH,
+    int bias_strideH,
+    int bias_strideM,
+    int bias_strideN,    
     float sm_scale,
     int buffer_size_per_thread,
     bool causal) {
@@ -144,6 +148,25 @@ void flash_attn_kernel_impl(
             /* A     */ q_ptr,
             /* B     */ Btmp,
             /* C     */ s_i);
+
+        // apply bias on s_i
+
+        const scalar_t* __restrict__ bias_ptr =
+            bias + head_id * bias_strideH
+                + m * bias_strideM
+                + n * bias_strideN;
+
+        for (int row = 0; row < m_size; ++row) {
+          float* s_i_row_ptr = s_i + row * BLOCK_N;
+          const scalar_t* __restrict__ bias_row_ptr =
+              bias_ptr + row * bias_strideM;
+
+          bias_add_stub<scalar_t>(
+              s_i_row_ptr,
+              bias_row_ptr,
+              n_size,
+              bias_strideN);
+        }
 
         // apply causal mask
         if (causal && num_keys - n <= BLOCK_N) {
@@ -416,6 +439,7 @@ inline void resize_indices(at::Tensor& indices, int num_seqs, int max_seqlen_q) 
 //   q: [num_tokens, num_heads, head_size]
 //   k: [num_tokens, num_heads_kv, head_size]
 //   v: [num_tokens, num_heads_kv, head_size_v]
+//   bias: [num_heads, num_tokens, num_tokens]
 //   cu_seqlens_q: [num_seqs + 1]
 //   cu_seqlens_k: [num_seqs + 1]
 //   out: [num_tokens, num_heads, head_size_v]
@@ -424,6 +448,7 @@ at::Tensor flash_attn_varlen_func(
     const at::Tensor& q,
     const at::Tensor& k,
     const at::Tensor& v,
+    const at::Tensor& bias,
     const at::Tensor& cu_seqlens_q,
     const at::Tensor& cu_seqlens_k,
     int64_t max_seqlen_q,
@@ -436,9 +461,11 @@ at::Tensor flash_attn_varlen_func(
   CHECK_LAST_DIM_CONTIGUOUS_INPUT(q);
   CHECK_LAST_DIM_CONTIGUOUS_INPUT(k);
   CHECK_LAST_DIM_CONTIGUOUS_INPUT(v);
+  CHECK_LAST_DIM_CONTIGUOUS_INPUT(bias);
   CHECK_DIM(3, q);
   CHECK_DIM(3, k);
   CHECK_DIM(3, v);
+  CHECK_DIM(3, bias);
   CHECK_INPUT(cu_seqlens_q);
   CHECK_INPUT(cu_seqlens_k);
   CHECK_EQ(cu_seqlens_q.scalar_type(), at::kInt);
@@ -459,10 +486,21 @@ at::Tensor flash_attn_varlen_func(
   int v_strideN = v.stride(0);
   int v_strideH = v.stride(1);
 
+  // strides for bias
+  int bias_strideH = bias.stride(0);
+  int bias_strideM = bias.stride(1);
+  int bias_strideN = bias.stride(2);
+
   // check sizes
   CHECK_EQ(k.size(2), head_size);
   CHECK_EQ(v.size(1), num_heads_kv);
   CHECK_EQ(cu_seqlens_k.size(0), num_seqs + 1);
+  CHECK_EQ(bias.size(0), num_heads);
+  
+  // TODO: make bias an optional variable
+  // TODO: only non varlen is supported if bias is there. bias.size(1) == num_token_q, bias.size(2) == num_token_k
+  // CHECK_EQ(bias.size(1), num_tokens);
+  // CHECK_EQ(bias.size(2), num_tokens);
 
   // D and DV need to be even as we transpose by 512-bit
   TORCH_CHECK(head_size % 2 == 0, "invalid head_size ", head_size);
@@ -520,6 +558,7 @@ at::Tensor flash_attn_varlen_func(
           q.data_ptr<scalar_t>(),
           k.data_ptr<scalar_t>(),
           v.data_ptr<scalar_t>(),
+          bias.data_ptr<scalar_t>(),
           buffer.data_ptr(),
           max_seqlen_q,
           max_seqlen_k,
@@ -534,6 +573,9 @@ at::Tensor flash_attn_varlen_func(
           k_strideH,
           v_strideN,
           v_strideH,
+          bias_strideH,
+          bias_strideM,
+          bias_strideN,          
           sm_scale,
           sz,
           causal);
