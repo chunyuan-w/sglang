@@ -149,25 +149,6 @@ void flash_attn_kernel_impl(
             /* B     */ Btmp,
             /* C     */ s_i);
 
-        // apply bias on s_i
-
-        const scalar_t* __restrict__ bias_ptr =
-            bias + head_id * bias_strideH
-                + m * bias_strideM
-                + n * bias_strideN;
-
-        for (int row = 0; row < m_size; ++row) {
-          float* s_i_row_ptr = s_i + row * BLOCK_N;
-          const scalar_t* __restrict__ bias_row_ptr =
-              bias_ptr + row * bias_strideM;
-
-          bias_add_stub<scalar_t>(
-              s_i_row_ptr,
-              bias_row_ptr,
-              n_size,
-              bias_strideN);
-        }
-
         // apply causal mask
         if (causal && num_keys - n <= BLOCK_N) {
           for (int row = 0; row < m_size; ++row) {
@@ -178,8 +159,9 @@ void flash_attn_kernel_impl(
           }
         }
 
+        const scalar_t* __restrict__ bias_ptr = bias + head_id * bias_strideH + m * bias_strideM + n;
         flash_attn_softmax<scalar_t, BLOCK_M, BLOCK_N>::apply(
-            s_i, s_delta, v_prime, s_prime, m_prime, m_size, n_size, padded_n_size, head_size_v, sm_scale);
+            s_i, s_delta, v_prime, s_prime, m_prime, m_size, n_size, padded_n_size, head_size_v, sm_scale, bias_ptr, bias_strideM);
 
         // get value and pack
         pack_vnni2<scalar_t>(
@@ -501,6 +483,8 @@ at::Tensor flash_attn_varlen_func(
   // TODO: only non varlen is supported if bias is there. bias.size(1) == num_token_q, bias.size(2) == num_token_k
   // CHECK_EQ(bias.size(1), num_tokens);
   // CHECK_EQ(bias.size(2), num_tokens);
+
+  // TODO: assert bias dtype (bf16 is supported. can we check it as same as q?)
 
   // D and DV need to be even as we transpose by 512-bit
   TORCH_CHECK(head_size % 2 == 0, "invalid head_size ", head_size);

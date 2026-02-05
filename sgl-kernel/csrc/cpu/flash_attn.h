@@ -116,8 +116,7 @@ inline void bias_add_stub(
     }
 
   for (; col < n_size; ++col) {
-    s_row[col] += static_cast<float>(
-        bias_row[col * bias_strideN]);
+    s_row[col] += static_cast<float>(bias_row[col]);
   }
 }
 
@@ -133,7 +132,9 @@ struct flash_attn_softmax {
       int n_size,
       int padded_n_size,
       int head_size_v,
-      const float sm_scale) {
+      const float sm_scale,
+      const scalar_t* __restrict__ bias_ptr = nullptr,
+      int bias_strideM = -1) {
     using Vec = at::vec::Vectorized<float>;
     const Vec scale_vec = Vec(sm_scale);
     float* s_delta = s_i;
@@ -142,6 +143,8 @@ struct flash_attn_softmax {
       at::vec::map<float>(
           [scale_vec](Vec x) { return x * scale_vec; }, s_i + row * BLOCK_N, s_i + row * BLOCK_N, n_size);
 
+      // TODO: add bias here
+      
       // m_i: max value per row
       float m_i = at::vec::reduce_all<float>(
           [](Vec& x, Vec& y) { return at::vec::maximum(x, y); }, s_i + row * BLOCK_N, n_size);
@@ -187,7 +190,9 @@ struct flash_attn_softmax<at::BFloat16, BLOCK_M, BLOCK_N> {
       int n_size,
       int padded_n_size,
       int head_size_v,
-      const float sm_scale) {
+      const float sm_scale,      
+      const at::BFloat16* __restrict__ bias_ptr = nullptr,
+      int bias_strideM = -1) {
     float* s_delta = s_i;
     const __m512 vscale = _mm512_set1_ps(sm_scale);
 
@@ -209,15 +214,39 @@ struct flash_attn_softmax<at::BFloat16, BLOCK_M, BLOCK_N> {
 
     for (int m = 0; m < m_size; ++m) {
       vmax = vneg_inf;
-
+      
+      const at::BFloat16* __restrict__ bias_row_ptr = bias_ptr + m * bias_strideM;
+      
       // s_i <- s_i * scale
       int n = 0;
       for (; n <= n_size - 16; n += 16) {
         va = _mm512_mul_ps(_mm512_loadu_ps(s_i + m * BLOCK_N + n), vscale);
+        
+        // load bias (bf16 → fp32)
+        __m256i vb = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(bias_row_ptr + n));
+        __m512 vb_f = CVT_BF16_TO_FP32(vb);
+
+        // add bias
+        va = _mm512_add_ps(va, vb_f);
+
+        // write back scaled + biased logits
+        // _mm512_storeu_ps(s_i + m * BLOCK_N + n, va);
+
+
         vmax = _mm512_max_ps(va, vmax);
       }
       if (n_remainder > 0) {
         va = _mm512_mul_ps(_mm512_mask_loadu_ps(vneg_inf, vmask, s_i + m * BLOCK_N + n), vscale);
+        
+        __m256i vb = _mm256_maskz_loadu_epi16(
+            vmask,
+            reinterpret_cast<const __m256i*>(bias_row_ptr + n));
+        __m512 vb_f = CVT_BF16_TO_FP32(vb);
+
+        va = _mm512_add_ps(va, vb_f);
+
+
         vmax = _mm512_max_ps(va, vmax);
       }
 
@@ -233,6 +262,19 @@ struct flash_attn_softmax<at::BFloat16, BLOCK_M, BLOCK_N> {
       vsum = _mm512_setzero_ps();
       for (n = 0; n <= n_size - 16; n += 16) {
         va = _mm512_mul_ps(_mm512_loadu_ps(s_i + m * BLOCK_N + n), vscale);
+        
+        
+        // load bias (bf16 → fp32)
+        __m256i vb = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(bias_row_ptr + n));
+        __m512 vb_f = CVT_BF16_TO_FP32(vb);
+
+        // add bias
+        va = _mm512_add_ps(va, vb_f);
+
+
+
+
         va = _mm512_fexp_u20_ps(_mm512_sub_ps(va, vmax));
         vsum = _mm512_add_ps(vsum, va);
 
@@ -241,6 +283,16 @@ struct flash_attn_softmax<at::BFloat16, BLOCK_M, BLOCK_N> {
       }
       if (n_remainder > 0) {
         va = _mm512_mul_ps(_mm512_mask_loadu_ps(vneg_inf, vmask, s_i + m * BLOCK_N + n), vscale);
+        
+        __m256i vb = _mm256_maskz_loadu_epi16(
+            vmask,
+            reinterpret_cast<const __m256i*>(bias_row_ptr + n));
+        __m512 vb_f = CVT_BF16_TO_FP32(vb);
+
+        va = _mm512_add_ps(va, vb_f);        
+        
+        
+        
         va = _mm512_fexp_u20_ps(_mm512_sub_ps(va, vmax));
         vsum = _mm512_add_ps(vsum, va);
 
