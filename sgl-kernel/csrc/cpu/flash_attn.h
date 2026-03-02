@@ -231,8 +231,7 @@ struct flash_attn_softmax<at::BFloat16, BLOCK_M, BLOCK_N> {
         va = _mm512_add_ps(va, vb_f);
 
         // write back scaled + biased logits
-        // _mm512_storeu_ps(s_i + m * BLOCK_N + n, va);
-
+        _mm512_storeu_ps(s_i + m * BLOCK_N + n, va);
 
         vmax = _mm512_max_ps(va, vmax);
       }
@@ -246,6 +245,8 @@ struct flash_attn_softmax<at::BFloat16, BLOCK_M, BLOCK_N> {
 
         va = _mm512_add_ps(va, vb_f);
 
+        // write back scaled + biased logits
+        _mm512_mask_storeu_ps(s_i + m * BLOCK_N + n, vmask, va);
 
         vmax = _mm512_max_ps(va, vmax);
       }
@@ -261,19 +262,18 @@ struct flash_attn_softmax<at::BFloat16, BLOCK_M, BLOCK_N> {
       // s_delta <- exp(s_i - m_i)
       vsum = _mm512_setzero_ps();
       for (n = 0; n <= n_size - 16; n += 16) {
-        va = _mm512_mul_ps(_mm512_loadu_ps(s_i + m * BLOCK_N + n), vscale);
+        // va = _mm512_mul_ps(_mm512_loadu_ps(s_i + m * BLOCK_N + n), vscale);  
         
-        
-        // load bias (bf16 → fp32)
-        __m256i vb = _mm256_loadu_si256(
-            reinterpret_cast<const __m256i*>(bias_row_ptr + n));
-        __m512 vb_f = CVT_BF16_TO_FP32(vb);
+        // // load bias (bf16 → fp32)
+        // __m256i vb = _mm256_loadu_si256(
+        //     reinterpret_cast<const __m256i*>(bias_row_ptr + n));
+        // __m512 vb_f = CVT_BF16_TO_FP32(vb);
 
-        // add bias
-        va = _mm512_add_ps(va, vb_f);
+        // // add bias
+        // va = _mm512_add_ps(va, vb_f);
 
-
-
+        // Reuse scaled and biased logits directly from s_i
+        va = _mm512_loadu_ps(s_i + m * BLOCK_N + n);      
 
         va = _mm512_fexp_u20_ps(_mm512_sub_ps(va, vmax));
         vsum = _mm512_add_ps(vsum, va);
@@ -282,16 +282,17 @@ struct flash_attn_softmax<at::BFloat16, BLOCK_M, BLOCK_N> {
         _mm256_storeu_si256(reinterpret_cast<__m256i*>(s_delta2 + m * BLOCK_N + n), vb);
       }
       if (n_remainder > 0) {
-        va = _mm512_mul_ps(_mm512_mask_loadu_ps(vneg_inf, vmask, s_i + m * BLOCK_N + n), vscale);
+        // va = _mm512_mul_ps(_mm512_mask_loadu_ps(vneg_inf, vmask, s_i + m * BLOCK_N + n), vscale);
         
-        __m256i vb = _mm256_maskz_loadu_epi16(
-            vmask,
-            reinterpret_cast<const __m256i*>(bias_row_ptr + n));
-        __m512 vb_f = CVT_BF16_TO_FP32(vb);
+        // __m256i vb = _mm256_maskz_loadu_epi16(
+        //     vmask,
+        //     reinterpret_cast<const __m256i*>(bias_row_ptr + n));
+        // __m512 vb_f = CVT_BF16_TO_FP32(vb);
 
-        va = _mm512_add_ps(va, vb_f);        
+        // va = _mm512_add_ps(va, vb_f);        
         
-        
+        // Reuse scaled and biased logits directly from s_i
+        va = _mm512_mask_loadu_ps(vneg_inf, vmask, s_i + m * BLOCK_N + n);        
         
         va = _mm512_fexp_u20_ps(_mm512_sub_ps(va, vmax));
         vsum = _mm512_add_ps(vsum, va);
