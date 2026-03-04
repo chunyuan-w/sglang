@@ -338,6 +338,25 @@ def register_fake_ops():
         return mat1.new_empty(M, N, dtype=out_dtype)
 
 
+    @torch.library.register_fake("sgl_kernel::flash_attn_varlen_func")
+    def _(
+        q,
+        k,
+        v,
+        bias,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        causal,
+    ):
+        num_tokens = q.shape[0]
+        num_heads = q.shape[1]
+        head_size_v = v.shape[2]
+        
+        return torch.empty(num_tokens, num_heads, head_size_v, device=q.device, dtype=q.dtype)
+
+
 # TODO Remove unnecessary settings for CPUGraphRunner.
 # Re-abstract the graph runner and restructure CPUGraphRunner to reuse the same logic.
 class CPUGraphRunner:
