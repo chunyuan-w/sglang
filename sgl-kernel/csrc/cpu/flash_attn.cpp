@@ -503,8 +503,8 @@ at::Tensor flash_attn_varlen_func(
   at::Tensor out = at::empty({num_tokens, num_heads, head_size_v}, q.options());
 
   // TODO: tune the block size
-  constexpr int BLOCK_M = 512;
-  constexpr int BLOCK_N = 768;
+  constexpr int BLOCK_M = 256;
+  constexpr int BLOCK_N = 384;
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(q.scalar_type(), "flash_attn_varlen_func", [&] {
     int sz = resize_buffer<BLOCK_M, BLOCK_N>(buffer, num_threads, head_size, head_size_v);
