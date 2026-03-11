@@ -122,8 +122,8 @@ void flash_attn_kernel_impl(
     alignas(64) float m_prime[BLOCK_M];
 
     for (int i = begin; i < end; ++i) {
-      size_t seq_q_start_loc = bs * seqlen_q;
-      size_t seq_k_start_loc = bs * seqlen_k;
+      int64_t seq_q_start_loc = bs * seqlen_q;
+      int64_t seq_k_start_loc = bs * seqlen_k;
 
       // offset and size in MB
       int m = mb * BLOCK_M;
