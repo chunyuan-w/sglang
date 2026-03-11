@@ -122,8 +122,8 @@ void flash_attn_kernel_impl(
     alignas(64) float m_prime[BLOCK_M];
 
     for (int i = begin; i < end; ++i) {
-      int seq_q_start_loc = bs * seqlen_q;
-      int seq_k_start_loc = bs * seqlen_k;
+      size_t seq_q_start_loc = bs * seqlen_q;
+      size_t seq_k_start_loc = bs * seqlen_k;
 
       // offset and size in MB
       int m = mb * BLOCK_M;
@@ -147,16 +147,7 @@ void flash_attn_kernel_impl(
       // get query
 
 
-      // const scalar_t* __restrict__ q_ptr = q + (seq_q_start_loc + m) * q_strideM + head_id * q_strideH;
-      const scalar_t* __restrict__ q_ptr_base = q;
-      size_t offset_base = static_cast<size_t>(seq_q_start_loc + m) * q_strideM
-                        + static_cast<size_t>(head_id) * q_strideH;
-      const scalar_t* q_ptr = q_ptr_base + offset_base;
-
-
-      if (bs == 4096 && m==4096 && head_id==3) {
-        std::cout << "offset_base old:" << (seq_q_start_loc + m) * q_strideM + head_id * q_strideH << " offset_base new" << offset_base  << " q_strideM:" << q_strideM << " q_strideH:" << q_strideH << "\n";
-      }
+      const scalar_t* __restrict__ q_ptr = q + (seq_q_start_loc + m) * q_strideM + head_id * q_strideH;
 
       // init v', s' and m'
       fill_stub(v_prime, 0.f, m_size * head_size_v);
@@ -288,18 +279,18 @@ void flash_attn_kernel_impl(
       //     }
       // }
 
-      // scalar_t* __restrict__ out_ptr = out + (seq_q_start_loc + m) * o_strideM + head_id * o_strideH;
+      scalar_t* __restrict__ out_ptr = out + (seq_q_start_loc + m) * o_strideM + head_id * o_strideH;
       // Compute the base pointer once, using size_t to avoid overflow
       
-      if (bs == 4096 && m==4096 && head_id==3) {
-        std::cout << "offset_base:" << (seq_q_start_loc + m) * o_strideM + head_id * o_strideH << "\n";
-      }
+      // if (bs == 4096 && m==4096 && head_id==3) {
+      //   std::cout << "offset_base:" << (seq_q_start_loc + m) * o_strideM + head_id * o_strideH << "\n";
+      // }
       
       
-      size_t base_offset = static_cast<size_t>(seq_q_start_loc + m) * o_strideM
-                        + static_cast<size_t>(head_id) * o_strideH;
+      // size_t base_offset = static_cast<size_t>(seq_q_start_loc + m) * o_strideM
+      //                   + static_cast<size_t>(head_id) * o_strideH;
 
-      scalar_t* __restrict__ out_ptr = out + base_offset;
+      // scalar_t* __restrict__ out_ptr = out + base_offset;
 
       // auto total_bytes = batches * seqlen_q * num_heads * head_size_v;
       // for (int row = 0; row < m_size; ++row) {
@@ -344,8 +335,7 @@ void flash_attn_kernel_impl(
       
       for (int row = 0; row < m_size; ++row) {
         float s = 1 / s_prime[row];
-        scalar_t* __restrict__ out_ptr_row = out_ptr + static_cast<size_t>(row) * o_strideM;
-        copy_stub<scalar_t>(out_ptr_row, v_prime + row * head_size_v, s, head_size_v);
+        copy_stub<scalar_t>(out_ptr + row * o_strideM, v_prime + row * head_size_v, s, head_size_v);
       }
 
       // move to the next index
