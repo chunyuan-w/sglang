@@ -85,10 +85,17 @@ if("$ENV{SGLANG_CPU_FP8_CVT_FTZ}" STREQUAL "1")
 endif()
 
 add_compile_options(
-    -O3
+    -O0
+    -g
+    -fsanitize=address
+    -fno-omit-frame-pointer    
     -Wno-unknown-pragmas
     -march=native
     -fopenmp
+)
+
+add_link_options(
+    -fsanitize=address
 )
 
 Python_add_library(common_ops MODULE USE_SABI ${SKBUILD_SABI_VERSION} WITH_SOABI ${SOURCES})

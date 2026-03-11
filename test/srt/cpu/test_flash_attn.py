@@ -224,3 +224,5 @@ class TestFlashAttn(CustomTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+#  LD_PRELOAD=$(gcc -print-file-name=libasan.so)   numactl --physcpubind=0-71 --membind=0 python -u test/srt/cpu/test_flash_attn.py
