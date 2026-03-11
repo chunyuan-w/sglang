@@ -17,9 +17,12 @@ torch.manual_seed(1234)
 
 # pass
 # N_token = 3469
+# N_token = 1896
 
 # nan
-N_token = 4200
+# N_token = 4200
+
+# N_token = 59
 
 # result mismatch
 # N_token = 4300
@@ -94,9 +97,37 @@ def flash_attn_varlen_ref(
 class TestFlashAttn(CustomTestCase):
 
     @parametrize(
-        batch=[N_token],
-        max_seqlen_q=[N_token],
-        max_seqlen_k=[N_token],
+        # N_token=list(range(4112,4199,1)),
+        # N_token=[4000], # pass
+        # N_token=[4058], # pass
+        # N_token=[4080], # pass
+        # N_token=[4090], # pass
+        # N_token=[4095], # pass
+        # N_token=[4096], # pass
+
+        
+        N_token=[4097], # seg fault point
+        # N_token=[513], 
+        
+        
+        
+        # N_token=[4100], # seg fault
+        # N_token=[4117], # seg fault
+        
+        
+        # N_token=[4119], # seg fault
+        # N_token=[4120], # inf for thread 36, nan for thread 72
+        # N_token=[4121], # nan
+        # N_token=[4122], # nan
+        # N_token=[4131], # nan
+        # N_token=[4150], # nan
+        
+        # N_token=[4200], # nan
+        # N_token=[4655], # nan
+        
+        # batch=[N_token],
+        # max_seqlen_q=[N_token],
+        # max_seqlen_k=[N_token],
         num_heads=[4],
         num_heads_kv=[4],
         head_dim=[32],  # test when D is not 32x
@@ -105,17 +136,23 @@ class TestFlashAttn(CustomTestCase):
     )
     def test_flash_attn_varlen(
         self,
-        batch,
-        max_seqlen_q,
-        max_seqlen_k,
+        N_token,
+        # batch,
+        # max_seqlen_q,
+        # max_seqlen_k,
         num_heads,
         num_heads_kv,
         head_dim,
         head_dim_v,
         is_causal,
     ):
+        batch = N_token
+        max_seqlen_q = N_token
+        max_seqlen_k = N_token
+        
         dtype = torch.bfloat16
 
+        print(f"N_token={N_token}")
         print("start tensor allocation")
         # random seqlens for k and kv
         # seqlens_q = torch.randint(1, max_seqlen_q, (batch,), dtype=torch.int32)
