@@ -81,14 +81,39 @@ void flash_attn_kernel_impl(
 
     int tid = get_thread_num();
     // s_i and s_delta: [BLOCK_M, BLOCK_N]
-    float* __restrict__ s_i = reinterpret_cast<float*>((char*)(buffer) + tid * buffer_size_per_thread);
-    scalar_t* __restrict__ s_delta = reinterpret_cast<scalar_t*>(s_i);
+    // float* __restrict__ s_i = reinterpret_cast<float*>((char*)(buffer) + tid * buffer_size_per_thread);
+    // scalar_t* __restrict__ s_delta = reinterpret_cast<scalar_t*>(s_i);
+
+    // // v_prime: [BLOCK_M, head_size_v]
+    // float* __restrict__ v_prime = s_i + BLOCK_M * BLOCK_N;
+
+    // // Btmp: [BLOCK_N, max(head_size, head_size_v)]
+    // scalar_t* __restrict__ Btmp = reinterpret_cast<scalar_t*>(v_prime + BLOCK_M * head_size_v);
+
+    char* thread_buf = reinterpret_cast<char*>(buffer) + tid * buffer_size_per_thread;
+
+    // s_i: [BLOCK_M, BLOCK_N] float
+    float* __restrict__ s_i = reinterpret_cast<float*>(thread_buf);
+
+    // s_delta: reuse same memory but treat as bf16
+    scalar_t* __restrict__ s_delta = reinterpret_cast<scalar_t*>(thread_buf);
+
+    // advance by float size because s_i allocated as float
+    char* after_si = thread_buf + BLOCK_M * BLOCK_N * sizeof(float);
 
     // v_prime: [BLOCK_M, head_size_v]
-    float* __restrict__ v_prime = s_i + BLOCK_M * BLOCK_N;
+    float* __restrict__ v_prime = reinterpret_cast<float*>(after_si);
 
-    // Btmp: [BLOCK_N, max(head_size, head_size_v)]
-    scalar_t* __restrict__ Btmp = reinterpret_cast<scalar_t*>(v_prime + BLOCK_M * head_size_v);
+    // Initialize with a magic value
+    // fill_stub(v_prime, -9999.f, BLOCK_M * head_size_v);
+
+    // advance
+    char* after_vprime = after_si + BLOCK_M * head_size_v * sizeof(float);
+
+    // Btmp
+    scalar_t* __restrict__ Btmp = reinterpret_cast<scalar_t*>(after_vprime);
+
+
 
     // init Btmp and Btmp2 just once for each thread to prevent NaN
     fill_stub(Btmp, 0.f, BLOCK_N * ldb_tmp);
@@ -104,21 +129,55 @@ void flash_attn_kernel_impl(
       int m = mb * BLOCK_M;
       int m_size = std::min(BLOCK_M, seqlen_q - m);
 
+      // DEBUG: only print for this thread
+      // if (tid == 0) {
+      //     std::cout << "[TID 111 " << tid 
+      //               << "] batch=" << bs 
+      //               << " head=" << head_id 
+      //               << " mb=" << mb 
+      //               << " m=" << m 
+      //               << " m_size=" << m_size 
+      //               << std::endl<< std::flush;
+      // }
+
       assert(m_size > 0);
 
       int head_kv_id = head_id / num_groups;
 
       // get query
-      const scalar_t* __restrict__ q_ptr = q + (seq_q_start_loc + m) * q_strideM + head_id * q_strideH;
+
+
+      // const scalar_t* __restrict__ q_ptr = q + (seq_q_start_loc + m) * q_strideM + head_id * q_strideH;
+      const scalar_t* __restrict__ q_ptr_base = q;
+      size_t offset_base = static_cast<size_t>(seq_q_start_loc + m) * q_strideM
+                        + static_cast<size_t>(head_id) * q_strideH;
+      const scalar_t* q_ptr = q_ptr_base + offset_base;
+
+
+      if (bs == 4096 && m==4096 && head_id==3) {
+        std::cout << "offset_base old:" << (seq_q_start_loc + m) * q_strideM + head_id * q_strideH << " offset_base new" << offset_base  << " q_strideM:" << q_strideM << " q_strideH:" << q_strideH << "\n";
+      }
 
       // init v', s' and m'
       fill_stub(v_prime, 0.f, m_size * head_size_v);
+      
+      // fill_stub(v_prime, -9999.f, m_size * head_size_v);
+
       fill_stub(s_prime, 0.f, m_size);
       fill_stub(m_prime, -std::numeric_limits<scalar_t>::infinity(), m_size);
 
       int num_keys = causal ? std::min(m + m_size, seqlen_k) : seqlen_k;
       for (int n = 0; n < num_keys; n += BLOCK_N) {
         int n_size = std::min(BLOCK_N, num_keys - n);
+
+        // DEBUG: only first thread prints
+        // if (tid == 0) {
+        //     std::cout << "[TID 111 " << tid
+        //               << "] n=" << n 
+        //               << " n_size=" << n_size 
+        //               << std::endl<< std::flush;
+        // }
+
 
         // `n_size` is K in 2nd gemm, pad to TILE_K;
         const int padded_n_size = div_up(n_size, TILE_K) * TILE_K;
@@ -131,6 +190,10 @@ void flash_attn_kernel_impl(
             /*     K  */ head_size,
             /* ld_src */ k_strideN,
             /* ld_dst */ BLOCK_N);
+
+        // std::cout << "[TID 111 " << tid 
+        //           << " after vnni_pack"
+        //           << std::endl<< std::flush;
 
         // calculate s_i <- Q @ K
         at::native::cpublas::brgemm(
@@ -145,6 +208,10 @@ void flash_attn_kernel_impl(
             /* B     */ Btmp,
             /* C     */ s_i);
 
+        // std::cout << "[TID 111 " << tid 
+        //           << " after brgemm1"
+        //           << std::endl<< std::flush;
+
         // apply causal mask
         if (causal && num_keys - n <= BLOCK_N) {
           for (int row = 0; row < m_size; ++row) {
@@ -156,7 +223,20 @@ void flash_attn_kernel_impl(
         }
 
         flash_attn_softmax<scalar_t, BLOCK_M, BLOCK_N>::apply(
-            s_i, s_delta, v_prime, s_prime, m_prime, m_size, n_size, padded_n_size, head_size_v, sm_scale);
+            s_i, s_delta, v_prime, s_prime, m_prime, m_size, n_size, padded_n_size, head_size_v, sm_scale, tid);
+
+
+        // for (int row = 0; row < m_size; ++row) {
+        //     for (int col = 0; col < head_size_v; ++col) {
+        //         volatile float tmp = v_prime[row * head_size_v + col];
+        //         v_prime[row * head_size_v + col] = tmp; // write back to force a memory access
+        //     }
+        // }
+
+
+        // std::cout << "[TID 111 " << tid 
+        //           << " after flash_attn_softmax"
+        //           << std::endl<< std::flush;
 
         // get value and pack
         pack_vnni2<scalar_t>(
@@ -166,6 +246,11 @@ void flash_attn_kernel_impl(
             /*     N  */ head_size_v,
             /* ld_src */ v_strideN,
             /* ld_dst */ head_size_v);
+
+        // std::cout << "[TID 111 " << tid 
+        //           << " after pack_vnni2"
+        //           << std::endl<< std::flush;
+
 
         // calculate V' <- s_delta @ V + V'
         at::native::cpublas::brgemm(
@@ -179,12 +264,88 @@ void flash_attn_kernel_impl(
             /* A     */ s_delta,
             /* B     */ Btmp,
             /* C     */ v_prime);
+        // std::cout << "[TID 111 " << tid 
+        //           << " after brgemm2"
+        //           << std::endl<< std::flush;
+
+
+
+        // for (int row = 0; row < m_size; ++row) {
+        //     for (int col = 0; col < head_size_v; ++col) {
+        //         volatile float tmp = v_prime[row * head_size_v + col];
+        //         v_prime[row * head_size_v + col] = tmp; // write back to force a memory access
+        //     }
+        // }
+
+
       }  // loop with seqlen_k
 
-      scalar_t* __restrict__ out_ptr = out + (seq_q_start_loc + m) * o_strideM + head_id * o_strideH;
+
+      // for (int row = 0; row < m_size; ++row) {
+      //     for (int col = 0; col < head_size_v; ++col) {
+      //         volatile float tmp = v_prime[row * head_size_v + col];
+      //         v_prime[row * head_size_v + col] = tmp; // write back to force a memory access
+      //     }
+      // }
+
+      // scalar_t* __restrict__ out_ptr = out + (seq_q_start_loc + m) * o_strideM + head_id * o_strideH;
+      // Compute the base pointer once, using size_t to avoid overflow
+      
+      if (bs == 4096 && m==4096 && head_id==3) {
+        std::cout << "offset_base:" << (seq_q_start_loc + m) * o_strideM + head_id * o_strideH << "\n";
+      }
+      
+      
+      size_t base_offset = static_cast<size_t>(seq_q_start_loc + m) * o_strideM
+                        + static_cast<size_t>(head_id) * o_strideH;
+
+      scalar_t* __restrict__ out_ptr = out + base_offset;
+
+      // auto total_bytes = batches * seqlen_q * num_heads * head_size_v;
+      // for (int row = 0; row < m_size; ++row) {
+      //     for (int col = 0; col < head_size_v; ++col) {
+      //         // Read as float to force memory access
+      //         // auto val = out_ptr[row * o_strideM + col];
+      //         // float tmp = float(val);
+      //         auto idx = (seq_q_start_loc + m) * o_strideM + head_id * o_strideH + row * o_strideM + col;
+      //         if (idx >= total_bytes || idx < 0) {
+      //             printf("[Out-of-bounds] Thread %d, total_offset %d, bs %d, seqlen_q %d, seq_q_start_loc %d, m %d, o_strideM %d, head_id %d, o_strideH %d, row %d, col %d \n",
+      //                   tid, total_offset, bs, seqlen_q, seq_q_start_loc, m, o_strideM, head_id, o_strideH, row, col);
+      //             abort();                
+      //         }
+      //         out_ptr[row * o_strideM + col] = scalar_t(0.); // write back
+      //     }
+      // }
+
+      // // total size in bytes
+      // size_t total_bytes = batches * seqlen_q * num_heads * head_size_v;
+      // size_t current_offset = (seq_q_start_loc + m) * o_strideM + head_id * o_strideH;
+      // // char* buf_begin = reinterpret_cast<char*>(out);
+      // // char* buf_end   = buf_begin + total_bytes;
+
+      // for (int row = 0; row < m_size; ++row) {
+      //     for (int col = 0; col < head_size_v; ++col) {
+      //         size_t offset = row * o_strideM + col;
+      //         size_t total_offset = current_offset + offset;
+
+      //         scalar_t* elem_ptr = out_ptr + row * o_strideM + col;
+
+      //         if (total_offset < 0 || total_offset >= total_bytes) {
+      //             printf("[Out-of-bounds] Thread %d, total_offset %d, bs %d, seqlen_q %d, seq_q_start_loc %d, m %d, o_strideM %d, head_id %d, o_strideH %d, row %d, col %d, addr=%p, \n",
+      //                   tid, total_offset, bs, seqlen_q, seq_q_start_loc, m, o_strideM, head_id, o_strideH, row, col, elem_ptr);
+      //             abort();
+      //         }
+
+      //         // Force a read/write to trigger ASAN if memory is invalid
+      //         float tmp = float(*elem_ptr);
+      //         *elem_ptr = scalar_t(tmp);
+      //     }
+      // }
+      
       for (int row = 0; row < m_size; ++row) {
         float s = 1 / s_prime[row];
-        copy_stub<scalar_t>(out_ptr + row * o_strideM, v_prime + row * head_size_v, s, head_size_v);
+        scalar_t* __restrict__ out_ptr_row = out_ptr + static_cast<size_t>(row) * o_strideM;
+        copy_stub<scalar_t>(out_ptr_row, v_prime + row * head_size_v, s, head_size_v);
       }
 
       // move to the next index
@@ -479,6 +640,9 @@ at::Tensor flash_attn_varlen_func(
   at::Tensor buffer = at::empty({}, q.options().dtype(at::kChar));
   at::Tensor indices = at::empty({}, q.options().dtype(at::kInt));
   at::Tensor out = at::empty({num_tokens, num_heads, head_size_v}, q.options());
+
+  std::cout << "out size: " << out.sizes() << "\n";
+  std::cout << "out stride: " << out.strides() << "\n";
 
   // TODO: tune the block size
   constexpr int BLOCK_M = 512;
