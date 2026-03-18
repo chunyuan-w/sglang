@@ -218,6 +218,9 @@ struct flash_attn_softmax<at::BFloat16, BLOCK_M, BLOCK_N> {
       
       const at::BFloat16* __restrict__ bias_row_ptr = bias_ptr + m * bias_strideM;
       
+      __m512 vmax0 = vneg_inf;
+      __m512 vmax1 = vneg_inf;
+
       // s_i <- s_i * scale
       int n = 0;
       for (; n <= n_size - 32; n += 32) {
@@ -240,8 +243,8 @@ struct flash_attn_softmax<at::BFloat16, BLOCK_M, BLOCK_N> {
         _mm512_storeu_ps(s_i + m * BLOCK_N + n, va0);
         _mm512_storeu_ps(s_i + m * BLOCK_N + n + 16, va1);
 
-        vmax = _mm512_max_ps(vmax, va0);
-        vmax = _mm512_max_ps(vmax, va1);
+        vmax0 = _mm512_max_ps(vmax0, va0);
+        vmax1 = _mm512_max_ps(vmax1, va1);
       }
       if (n_remainder > 0) {
         va = _mm512_mul_ps(_mm512_mask_loadu_ps(vneg_inf, vmask, s_i + m * BLOCK_N + n), vscale);
@@ -256,9 +259,10 @@ struct flash_attn_softmax<at::BFloat16, BLOCK_M, BLOCK_N> {
         // write back scaled + biased logits
         _mm512_mask_storeu_ps(s_i + m * BLOCK_N + n, vmask, va);
 
-        vmax = _mm512_max_ps(va, vmax);
+        vmax0 = _mm512_max_ps(vmax0, va);
       }
-
+      
+      __m512 vmax = _mm512_max_ps(vmax0, vmax1);
       // m_i: max value per row
       float m_i = _mm512_reduce_max_ps(vmax);
       m_i = std::max(m_i, m_prime[m]);
