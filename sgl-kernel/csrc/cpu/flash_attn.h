@@ -223,6 +223,10 @@ struct flash_attn_softmax<at::BFloat16, BLOCK_M, BLOCK_N> {
 
       // s_i <- s_i * scale
       int n = 0;
+      
+      // prefetch distance
+      constexpr int PREFETCH_SIZE_N = 32;
+
       for (; n <= n_size - 32; n += 32) {
         __m512 va0 = _mm512_mul_ps(
             _mm512_loadu_ps(s_i + m * BLOCK_N + n), vscale);
@@ -233,6 +237,13 @@ struct flash_attn_softmax<at::BFloat16, BLOCK_M, BLOCK_N> {
             reinterpret_cast<const __m256i*>(bias_row_ptr + n));
         __m256i vb1 = _mm256_loadu_si256(
             reinterpret_cast<const __m256i*>(bias_row_ptr + n + 16));
+
+
+        if constexpr (PREFETCH_SIZE_N > 0) {
+          _mm_prefetch((const char*)(s_i + m * BLOCK_N + n + PREFETCH_SIZE_N), _MM_HINT_T0);
+          _mm_prefetch((const char*)(bias_row_ptr + n + PREFETCH_SIZE_N), _MM_HINT_T0);
+        }
+
 
         __m512 vb0_f = CVT_BF16_TO_FP32(vb0);
         __m512 vb1_f = CVT_BF16_TO_FP32(vb1);
@@ -246,6 +257,7 @@ struct flash_attn_softmax<at::BFloat16, BLOCK_M, BLOCK_N> {
         vmax0 = _mm512_max_ps(vmax0, va0);
         vmax1 = _mm512_max_ps(vmax1, va1);
       }
+      // TODO: add n_tail 16
       if (n_remainder > 0) {
         va = _mm512_mul_ps(_mm512_mask_loadu_ps(vneg_inf, vmask, s_i + m * BLOCK_N + n), vscale);
         
@@ -273,6 +285,7 @@ struct flash_attn_softmax<at::BFloat16, BLOCK_M, BLOCK_N> {
 
       // s_delta <- exp(s_i - m_i)
       vsum = _mm512_setzero_ps();
+      // TODO: no need to use n+= 32 here?
       for (n = 0; n <= n_size - 32; n += 32) {
         __m512 va0 = _mm512_loadu_ps(s_i + m * BLOCK_N + n);
         __m512 va1 = _mm512_loadu_ps(s_i + m * BLOCK_N + n + 16);
@@ -291,6 +304,7 @@ struct flash_attn_softmax<at::BFloat16, BLOCK_M, BLOCK_N> {
         _mm256_storeu_si256(
             reinterpret_cast<__m256i*>(s_delta2 + m * BLOCK_N + n + 16), vb1);
       }
+      // TODO: add n_tail 16
       if (n_remainder > 0) {
         // va = _mm512_mul_ps(_mm512_mask_loadu_ps(vneg_inf, vmask, s_i + m * BLOCK_N + n), vscale);
         
