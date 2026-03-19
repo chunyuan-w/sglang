@@ -300,7 +300,8 @@ struct flash_attn_softmax<at::BFloat16, BLOCK_M, BLOCK_N> {
       float m_delta = std::exp(m_prime[m] - m_i);
 
       // s_delta <- exp(s_i - m_i)
-      vsum = _mm512_setzero_ps();
+      __m512 vsum0 = _mm512_setzero_ps();
+      __m512 vsum1 = _mm512_setzero_ps();      
       // TODO: no need to use n+= 32 here?
       for (n = 0; n <= n_size - 32; n += 32) {
         __m512 va0 = _mm512_loadu_ps(s_i + m * BLOCK_N + n);
@@ -309,8 +310,8 @@ struct flash_attn_softmax<at::BFloat16, BLOCK_M, BLOCK_N> {
         va0 = _mm512_fexp_u20_ps(_mm512_sub_ps(va0, vmax));
         va1 = _mm512_fexp_u20_ps(_mm512_sub_ps(va1, vmax));
 
-        vsum = _mm512_add_ps(vsum, va0);
-        vsum = _mm512_add_ps(vsum, va1);
+        vsum0 = _mm512_add_ps(vsum0, va0);
+        vsum1 = _mm512_add_ps(vsum1, va1);
 
         __m256i vb0 = (__m256i)(_mm512_cvtneps_pbh(va0));
         __m256i vb1 = (__m256i)(_mm512_cvtneps_pbh(va1));
@@ -320,6 +321,7 @@ struct flash_attn_softmax<at::BFloat16, BLOCK_M, BLOCK_N> {
         _mm256_storeu_si256(
             reinterpret_cast<__m256i*>(s_delta2 + m * BLOCK_N + n + 16), vb1);
       }
+      vsum = _mm512_add_ps(vsum0, vsum1);
       if (n_tail16) {
         __m512 va = _mm512_loadu_ps(s_i + m * BLOCK_N + n);
 
