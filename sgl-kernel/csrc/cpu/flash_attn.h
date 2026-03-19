@@ -225,7 +225,7 @@ struct flash_attn_softmax<at::BFloat16, BLOCK_M, BLOCK_N> {
       int n = 0;
       
       // prefetch distance
-      constexpr int PREFETCH_SIZE_N = 32;
+      constexpr int PREFETCH_SIZE_N = 128;
 
       for (; n <= n_size - 32; n += 32) {
         __m512 va0 = _mm512_mul_ps(
