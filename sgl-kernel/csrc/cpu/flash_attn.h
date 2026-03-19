@@ -230,22 +230,21 @@ struct flash_attn_softmax<at::BFloat16, BLOCK_M, BLOCK_N> {
       constexpr int PREFETCH_SIZE_N = 128;
 
       for (; n <= n_size - 32; n += 32) {
-        __m512 va0 = _mm512_mul_ps(
-            _mm512_loadu_ps(s_i + m * BLOCK_N + n), vscale);
-        __m512 va1 = _mm512_mul_ps(
-            _mm512_loadu_ps(s_i + m * BLOCK_N + n + 16), vscale);
+        __m512 va0 = _mm512_loadu_ps(s_i + m * BLOCK_N + n);
+        __m512 va1 = _mm512_loadu_ps(s_i + m * BLOCK_N + n + 16);        
 
         __m256i vb0 = _mm256_loadu_si256(
             reinterpret_cast<const __m256i*>(bias_row_ptr + n));
         __m256i vb1 = _mm256_loadu_si256(
             reinterpret_cast<const __m256i*>(bias_row_ptr + n + 16));
 
-
         if constexpr (PREFETCH_SIZE_N > 0) {
           _mm_prefetch((const char*)(s_i + m * BLOCK_N + n + PREFETCH_SIZE_N), _MM_HINT_T0);
           _mm_prefetch((const char*)(bias_row_ptr + n + PREFETCH_SIZE_N), _MM_HINT_T0);
         }
 
+        va0 = _mm512_mul_ps(va0, vscale);
+        va1 = _mm512_mul_ps(va1, vscale);
 
         __m512 vb0_f = CVT_BF16_TO_FP32(vb0);
         __m512 vb1_f = CVT_BF16_TO_FP32(vb1);
