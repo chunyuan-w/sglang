@@ -196,9 +196,11 @@ struct flash_attn_softmax<at::BFloat16, BLOCK_M, BLOCK_N> {
     float* s_delta = s_i;
     const __m512 vscale = _mm512_set1_ps(sm_scale);
 
-    // int n_remainder = n_size & 15;  // 0xF
-    int n_remainder = n_size & 31;
-    const __mmask16 vmask = (1ULL << n_remainder) - 1;
+    int n_tail32 = n_size & ~31;   // multiple of 32
+    int n_tail16 = n_size & 16;    // 0 or 16
+    int n_remain = n_size & 15;    // 0–15
+
+    __mmask16 vmask = (1ULL << n_remain) - 1;
 
     int v_remainder = head_size_v & 15;  // 0xF
     const __mmask16 vmask1 = (1ULL << v_remainder) - 1;
@@ -257,8 +259,23 @@ struct flash_attn_softmax<at::BFloat16, BLOCK_M, BLOCK_N> {
         vmax0 = _mm512_max_ps(vmax0, va0);
         vmax1 = _mm512_max_ps(vmax1, va1);
       }
-      // TODO: add n_tail 16
-      if (n_remainder > 0) {
+      if (n_tail16) {
+        __m512 va = _mm512_loadu_ps(s_i + m * BLOCK_N + n);
+        va = _mm512_mul_ps(va, vscale);
+
+        __m256i vb = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(bias_row_ptr + n));
+        __m512 vb_f = CVT_BF16_TO_FP32(vb);
+
+        va = _mm512_add_ps(va, vb_f);
+
+        _mm512_storeu_ps(s_i + m * BLOCK_N + n, va);
+
+        vmax0 = _mm512_max_ps(vmax0, va);
+
+        n += 16;
+      }
+      if (n_remain) {
         va = _mm512_mul_ps(_mm512_mask_loadu_ps(vneg_inf, vmask, s_i + m * BLOCK_N + n), vscale);
         
         __m256i vb = _mm256_maskz_loadu_epi16(
@@ -304,8 +321,19 @@ struct flash_attn_softmax<at::BFloat16, BLOCK_M, BLOCK_N> {
         _mm256_storeu_si256(
             reinterpret_cast<__m256i*>(s_delta2 + m * BLOCK_N + n + 16), vb1);
       }
-      // TODO: add n_tail 16
-      if (n_remainder > 0) {
+      if (n_tail16) {
+        __m512 va = _mm512_loadu_ps(s_i + m * BLOCK_N + n);
+
+        va = _mm512_fexp_u20_ps(_mm512_sub_ps(va, vmax));
+        vsum = _mm512_add_ps(vsum, va);
+
+        __m256i vb = (__m256i)(_mm512_cvtneps_pbh(va));
+        _mm256_storeu_si256(
+            reinterpret_cast<__m256i*>(s_delta2 + m * BLOCK_N + n), vb);
+
+        n += 16;
+      }
+      if (n_remain) {
         // va = _mm512_mul_ps(_mm512_mask_loadu_ps(vneg_inf, vmask, s_i + m * BLOCK_N + n), vscale);
         
         // __m256i vb = _mm256_maskz_loadu_epi16(
