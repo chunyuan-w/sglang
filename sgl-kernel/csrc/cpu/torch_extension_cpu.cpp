@@ -159,6 +159,7 @@ weight_packed_linear_sigmoid_mul(
     at::Tensor& mat2,
     const std::optional<at::Tensor>& bias,
     at::Tensor& post_mul_mat,
+    bool inplace,
     bool is_vnni);
 
 // igemm
@@ -438,7 +439,7 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   m.impl("fused_linear_sigmoid_mul", torch::kCPU, &fused_linear_sigmoid_mul);
 
   m.def(
-      "weight_packed_linear_sigmoid_mul(Tensor mat1, Tensor mat2, Tensor? bias, Tensor(a!) post_mul_mat, bool is_vnni) -> Tensor");
+      "weight_packed_linear_sigmoid_mul(Tensor mat1, Tensor mat2, Tensor? bias, Tensor(a!) post_mul_mat, bool inplace, bool is_vnni) -> Tensor");
   m.impl("weight_packed_linear_sigmoid_mul", torch::kCPU, &weight_packed_linear_sigmoid_mul);
 
 

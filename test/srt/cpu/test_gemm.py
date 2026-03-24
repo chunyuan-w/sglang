@@ -1,3 +1,4 @@
+import copy
 import itertools
 import unittest
 
@@ -42,6 +43,7 @@ class TestGemm(CustomTestCase):
     N = [32]
     K = [32 * 16]
     has_bias = [False, True]
+    inplace = [False, True]
 
     M_int8 = [2, 128]
     N_int8 = [32 * 12]
@@ -95,13 +97,14 @@ class TestGemm(CustomTestCase):
             ):
                 self._bf16_gemm(*params)
 
-    def _bf16_gemm_sigmoid_mul(self, M, N, K, has_bias):
+    def _bf16_gemm_sigmoid_mul(self, M, N, K, has_bias, inplace):
         import sgl_kernel
 
         mat1 = torch.randn(M, K, dtype=torch.bfloat16)
         mat2 = torch.randn(N, K, dtype=torch.bfloat16)
         
         mul = torch.rand(M, N, dtype=torch.bfloat16)
+        mul2 = copy.deepcopy(mul)
 
         ref = torch.matmul(mat1.float(), mat2.float().t())
         if has_bias:
@@ -113,12 +116,12 @@ class TestGemm(CustomTestCase):
         # TODO: test inplace = True
         # TODO: inplace is False here so that mul is not modified
         out = torch.ops.sgl_kernel.weight_packed_linear_sigmoid_mul(
-            mat1, mat2, bias if has_bias else None, mul, False
+            mat1, mat2, bias if has_bias else None, mul, inplace, False
         )
 
         packed_mat2 = torch.ops.sgl_kernel.convert_weight_packed(mat2)
         out2 = torch.ops.sgl_kernel.weight_packed_linear_sigmoid_mul(
-            mat1, packed_mat2, bias if has_bias else None, mul, True
+            mat1, packed_mat2, bias if has_bias else None, mul2, inplace, True
         )
 
         atol = rtol = precision[ref.dtype]
@@ -128,6 +131,10 @@ class TestGemm(CustomTestCase):
         torch.testing.assert_close(ref, out2, atol=atol, rtol=rtol)
         print("after 2")
         
+        if inplace:
+            torch.testing.assert_close(ref, mul, atol=atol, rtol=rtol)
+            torch.testing.assert_close(ref, mul2, atol=atol, rtol=rtol)
+        
 
     def test_bf16_gemm_sigmoid_mul(self):
         for params in itertools.product(
@@ -135,12 +142,14 @@ class TestGemm(CustomTestCase):
             self.N,
             self.K,
             self.has_bias,
+            self.inplace,
         ):
             with self.subTest(
                 M=params[0],
                 N=params[1],
                 K=params[2],
                 has_bias=params[3],
+                inplace=params[4],
             ):
                 self._bf16_gemm_sigmoid_mul(*params)
 

@@ -872,7 +872,7 @@ weight_packed_linear(at::Tensor& mat1, at::Tensor& mat2, const std::optional<at:
 
 
 at::Tensor
-weight_packed_linear_sigmoid_mul(at::Tensor& mat1, at::Tensor& mat2, const std::optional<at::Tensor>& bias, at::Tensor& post_mul_mat, bool is_vnni) {
+weight_packed_linear_sigmoid_mul(at::Tensor& mat1, at::Tensor& mat2, const std::optional<at::Tensor>& bias, at::Tensor& post_mul_mat, bool inplace, bool is_vnni) {
   RECORD_FUNCTION("sgl-kernel::weight_packed_linear_sigmoid_mul", std::vector<c10::IValue>({mat1, mat2, bias, post_mul_mat}));
 
   // TODO: use mul as output buffer? is it safe？
@@ -887,18 +887,19 @@ weight_packed_linear_sigmoid_mul(at::Tensor& mat1, at::Tensor& mat2, const std::
   CHECK_INPUT(mat2);
   CHECK_DIM(2, mat1);
   CHECK_DIM(2, mat2);
+  CHECK_DIM(2, post_mul_mat);
 
   auto dispatch_type = mat1.scalar_type();
   // strides
   int64_t out_strideM = post_mul_mat.size(1);
   int64_t mat1_strideM = mat1.stride(0);
 
-  // TODO: why N=1??
+  // TODO: is this check still needed??
   TORCH_CHECK(
       out_strideM % 32 == 0,
-      "post_mul_mat tensor size(1) should be 32 dividable, and the mat2 OC=1 (Mx1 as linear output shape)")
+      "post_mul_mat tensor size(1) should be 32 dividable")
 
-  at::Tensor out = at::empty({M, out_strideM}, mat1.options());
+  at::Tensor out = inplace? post_mul_mat : at::empty({M, out_strideM}, mat1.options());
 
   const bool has_bias = bias.has_value();
   const float* bias_data = nullptr;
@@ -906,7 +907,6 @@ weight_packed_linear_sigmoid_mul(at::Tensor& mat1, at::Tensor& mat2, const std::
     CHECK_EQ(bias.value().size(0), N);
     bias_data = bias.value().data_ptr<float>();
   }
-printf("111\n");
   AT_DISPATCH_REDUCED_FLOATING_TYPES(dispatch_type, "weight_packed_linear_sigmoid_mul_kernel_impl", [&] {
 
     weight_packed_linear_sigmoid_mul_kernel_impl<scalar_t>(
