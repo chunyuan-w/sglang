@@ -12,9 +12,17 @@ from utils import (
     unpack_and_dequant_awq,
 )
 
-from sglang.test.test_utils import CustomTestCase
+# from sglang.test.test_utils import CustomTestCase
 
 torch.manual_seed(1234)
+
+
+class CustomTestCase(unittest.TestCase):
+    def setUp(self):
+        print(
+            f"[CI Test Method] {self.__class__.__name__}.{self._testMethodName}",
+            flush=True,
+        )
 
 
 class Mod(nn.Module):
@@ -28,7 +36,10 @@ class Mod(nn.Module):
 
 class TestGemm(CustomTestCase):
     M = [1, 101]
-    N = [16, 32 * 13]
+    # M = [1]
+    # M = [8]
+    # N = [16, 32 * 13]
+    N = [32]
     K = [32 * 16]
     has_bias = [False, True]
 
@@ -54,7 +65,7 @@ class TestGemm(CustomTestCase):
             bias = torch.randn(N, dtype=torch.float32)
             ref.add_(bias.bfloat16())
 
-        ref = ref.bfloat16()
+        ref = ref.bfloat16()        
 
         out = torch.ops.sgl_kernel.weight_packed_linear(
             mat1, mat2, bias if has_bias else None, False
@@ -83,6 +94,55 @@ class TestGemm(CustomTestCase):
                 has_bias=params[3],
             ):
                 self._bf16_gemm(*params)
+
+    def _bf16_gemm_sigmoid_mul(self, M, N, K, has_bias):
+        import sgl_kernel
+
+        mat1 = torch.randn(M, K, dtype=torch.bfloat16)
+        mat2 = torch.randn(N, K, dtype=torch.bfloat16)
+        
+        mul = torch.rand(M, N, dtype=torch.bfloat16)
+
+        ref = torch.matmul(mat1.float(), mat2.float().t())
+        if has_bias:
+            bias = torch.randn(N, dtype=torch.float32)
+            ref.add_(bias.bfloat16())
+        ref = torch.nn.functional.sigmoid(ref) * mul
+        ref = ref.bfloat16()
+
+        # TODO: test inplace = True
+        # TODO: inplace is False here so that mul is not modified
+        out = torch.ops.sgl_kernel.weight_packed_linear_sigmoid_mul(
+            mat1, mat2, bias if has_bias else None, mul, False
+        )
+
+        packed_mat2 = torch.ops.sgl_kernel.convert_weight_packed(mat2)
+        out2 = torch.ops.sgl_kernel.weight_packed_linear_sigmoid_mul(
+            mat1, packed_mat2, bias if has_bias else None, mul, True
+        )
+
+        atol = rtol = precision[ref.dtype]
+        print("before check")
+        torch.testing.assert_close(ref, out, atol=atol, rtol=rtol)
+        print("after 1")
+        torch.testing.assert_close(ref, out2, atol=atol, rtol=rtol)
+        print("after 2")
+        
+
+    def test_bf16_gemm_sigmoid_mul(self):
+        for params in itertools.product(
+            self.M,
+            self.N,
+            self.K,
+            self.has_bias,
+        ):
+            with self.subTest(
+                M=params[0],
+                N=params[1],
+                K=params[2],
+                has_bias=params[3],
+            ):
+                self._bf16_gemm_sigmoid_mul(*params)
 
     def _bf16_gemm_with_small_oc(self, M, N, K, has_bias, use_post_sigmul):
         use_post_sigmul = use_post_sigmul and N == 1

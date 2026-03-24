@@ -158,6 +158,57 @@ inline void scalar_sigmoid_and_mul(
   }
 }
 
+template <typename scalar_t, bool has_bias>
+inline void vec_sigmoid_and_mul(
+    scalar_t* __restrict__ out,
+    const float* __restrict__ input,
+    const float* __restrict__ bias,
+    const scalar_t* __restrict__ mul,
+    int SIZE) {
+
+  using bVec = at::vec::Vectorized<scalar_t>;
+  using fVec = at::vec::Vectorized<float>;
+  constexpr int kVecSize = bVec::size();
+
+  int d = 0;
+  // vectorized loop
+  for (; d <= SIZE - kVecSize; d += kVecSize) {
+    fVec x_vec0, x_vec1;
+    if constexpr (has_bias) {
+      x_vec0 = fVec::loadu(input + d) + fVec::loadu(bias + d);
+      x_vec1 = fVec::loadu(input + d + fVec::size()) + fVec::loadu(bias + d + fVec::size());
+    } else {
+      x_vec0 = fVec::loadu(input + d);
+      x_vec1 = fVec::loadu(input + d + fVec::size());
+    }
+
+    // // sigmoid: 1 / (1 + exp(-x))
+    fVec s_vec0 = fVec(1.0f) / (fVec(1.0f) + (-x_vec0).exp_u20());
+    fVec s_vec1 = fVec(1.0f) / (fVec(1.0f) + (-x_vec1).exp_u20());
+
+    // fVec s_vec0 = fVec::loadu(input + d);
+    // fVec s_vec1 = fVec::loadu(input + d + fVec::size());
+
+    // multiply
+    bVec mul_vec = bVec::loadu(mul + d);
+    fVec m_f0, m_f1;
+    std::tie(m_f0, m_f1) = at::vec::convert_to_float(mul_vec);
+    m_f0 = m_f0 * s_vec0;
+    m_f1 = m_f1 * s_vec1;
+    bVec out_vec = convert_from_float_ext<scalar_t>(m_f0, m_f1);
+    out_vec.store(out + d);
+  }
+
+  // scalar tail loop
+  for (; d < SIZE; ++d) {
+    float x = input[d];
+    if constexpr (has_bias) x += bias[d];
+    float s = 1.f / (1.f + std::exp(-x));
+    // float s = x;
+    out[d] = static_cast<scalar_t>(s * static_cast<float>(mul[d]));
+  }
+}
+
 template <typename scalar_t, bool has_bias, int BLOCK_M, int BLOCK_N>
 struct tinygemm_kernel_nn {
   static inline void apply(
@@ -470,6 +521,76 @@ void weight_packed_linear_kernel_impl(
 }
 
 template <typename scalar_t>
+void weight_packed_linear_sigmoid_mul_kernel_impl(
+    scalar_t* __restrict__ out,
+    const scalar_t* __restrict__ mat1,
+    const scalar_t* __restrict__ mat2,
+    const float* __restrict__ bias,
+    const scalar_t* __restrict__ post_mul_mat,
+    int64_t M,
+    int64_t N,
+    int64_t K,
+    int64_t mat1_strideM,
+    int64_t out_strideM) {
+  constexpr int64_t BLOCK_M = block_size_m();
+  constexpr int64_t BLOCK_N = block_size_n();
+  const int64_t MB = div_up(M, BLOCK_M);
+  const int64_t NB = div_up(N, BLOCK_N);
+
+  // TODO: use_brgemm = false is unsupported
+  const bool use_brgemm = true;
+
+  AT_DISPATCH_BOOL(bias != nullptr, has_bias, [&] {
+    parallel_2d(MB, NB, [&](int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1) {
+
+      alignas(64) float Ctmp[BLOCK_M * BLOCK_N];
+
+      loop_2d<scalar_t>(mb0, mb1, nb0, nb1, BLOCK_N * K, [&](int64_t mb, int64_t nb, int64_t nb_offset) {
+        int64_t mb_start = mb * BLOCK_M;
+        int64_t mb_size  = std::min(M - mb_start, BLOCK_M);
+        int64_t nb_start = nb * BLOCK_N;
+        int64_t nb_size  = std::min(N - nb_start, BLOCK_N);
+
+        // TODO: no need to copy Ctmp to C for brgemm path
+        // bias is fused later with sigmoid mul
+        tinygemm_kernel<scalar_t, /*has_bias*/false>(
+            /*   A */ mat1 + mb_start * mat1_strideM,
+            /*   B */ mat2 + nb_start * K /* nb * BLOCK_N * K */,
+            /*   C */ out + mb_start * out_strideM + nb_start,
+            /* Ctmp*/ Ctmp,
+            // /* bias*/ bias + nb_start,
+            /* bias*/ nullptr,
+            /*   M */ mb_size,
+            /*   N */ nb_size,
+            /*   K */ K,
+            /* lda */ mat1_strideM,
+            /* ldb */ nb_size,
+            /* ldc */ out_strideM,
+            /* brg */ use_brgemm);
+
+        // TODO: if we apply bias here, no need to pass in bias in the tinygemm_kernel before
+        // TODO: if use_brgemm is false, Ctmp is not used
+        // --- ADD SIGMOID × POST_MUL ---
+        for (int64_t m = 0; m < mb_size; ++m) {
+          vec_sigmoid_and_mul<scalar_t, has_bias>(
+              out + (mb_start + m) * out_strideM + nb_start, // out pointer
+              Ctmp + m * BLOCK_N,                             // temp GEMM output
+              bias + nb_start,                              // bias
+              post_mul_mat + (mb_start + m) * out_strideM + nb_start, // post_mul pointer
+              nb_size);                                      // pass actual width
+        }
+
+      }); // loop_2d
+
+      if (use_brgemm) {
+        at::native::cpublas::brgemm_release();
+      }
+
+    }); // parallel_2d
+  });
+}
+
+template <typename scalar_t>
 void weight_packed_linear_kernel_impl(
     scalar_t* __restrict__ out,
     const scalar_t* __restrict__ mat1,
@@ -715,6 +836,63 @@ weight_packed_linear(at::Tensor& mat1, at::Tensor& mat2, const std::optional<at:
 
   return out;
 }
+
+
+
+at::Tensor
+weight_packed_linear_sigmoid_mul(at::Tensor& mat1, at::Tensor& mat2, const std::optional<at::Tensor>& bias, at::Tensor& post_mul_mat, bool is_vnni) {
+  RECORD_FUNCTION("sgl-kernel::weight_packed_linear_sigmoid_mul", std::vector<c10::IValue>({mat1, mat2, bias, post_mul_mat}));
+
+  // TODO: use mul as output buffer? is it safe？
+
+  auto packed_w = is_vnni ? mat2 : convert_weight_packed(mat2);
+
+  int64_t M = mat1.size(0);
+  int64_t K = mat1.size(1);
+  int64_t N = mat2.size(0);
+
+  CHECK_LAST_DIM_CONTIGUOUS_INPUT(mat1);
+  CHECK_INPUT(mat2);
+  CHECK_DIM(2, mat1);
+  CHECK_DIM(2, mat2);
+
+  auto dispatch_type = mat1.scalar_type();
+  // strides
+  int64_t out_strideM = post_mul_mat.size(1);
+  int64_t mat1_strideM = mat1.stride(0);
+
+  // TODO: why N=1??
+  TORCH_CHECK(
+      out_strideM % 32 == 0,
+      "post_mul_mat tensor size(1) should be 32 dividable, and the mat2 OC=1 (Mx1 as linear output shape)")
+
+  at::Tensor out = at::empty({M, out_strideM}, mat1.options());
+
+  const bool has_bias = bias.has_value();
+  const float* bias_data = nullptr;
+  if (has_bias) {
+    CHECK_EQ(bias.value().size(0), N);
+    bias_data = bias.value().data_ptr<float>();
+  }
+printf("111\n");
+  AT_DISPATCH_REDUCED_FLOATING_TYPES(dispatch_type, "weight_packed_linear_sigmoid_mul_kernel_impl", [&] {
+
+    weight_packed_linear_sigmoid_mul_kernel_impl<scalar_t>(
+        out.data_ptr<scalar_t>(),
+        mat1.data_ptr<scalar_t>(),
+        packed_w.data_ptr<scalar_t>(),
+        bias_data,
+        post_mul_mat.data_ptr<scalar_t>(),
+        M,
+        N,
+        K,
+        mat1_strideM,
+        out_strideM);
+  });
+
+  return out;
+}
+
 
 // mat1         : [M, K]
 // mat2         : [K, 1]
