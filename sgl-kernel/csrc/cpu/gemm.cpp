@@ -353,6 +353,41 @@ struct brgemm {
     constexpr int BLOCK_N = block_size_n();
     at::native::cpublas::brgemm(M, N, K, lda, ldb, BLOCK_N, /* add_C */ false, A, B, Ctmp);
   }
+  static inline void apply(
+      const scalar_t* __restrict__ A,
+      const scalar_t* __restrict__ B,
+      float* __restrict__ Ctmp,
+      const float* __restrict__ bias,
+      int64_t M,
+      int64_t N,
+      int64_t K,
+      int64_t lda,
+      int64_t ldb,
+      int64_t ldc) {
+    constexpr int BLOCK_N = block_size_n();
+    at::native::cpublas::brgemm(M, N, K, lda, ldb, BLOCK_N, /* add_C */ false, A, B, Ctmp);
+  }  
+};
+
+template <typename scalar_t, bool has_bias>
+void tinygemm_kernel(
+    const scalar_t* __restrict__ A,
+    const scalar_t* __restrict__ B,
+    float* __restrict__ Ctmp,
+    const float* __restrict__ bias,
+    int64_t M,
+    int64_t N,
+    int64_t K,
+    int64_t lda,
+    int64_t ldb,
+    int64_t ldc,
+    bool brg) {
+  TORCH_CHECK(brg, "Only support brg for sigmoid mul fusion kernel");
+  if (brg) {
+    brgemm<scalar_t, has_bias>::apply(A, B, Ctmp, bias, M, N, K, lda, ldb, ldc);
+    return;
+  }  
+
 };
 
 template <typename scalar_t, bool has_bias>
@@ -551,12 +586,10 @@ void weight_packed_linear_sigmoid_mul_kernel_impl(
         int64_t nb_start = nb * BLOCK_N;
         int64_t nb_size  = std::min(N - nb_start, BLOCK_N);
 
-        // TODO: no need to copy Ctmp to C for brgemm path
         // bias is fused later with sigmoid mul
         tinygemm_kernel<scalar_t, /*has_bias*/false>(
             /*   A */ mat1 + mb_start * mat1_strideM,
             /*   B */ mat2 + nb_start * K /* nb * BLOCK_N * K */,
-            /*   C */ out + mb_start * out_strideM + nb_start,
             /* Ctmp*/ Ctmp,
             // /* bias*/ bias + nb_start,
             /* bias*/ nullptr,
@@ -568,7 +601,6 @@ void weight_packed_linear_sigmoid_mul_kernel_impl(
             /* ldc */ out_strideM,
             /* brg */ use_brgemm);
 
-        // TODO: if we apply bias here, no need to pass in bias in the tinygemm_kernel before
         // TODO: if use_brgemm is false, Ctmp is not used
         // --- ADD SIGMOID × POST_MUL ---
         for (int64_t m = 0; m < mb_size; ++m) {
