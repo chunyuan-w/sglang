@@ -472,6 +472,12 @@ def fused_topk_cpu(
     correction_bias: torch.Tensor = None,
     scoring_func: str = "softmax",
 ):
+    # TODO: for minimax, gating_output is fp32 (it's the output of self.gate).
+    # the topk_softmax_cpu kernel currently requires gating_output to be the same dtype as hidden_states, so we need to cast it to hidden_states.dtype before calling the kernel.
+    # See Note [minimax self.gate is fp32]
+    if gating_output.dtype != hidden_states.dtype:
+        gating_output = gating_output.to(hidden_states.dtype)
+    
     topk_weights, topk_ids = torch.ops.sgl_kernel.topk_softmax_cpu(
         hidden_states=hidden_states,
         gating_output=gating_output,
