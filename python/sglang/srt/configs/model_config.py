@@ -1214,6 +1214,14 @@ def _get_and_verify_dtype(
                         "want to use float16."
                     )
                     torch_dtype = torch.bfloat16
+                # TODO: merge this with the above if for gemma?
+                elif model_type.startswith("minimax"):
+                    logger.info(
+                        f"For {model_type}, we downcast float32 to bfloat16 instead "
+                        "of float16 by default. Please specify `dtype` if you "
+                        "want to use float16."
+                    )
+                    torch_dtype = torch.bfloat16                    
                 else:
                     # Following the common practice, we use float16 for float32
                     # models.
