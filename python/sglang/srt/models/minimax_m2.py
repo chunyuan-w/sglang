@@ -70,11 +70,13 @@ from sglang.srt.utils import (
     BumpAllocator,
     add_prefix,
     get_compiler_backend,
+    is_cpu,
     is_non_idle_and_non_empty,
     make_layers,
 )
 
 logger = logging.getLogger(__name__)
+_is_cpu = is_cpu()
 
 
 @triton.jit
@@ -161,6 +163,7 @@ def rmsnorm_apply_kernel_serial(
 
 @debug_kernel_api
 def rms_sumsq_serial(x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
+    # TODO: add cpu impl.
     assert x1.is_cuda and x2.is_cuda
     B, D1 = x1.shape
     B2, D2 = x2.shape
@@ -365,6 +368,7 @@ class MiniMaxM2MoE(nn.Module):
             routed_scaling_factor=1.0,
         )
 
+        # Note [minimax self.gate is fp32]
         self.gate = ReplicatedLinear(
             config.hidden_size,
             config.num_local_experts,
@@ -642,11 +646,14 @@ class MiniMaxM2Attention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         if self.use_qk_norm:
-            # q = self.q_norm(q.contiguous())
-            # k = self.k_norm(k.contiguous())
-            q, k = MiniMaxM2RMSNormTP.forward_qk(
-                self.q_norm, self.k_norm, q.contiguous(), k.contiguous()
-            )
+            # TODO: support forward_qk on cpu
+            if _is_cpu:
+                q = self.q_norm(q.contiguous())
+                k = self.k_norm(k.contiguous())
+            else:
+                q, k = MiniMaxM2RMSNormTP.forward_qk(
+                    self.q_norm, self.k_norm, q.contiguous(), k.contiguous()
+                )
         else:
             q, k = q.contiguous(), k.contiguous()
         q, k = self.rotary_emb(positions, q, k)
