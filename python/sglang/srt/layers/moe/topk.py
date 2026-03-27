@@ -472,6 +472,10 @@ def fused_topk_cpu(
     correction_bias: torch.Tensor = None,
     scoring_func: str = "softmax",
 ):
+    # TODO: support correction_bias and scoring_func for minimax
+    print(f"my correction_bias: {correction_bias}", flush=True)
+    print(f"my scoring_func: {scoring_func}", flush=True)
+    
     # TODO: for minimax, gating_output is fp32 (it's the output of self.gate).
     # the topk_softmax_cpu kernel currently requires gating_output to be the same dtype as hidden_states, so we need to cast it to hidden_states.dtype before calling the kernel.
     # See Note [minimax self.gate is fp32]
@@ -937,7 +941,9 @@ if _is_cpu and _is_cpu_amx_available:
     biased_grouped_topk = biased_grouped_topk_cpu
     grouped_topk = grouped_topk_cpu
     fused_topk_native = fused_topk_cpu
-    fused_topk = fused_topk_cpu
+    # TODO: fix fused_topk_cpu for minimax
+    # fused_topk = fused_topk_cpu
+    fused_topk = fused_topk_torch_native
 else:
     biased_grouped_topk = biased_grouped_topk_gpu
     grouped_topk = grouped_topk_gpu
