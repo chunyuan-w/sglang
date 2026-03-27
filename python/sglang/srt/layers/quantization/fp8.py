@@ -1476,6 +1476,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 moe_runner_config.apply_router_weight_on_input, topk_weights, x
             )
 
+            # TODO: topk_ids from fused_topk_torch_native is int64 while moe kernel needs it to be int32
+            if topk_ids.dtype == torch.int64:
+                topk_ids = topk_ids.to(torch.int32)
+            
             output = torch.ops.sgl_kernel.fused_experts_cpu(
                 x,
                 layer.w13_weight,
