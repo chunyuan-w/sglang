@@ -144,7 +144,8 @@ inline void sigmoid(float* __restrict__ out, const scalar_t* __restrict__ input)
   const fVec one = fVec(1.f);
 
   constexpr int kVecSize = bVec::size();
-  for (int d = 0; d < SIZE; d += kVecSize) {
+  int d = 0;
+  for (; d <= SIZE - kVecSize; d += kVecSize) {
     bVec x_bvec = bVec::loadu(input + d);
     fVec x_fvec0, x_fvec1;
     std::tie(x_fvec0, x_fvec1) = at::vec::convert_to_float(x_bvec);
@@ -155,17 +156,46 @@ inline void sigmoid(float* __restrict__ out, const scalar_t* __restrict__ input)
     x_fvec0.store(out + d);
     x_fvec1.store(out + d + fVec::size());
   }
+
+  for (; d < SIZE; ++d) {
+    float x = static_cast<float>(input[d]);
+    out[d] = 1.f / (1.f + std::exp(-x));
+  }
+
 }
 
+template <typename scalar_t, typename param_t, int SIZE>
+inline void
+apply_bias(float* __restrict__ scores2, const float* __restrict__ scores, const param_t* __restrict__ bias) {
+  using fVec = at::vec::Vectorized<float>;
+  using bVec = at::vec::Vectorized<scalar_t>;
+  auto vec_size = bVec::size();
+  int d = 0;
+  for (; d <= SIZE - vec_size; d += vec_size) {
+    fVec bias0, bias1, x0, x1;
+    std::tie(bias0, bias1) = load_float_vec2(bias + d);
+    std::tie(x0, x1) = load_float_vec2(scores + d);
+    x0 = x0 + bias0;
+    x1 = x1 + bias1;
+    x0.store(scores2 + d);
+    x1.store(scores2 + d + fVec::size());
+  }
+  for (; d < SIZE; d++) {
+    scores2[d] = scores[d] + (float)bias[d];
+  }
+}
+
+// TODO: merge with topk_softmax_kernel_impl
+// TODO: merge no_bias and bias into one
 template <typename scalar_t, int NUM_EXPERTS>
-void topk_sigmoid_kernel_impl(
+void topk_sigmoid_kernel_no_bias_impl(
     float* __restrict__ topk_weights,
     int32_t* __restrict__ topk_ids,
     const scalar_t* __restrict__ gating_output,
+    const float* __restrict__ correction_bias,
     int64_t num_tokens,
     int64_t topk,
     bool renormalize) {
-  using Vec = at::vec::Vectorized<float>;
   const int64_t num_experts_per_group = NUM_EXPERTS;
   at::parallel_for(0, num_tokens, 0, [&](int64_t begin, int64_t end) {
     alignas(64) float scores[NUM_EXPERTS];
@@ -173,24 +203,23 @@ void topk_sigmoid_kernel_impl(
     std::vector<elem_t> queue(num_experts_per_group);
 
     for (int64_t i = begin; i < end; ++i) {
-      at::vec::convert<scalar_t, float>(gating_output + i * NUM_EXPERTS, scores, NUM_EXPERTS);
+      sigmoid<scalar_t, NUM_EXPERTS>(scores, gating_output + i * NUM_EXPERTS);
+      
 
-      float gmax = at::vec::reduce_all<float>(
-          [](Vec& x, Vec& y) { return at::vec::maximum(x, y); }, scores, num_experts_per_group);
-
-      // find position of first max,
-      // note that we may have multiple max values.
-      int first_max_idx = -1;
       for (int64_t e = 0; e < num_experts_per_group; ++e) {
-        if (scores[e] == gmax) {
-          first_max_idx = e;
-          break;
-        }
+        queue[e] = {scores[e], e};
       }
 
-      // scalar sigmoid
-      topk_weights[i] = 1.0 / (1.0 + exp(0.0 - gmax));
-      topk_ids[i] = first_max_idx;
+      std::partial_sort(
+          queue.begin(),
+          queue.begin() + num_experts_per_group,
+          queue.end(),
+          [](const elem_t& x, const elem_t& y) -> bool { return x.first > y.first; });
+
+      for (int64_t j = 0; j < topk; ++j) {
+        topk_weights[i * topk + j] = queue[j].first;
+        topk_ids[i * topk + j] = queue[j].second;
+      }
 
       if (renormalize) {
         float sum = 0.f;
@@ -205,6 +234,130 @@ void topk_sigmoid_kernel_impl(
     }
   });
 }
+
+template <typename scalar_t, int NUM_EXPERTS>
+void topk_sigmoid_kernel_bias_impl(
+    float* __restrict__ topk_weights,
+    int32_t* __restrict__ topk_ids,
+    const scalar_t* __restrict__ gating_output,
+    const float* __restrict__ correction_bias,
+    int64_t num_tokens,
+    int64_t topk,
+    bool renormalize) {
+  const int64_t num_experts_per_group = NUM_EXPERTS;
+  at::parallel_for(0, num_tokens, 0, [&](int64_t begin, int64_t end) {
+    alignas(64) float scores[NUM_EXPERTS];
+    
+    alignas(64) float scores2[NUM_EXPERTS];
+    
+    using elem_t = std::pair<float, int32_t>;
+    std::vector<elem_t> queue(num_experts_per_group);
+
+    for (int64_t i = begin; i < end; ++i) {
+      sigmoid<scalar_t, NUM_EXPERTS>(scores, gating_output + i * NUM_EXPERTS);
+      
+      apply_bias<scalar_t, /*param_t*/float, NUM_EXPERTS>(scores2, scores, correction_bias);
+
+      for (int64_t e = 0; e < num_experts_per_group; ++e) {
+        queue[e] = {scores2[e], e};
+      }
+
+      std::partial_sort(
+          queue.begin(),
+          queue.begin() + num_experts_per_group,
+          queue.end(),
+          [](const elem_t& x, const elem_t& y) -> bool { return x.first > y.first; });
+
+      for (int64_t j = 0; j < topk; ++j) {
+        topk_weights[i * topk + j] = scores[queue[j].second];
+        topk_ids[i * topk + j] = queue[j].second;
+      }
+
+      if (renormalize) {
+        float sum = 0.f;
+        for (int64_t j = 0; j < topk; ++j) {
+          sum += topk_weights[i * topk + j];
+        }
+        float scale = 1.f / sum;
+        for (int64_t j = 0; j < topk; ++j) {
+          topk_weights[i * topk + j] *= scale;
+        }
+      }
+    }
+  });
+}
+
+template <typename scalar_t, int NUM_EXPERTS>
+void topk_sigmoid_kernel_impl(
+    float* topk_weights,
+    int32_t* topk_ids,
+    const scalar_t* gating_output,
+    const float* correction_bias,
+    int64_t num_tokens,
+    int64_t topk,
+    bool renormalize) {
+
+  if (correction_bias != nullptr) {
+    topk_sigmoid_kernel_bias_impl<scalar_t, NUM_EXPERTS>(
+        topk_weights, topk_ids, gating_output, correction_bias, num_tokens, topk, renormalize);
+  } else {
+    topk_sigmoid_kernel_no_bias_impl<scalar_t, NUM_EXPERTS>(
+        topk_weights, topk_ids, gating_output, correction_bias, num_tokens, topk, renormalize);
+  }
+}
+
+// TODO: this is the old code for topk == 1, do we need to keep it?
+// template <typename scalar_t, int NUM_EXPERTS>
+// void topk_sigmoid_kernel_impl(
+//     float* __restrict__ topk_weights,
+//     int32_t* __restrict__ topk_ids,
+//     const scalar_t* __restrict__ gating_output,
+//     const float* __restrict__ correction_bias,
+//     int64_t num_tokens,
+//     int64_t topk,
+//     bool renormalize) {
+//   using Vec = at::vec::Vectorized<float>;
+//   const int64_t num_experts_per_group = NUM_EXPERTS;
+//   AT_DISPATCH_BOOL(correction_bias != nullptr, has_correction_bias, [&] {    
+//     at::parallel_for(0, num_tokens, 0, [&](int64_t begin, int64_t end) {
+//       alignas(64) float scores[NUM_EXPERTS];
+//       using elem_t = std::pair<float, int32_t>;
+//       std::vector<elem_t> queue(num_experts_per_group);
+
+//       for (int64_t i = begin; i < end; ++i) {
+//         at::vec::convert<scalar_t, float>(gating_output + i * NUM_EXPERTS, scores, NUM_EXPERTS);
+
+//         float gmax = at::vec::reduce_all<float>(
+//             [](Vec& x, Vec& y) { return at::vec::maximum(x, y); }, scores, num_experts_per_group);
+
+//         // find position of first max,
+//         // note that we may have multiple max values.
+//         int first_max_idx = -1;
+//         for (int64_t e = 0; e < num_experts_per_group; ++e) {
+//           if (scores[e] == gmax) {
+//             first_max_idx = e;
+//             break;
+//           }
+//         }
+
+//         // scalar sigmoid
+//         topk_weights[i] = 1.0 / (1.0 + exp(0.0 - gmax));
+//         topk_ids[i] = first_max_idx;
+
+//         if (renormalize) {
+//           float sum = 0.f;
+//           for (int64_t j = 0; j < topk; ++j) {
+//             sum += topk_weights[i * topk + j];
+//           }
+//           float scale = 1.f / sum;
+//           for (int64_t j = 0; j < topk; ++j) {
+//             topk_weights[i * topk + j] *= scale;
+//           }
+//         }
+//       }
+//     });
+//   });
+// }
 
 template <typename scalar_t, int NUM_EXPERTS>
 void topk_softmax_kernel_impl(
@@ -252,26 +405,6 @@ void topk_softmax_kernel_impl(
   });
 }
 
-template <typename scalar_t, typename param_t, int SIZE>
-inline void
-apply_bias(float* __restrict__ scores2, const float* __restrict__ scores, const param_t* __restrict__ bias) {
-  using fVec = at::vec::Vectorized<float>;
-  using bVec = at::vec::Vectorized<scalar_t>;
-  auto vec_size = bVec::size();
-  int d = 0;
-  for (; d <= SIZE - vec_size; d += vec_size) {
-    fVec bias0, bias1, x0, x1;
-    std::tie(bias0, bias1) = load_float_vec2(bias + d);
-    std::tie(x0, x1) = load_float_vec2(scores + d);
-    x0 = x0 + bias0;
-    x1 = x1 + bias1;
-    x0.store(scores2 + d);
-    x1.store(scores2 + d + fVec::size());
-  }
-  for (; d < SIZE; d++) {
-    scores2[d] = scores[d] + (float)bias[d];
-  }
-}
 
 template <typename scalar_t, typename param_t, int NUM_EXPERTS, int TOPK>
 void biased_grouped_topk_kernel_impl(
@@ -398,6 +531,7 @@ void biased_grouped_topk_kernel_impl(
       topk_weights.data_ptr<float>(),     \
       topk_ids.data_ptr<int32_t>(),       \
       gating_output.data_ptr<scalar_t>(), \
+      correction_bias_data,               \
       num_tokens,                         \
       topk,                               \
       renormalize);
@@ -425,8 +559,8 @@ void biased_grouped_topk_kernel_impl(
 }  // anonymous namespace
 
 std::tuple<at::Tensor, at::Tensor>
-topk_sigmoid_cpu(at::Tensor& hidden_states, at::Tensor& gating_output, int64_t topk, bool renormalize) {
-  RECORD_FUNCTION("sgl-kernel::topk_sigmoid_cpu", std::vector<c10::IValue>({hidden_states, gating_output}));
+topk_sigmoid_cpu(at::Tensor& hidden_states, at::Tensor& gating_output, int64_t topk, bool renormalize, const std::optional<at::Tensor>& correction_bias) {
+  RECORD_FUNCTION("sgl-kernel::topk_sigmoid_cpu", std::vector<c10::IValue>({hidden_states, gating_output, correction_bias}));
   CHECK_INPUT(gating_output);
 
   const auto st = hidden_states.scalar_type();
@@ -435,7 +569,18 @@ topk_sigmoid_cpu(at::Tensor& hidden_states, at::Tensor& gating_output, int64_t t
   int64_t num_tokens = hidden_states.size(0);
   int64_t num_experts = gating_output.size(1);
   TORCH_CHECK(gating_output.size(0) == num_tokens, "Number of tokens mismatch");
-  TORCH_CHECK(topk == 1, "topk_sigmoid only supports topk=1 case");
+  
+  // TORCH_CHECK(topk == 1, "topk_sigmoid only supports topk=1 case");
+
+  const bool has_correction_bias = correction_bias.has_value();
+  const float* correction_bias_data = nullptr;
+  if (has_correction_bias) {
+    CHECK_EQ(correction_bias.value().scalar_type(), at::kFloat);
+    CHECK_INPUT(correction_bias.value());
+    TORCH_CHECK(correction_bias.value().numel() == num_experts, "Bias shape mismatch");
+    correction_bias_data = correction_bias.value().data_ptr<float>();
+  }
+
   at::Tensor topk_weights = at::empty({num_tokens, topk}, hidden_states.options().dtype(at::kFloat));
   at::Tensor topk_ids = at::empty({num_tokens, topk}, hidden_states.options().dtype(at::kInt));
 
@@ -479,7 +624,7 @@ topk_sigmoid_cpu(at::Tensor& hidden_states, at::Tensor& gating_output, int64_t t
 }
 
 std::tuple<at::Tensor, at::Tensor>
-topk_softmax_cpu(at::Tensor& hidden_states, at::Tensor& gating_output, int64_t topk, bool renormalize) {
+topk_softmax_cpu(at::Tensor& hidden_states, at::Tensor& gating_output, int64_t topk, bool renormalize, const std::optional<at::Tensor>& correction_bias) {
   RECORD_FUNCTION("sgl-kernel::topk_softmax_cpu", std::vector<c10::IValue>({hidden_states, gating_output}));
   CHECK_INPUT(gating_output);
 

@@ -321,7 +321,7 @@ def register_fake_ops():
         return topk_weights, topk_ids
 
     @torch.library.register_fake("sgl_kernel::topk_sigmoid_cpu")
-    def _(hidden_states, gating_output, topk, renormalize):
+    def _(hidden_states, gating_output, topk, renormalize, correction_bias):
         num_tokens = hidden_states.shape[0]
         shape = (num_tokens, topk)
         return (
