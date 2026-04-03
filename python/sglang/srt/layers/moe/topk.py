@@ -477,7 +477,7 @@ def fused_topk_cpu(
     # See Note [minimax self.gate is fp32]
     if gating_output.dtype != hidden_states.dtype:
         gating_output = gating_output.to(hidden_states.dtype)
-    
+
     topk_weights, topk_ids = torch.ops.sgl_kernel.topk_softmax_cpu(
         hidden_states=hidden_states,
         gating_output=gating_output,
