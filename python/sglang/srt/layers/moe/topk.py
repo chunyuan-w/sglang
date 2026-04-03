@@ -473,9 +473,7 @@ def fused_topk_cpu(
     scoring_func: str = "softmax",
 ):
     # TODO: support correction_bias and scoring_func for minimax
-    print(f"my correction_bias: {correction_bias}", flush=True)
-    print(f"my scoring_func: {scoring_func}", flush=True)
-    
+
     # TODO: for minimax, gating_output is fp32 (it's the output of self.gate).
     # the topk_softmax_cpu kernel currently requires gating_output to be the same dtype as hidden_states, so we need to cast it to hidden_states.dtype before calling the kernel.
     # See Note [minimax self.gate is fp32]
