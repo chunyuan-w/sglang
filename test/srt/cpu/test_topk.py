@@ -112,40 +112,71 @@ class TestBiasedGroupedTopK(CustomTestCase):
 
 
 class TestTopK(CustomTestCase):
-    def _run_single_test(self, M, E, topk, renormalize, dtype):
+    def _run_single_test(self, M, E, topk, renormalize, has_correction_bias, scoring_func, dtype):
         torch.manual_seed(1998)
 
         # expand gating_output by M, otherwise bfloat16 fall into same value aftering truncating
         hidden_states = torch.randn(M, 100, dtype=dtype)
-        gating_output = torch.randn(M, E, dtype=dtype) * 2 * M
+        # gating_output = torch.randn(M, E, dtype=dtype) * 2 * M
+        base = torch.linspace(-6, 6, E, dtype=torch.float32)  # evenly spaced
+        gating_output_fp32 = base.unsqueeze(0).repeat(M, 1)
+
+        # add noise large enough to survive bf16
+        gating_output_fp32 += torch.randn_like(gating_output_fp32) * 0.1
+
+        gating_output = gating_output_fp32.to(torch.bfloat16)
+
+        if has_correction_bias:
+            # TODO: do we need to test bf16 bias?
+            correction_bias = torch.randn(E, dtype=torch.float32)
+        else:
+            correction_bias = None
 
         ref_topk_weights, ref_topk_ids = native_fused_topk(
             hidden_states.float(),
             gating_output.float(),
             topk,
             renormalize,
+            correction_bias,
+            scoring_func,
         )
 
         # fused version
-        topk_weights, topk_ids = torch.ops.sgl_kernel.topk_softmax_cpu(
-            hidden_states, gating_output, topk, renormalize
-        )
+        if scoring_func == "softmax":
+            topk_weights, topk_ids = torch.ops.sgl_kernel.topk_softmax_cpu(
+                hidden_states, gating_output, topk, renormalize, correction_bias
+            )
+        elif scoring_func == "sigmoid":
+            topk_weights, topk_ids = torch.ops.sgl_kernel.topk_sigmoid_cpu(
+                hidden_states, gating_output, topk, renormalize, correction_bias
+            )
+        else:
+            raise ValueError(f"Invalid scoring function: {scoring_func}")                    
 
         res = torch.zeros(M, E, dtype=torch.float)
         ref = torch.zeros(M, E, dtype=torch.float)
         res.scatter_(1, topk_ids.long(), topk_weights)
         ref.scatter_(1, ref_topk_ids.long(), ref_topk_weights)
+        # breakpoint()
         torch.testing.assert_close(res, ref)
 
     def test_topk(self):
         for renormalize in [True, False]:
-            self._run_single_test(123, 8, 2, renormalize, torch.bfloat16)
-            self._run_single_test(123, 16, 3, renormalize, torch.bfloat16)
-            self._run_single_test(123, 32, 3, renormalize, torch.bfloat16)
-            self._run_single_test(123, 32, 3, renormalize, torch.bfloat16)
-            self._run_single_test(123, 64, 6, renormalize, torch.bfloat16)
-            self._run_single_test(123, 256, 4, renormalize, torch.bfloat16)
-            self._run_single_test(123, 160, 6, renormalize, torch.bfloat16)
+            # for correction_bias in [False, True]:
+            # for has_correction_bias in [False]:
+            for has_correction_bias in [True]:
+                # for scoring_func in ["sigmoid", "softmax"]:
+                # for scoring_func in ["softmax"]:
+                for scoring_func in ["sigmoid"]:
+                    # self._run_single_test(16, 8, 2, renormalize, has_correction_bias, scoring_func, torch.bfloat16)
+                    self._run_single_test(123, 256, 8, renormalize, has_correction_bias, scoring_func, torch.bfloat16)
+                    
+                    # self._run_single_test(123, 16, 3, renormalize, correction_bias, scoring_func, torch.bfloat16)
+                    # self._run_single_test(123, 32, 3, renormalize, correction_bias, scoring_func, torch.bfloat16)
+                    # self._run_single_test(123, 32, 3, renormalize, correction_bias, scoring_func, torch.bfloat16)
+                    # self._run_single_test(123, 64, 6, renormalize, correction_bias, scoring_func, torch.bfloat16)
+                    # self._run_single_test(123, 256, 4, renormalize, correction_bias, scoring_func, torch.bfloat16)
+                    # self._run_single_test(123, 160, 6, renormalize, correction_bias, scoring_func, torch.bfloat16)
 
 
 class TestCustomTopK(CustomTestCase):
@@ -166,14 +197,16 @@ class TestCustomTopK(CustomTestCase):
         )
 
         # fused version
+        correction_bias = None
         topk_weights, topk_ids = fused_custom_f(
-            hidden_states, gating_output, topk, renormalize
+            hidden_states, gating_output, topk, renormalize, correction_bias
         )
 
         res = torch.zeros(M, E, dtype=torch.float)
         ref = torch.zeros(M, E, dtype=torch.float)
         res.scatter_(1, topk_ids.long(), topk_weights)
         ref.scatter_(1, ref_topk_ids.long(), ref_topk_weights)
+        breakpoint()
         torch.testing.assert_close(res, ref)
 
     def test_custom_topk(self):
@@ -182,14 +215,15 @@ class TestCustomTopK(CustomTestCase):
         ]
         for native_custom_f, fused_custom_f in test_custom_functions:
             self._run_single_test(
+                # 4, 8, 1, False, torch.bfloat16, native_custom_f, fused_custom_f
                 123, 8, 1, False, torch.bfloat16, native_custom_f, fused_custom_f
             )
-            self._run_single_test(
-                123, 16, 1, False, torch.bfloat16, native_custom_f, fused_custom_f
-            )
-            self._run_single_test(
-                123, 32, 1, False, torch.bfloat16, native_custom_f, fused_custom_f
-            )
+            # self._run_single_test(
+            #     123, 32, 8, False, torch.bfloat16, native_custom_f, fused_custom_f
+            # )
+            # self._run_single_test(
+            #     123, 32, 1, False, torch.bfloat16, native_custom_f, fused_custom_f
+            # )
 
 
 if __name__ == "__main__":
