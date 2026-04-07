@@ -291,7 +291,7 @@ class MiniMaxM2RMSNormTP(nn.Module):
             shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
             param.data.copy_(loaded_weight[shard])
 
-    @torch.compile(dynamic=True, backend=get_compiler_backend())
+    @torch.compile(dynamic=True, backend=get_compiler_backend(), disable=_is_cpu)
     def forward(
         self,
         x: torch.Tensor,
