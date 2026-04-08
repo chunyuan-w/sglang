@@ -64,6 +64,7 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTe
 from sglang.srt.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
+    narrow_padded_param_and_loaded_weight,
 )
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import (
@@ -266,12 +267,14 @@ class MiniMaxM2RMSNormTP(nn.Module):
         loaded_weight: torch.Tensor,
     ) -> None:
         """Custom weight loader that handles TP sharding."""
-        tp_world = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
 
-        shard_size = loaded_weight.shape[0] // tp_world
-        shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
-        param.data.copy_(loaded_weight[shard])
+        shard_size = param.shape[0]
+        start_idx = tp_rank * shard_size
+        param_data, loaded_weight = narrow_padded_param_and_loaded_weight(
+            param.data, loaded_weight, 0, start_idx, 0, shard_size
+        )
+        param_data.copy_(loaded_weight)
 
     @torch.compile(dynamic=True, backend=get_compiler_backend())
     def forward(
