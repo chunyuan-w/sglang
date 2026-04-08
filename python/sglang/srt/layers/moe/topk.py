@@ -472,21 +472,28 @@ def fused_topk_cpu(
     correction_bias: torch.Tensor = None,
     scoring_func: str = "softmax",
 ):
-    # TODO: support correction_bias and scoring_func for minimax
-
-    # TODO: for minimax, gating_output is fp32 (it's the output of self.gate).
-    # the topk_softmax_cpu kernel currently requires gating_output to be the same dtype as hidden_states, so we need to cast it to hidden_states.dtype before calling the kernel.
-    # See Note [minimax self.gate is fp32]
+    # gating_output may be fp32 (e.g. minimax self.gate output); kernels require
+    # it to match hidden_states dtype. See Note [minimax self.gate is fp32]
     if gating_output.dtype != hidden_states.dtype:
         gating_output = gating_output.to(hidden_states.dtype)
 
-    topk_weights, topk_ids = torch.ops.sgl_kernel.topk_softmax_cpu(
-        hidden_states=hidden_states,
-        gating_output=gating_output,
-        topk=topk,
-        renormalize=renormalize,
-    )
-    return topk_weights, topk_ids
+    if scoring_func == "sigmoid":
+        return torch.ops.sgl_kernel.topk_sigmoid_bias_cpu(
+            hidden_states,
+            gating_output,
+            topk,
+            renormalize,
+            correction_bias,
+        )
+    else:
+        assert scoring_func == "softmax", f"Unsupported scoring_func: {scoring_func}"
+        assert correction_bias is None, "correction_bias is not supported with softmax scoring_func"
+        return torch.ops.sgl_kernel.topk_softmax_cpu(
+            hidden_states,
+            gating_output,
+            topk,
+            renormalize,
+        )
 
 
 def apply_topk_weights_cpu(need_apply, topk_weights, inputs):
@@ -939,9 +946,7 @@ if _is_cpu and _is_cpu_amx_available:
     biased_grouped_topk = biased_grouped_topk_cpu
     grouped_topk = grouped_topk_cpu
     fused_topk_native = fused_topk_cpu
-    # TODO: fix fused_topk_cpu for minimax
-    # fused_topk = fused_topk_cpu
-    fused_topk = fused_topk_torch_native
+    fused_topk = fused_topk_cpu
 else:
     biased_grouped_topk = biased_grouped_topk_gpu
     grouped_topk = grouped_topk_gpu
