@@ -143,23 +143,33 @@ inline void sigmoid(float* __restrict__ out, const scalar_t* __restrict__ input)
 
   const fVec one = fVec(1.f);
 
-  constexpr int kVecSize = bVec::size();
-  int d = 0;
-  for (; d <= SIZE - kVecSize; d += kVecSize) {
-    bVec x_bvec = bVec::loadu(input + d);
-    fVec x_fvec0, x_fvec1;
-    std::tie(x_fvec0, x_fvec1) = at::vec::convert_to_float(x_bvec);
+  if constexpr (std::is_same_v<scalar_t, float>) {
+    // Use high-accuracy scalar exp for fp32 routing logits to better match
+    // torch-native sigmoid/topk ordering near saturated values.
+    for (int d = 0; d < SIZE; ++d) {
+      float x = input[d];
+      out[d] = 1.f / (1.f + std::exp(-x));
+    }
+    return;
+  } else {
+    constexpr int kVecSize = bVec::size();
+    int d = 0;
+    for (; d <= SIZE - kVecSize; d += kVecSize) {
+      bVec x_bvec = bVec::loadu(input + d);
+      fVec x_fvec0, x_fvec1;
+      std::tie(x_fvec0, x_fvec1) = at::vec::convert_to_float(x_bvec);
 
-    x_fvec0 = one / (one + x_fvec0.neg().exp_u20());
-    x_fvec1 = one / (one + x_fvec1.neg().exp_u20());
+      x_fvec0 = one / (one + x_fvec0.neg().exp_u20());
+      x_fvec1 = one / (one + x_fvec1.neg().exp_u20());
 
-    x_fvec0.store(out + d);
-    x_fvec1.store(out + d + fVec::size());
-  }
+      x_fvec0.store(out + d);
+      x_fvec1.store(out + d + fVec::size());
+    }
 
-  for (; d < SIZE; ++d) {
-    float x = static_cast<float>(input[d]);
-    out[d] = 1.f / (1.f + std::exp(-x));
+    for (; d < SIZE; ++d) {
+      float x = static_cast<float>(input[d]);
+      out[d] = 1.f / (1.f + std::exp(-x));
+    }
   }
 
 }
@@ -204,7 +214,6 @@ void topk_sigmoid_kernel_no_bias_impl(
 
     for (int64_t i = begin; i < end; ++i) {
       sigmoid<scalar_t, NUM_EXPERTS>(scores, gating_output + i * NUM_EXPERTS);
-      
 
       for (int64_t e = 0; e < num_experts_per_group; ++e) {
         queue[e] = {scores[e], e};
@@ -212,9 +221,11 @@ void topk_sigmoid_kernel_no_bias_impl(
 
       std::partial_sort(
           queue.begin(),
-          queue.begin() + num_experts_per_group,
+          queue.begin() + topk,
           queue.end(),
-          [](const elem_t& x, const elem_t& y) -> bool { return x.first > y.first; });
+          [](const elem_t& x, const elem_t& y) -> bool {
+            return x.first > y.first || (x.first == y.first && x.second > y.second);
+          });
 
       for (int64_t j = 0; j < topk; ++j) {
         topk_weights[i * topk + j] = queue[j].first;
@@ -264,7 +275,7 @@ void topk_sigmoid_kernel_bias_impl(
 
       std::partial_sort(
           queue.begin(),
-          queue.begin() + num_experts_per_group,
+          queue.begin() + topk,
           queue.end(),
           [](const elem_t& x, const elem_t& y) -> bool { return x.first > y.first; });
 
@@ -563,8 +574,7 @@ topk_sigmoid_cpu(at::Tensor& hidden_states, at::Tensor& gating_output, int64_t t
   RECORD_FUNCTION("sgl-kernel::topk_sigmoid_cpu", std::vector<c10::IValue>({hidden_states, gating_output, correction_bias}));
   CHECK_INPUT(gating_output);
 
-  const auto st = hidden_states.scalar_type();
-  CHECK_EQ(gating_output.scalar_type(), st);
+  const auto st = gating_output.scalar_type();
 
   int64_t num_tokens = hidden_states.size(0);
   int64_t num_experts = gating_output.size(1);
@@ -584,42 +594,117 @@ topk_sigmoid_cpu(at::Tensor& hidden_states, at::Tensor& gating_output, int64_t t
   at::Tensor topk_weights = at::empty({num_tokens, topk}, hidden_states.options().dtype(at::kFloat));
   at::Tensor topk_ids = at::empty({num_tokens, topk}, hidden_states.options().dtype(at::kInt));
 
-  AT_DISPATCH_REDUCED_FLOATING_TYPES(st, "topk_sigmoid_kernel", [&] {
-    switch (num_experts) {
-      case 1:
-        LAUNCH_TOPK_SIGMOID_KERNEL(1);
-        break;
-      case 2:
-        LAUNCH_TOPK_SIGMOID_KERNEL(2);
-        break;
-      case 4:
-        LAUNCH_TOPK_SIGMOID_KERNEL(4);
-        break;
-      case 8:
-        LAUNCH_TOPK_SIGMOID_KERNEL(8);
-        break;
-      case 16:
-        LAUNCH_TOPK_SIGMOID_KERNEL(16);
-        break;
-      case 32:
-        LAUNCH_TOPK_SIGMOID_KERNEL(32);
-        break;
-      case 64:
-        LAUNCH_TOPK_SIGMOID_KERNEL(64);
-        break;
-      case 128:
-        LAUNCH_TOPK_SIGMOID_KERNEL(128);
-        break;
-      case 160:
-        LAUNCH_TOPK_SIGMOID_KERNEL(160);
-        break;
-      case 256:
-        LAUNCH_TOPK_SIGMOID_KERNEL(256);
-        break;
-      default:
-        TORCH_CHECK(false, "Unexpected num_experts: ", num_experts);
-    }
-  });
+  AT_DISPATCH_SWITCH(
+      st,
+      "topk_sigmoid_kernel",
+      AT_DISPATCH_CASE(at::ScalarType::Half, [&] {
+        switch (num_experts) {
+          case 1:
+            LAUNCH_TOPK_SIGMOID_KERNEL(1);
+            break;
+          case 2:
+            LAUNCH_TOPK_SIGMOID_KERNEL(2);
+            break;
+          case 4:
+            LAUNCH_TOPK_SIGMOID_KERNEL(4);
+            break;
+          case 8:
+            LAUNCH_TOPK_SIGMOID_KERNEL(8);
+            break;
+          case 16:
+            LAUNCH_TOPK_SIGMOID_KERNEL(16);
+            break;
+          case 32:
+            LAUNCH_TOPK_SIGMOID_KERNEL(32);
+            break;
+          case 64:
+            LAUNCH_TOPK_SIGMOID_KERNEL(64);
+            break;
+          case 128:
+            LAUNCH_TOPK_SIGMOID_KERNEL(128);
+            break;
+          case 160:
+            LAUNCH_TOPK_SIGMOID_KERNEL(160);
+            break;
+          case 256:
+            LAUNCH_TOPK_SIGMOID_KERNEL(256);
+            break;
+          default:
+            TORCH_CHECK(false, "Unexpected num_experts: ", num_experts);
+        }
+      })
+      AT_DISPATCH_CASE(at::ScalarType::BFloat16, [&] {
+        switch (num_experts) {
+          case 1:
+            LAUNCH_TOPK_SIGMOID_KERNEL(1);
+            break;
+          case 2:
+            LAUNCH_TOPK_SIGMOID_KERNEL(2);
+            break;
+          case 4:
+            LAUNCH_TOPK_SIGMOID_KERNEL(4);
+            break;
+          case 8:
+            LAUNCH_TOPK_SIGMOID_KERNEL(8);
+            break;
+          case 16:
+            LAUNCH_TOPK_SIGMOID_KERNEL(16);
+            break;
+          case 32:
+            LAUNCH_TOPK_SIGMOID_KERNEL(32);
+            break;
+          case 64:
+            LAUNCH_TOPK_SIGMOID_KERNEL(64);
+            break;
+          case 128:
+            LAUNCH_TOPK_SIGMOID_KERNEL(128);
+            break;
+          case 160:
+            LAUNCH_TOPK_SIGMOID_KERNEL(160);
+            break;
+          case 256:
+            LAUNCH_TOPK_SIGMOID_KERNEL(256);
+            break;
+          default:
+            TORCH_CHECK(false, "Unexpected num_experts: ", num_experts);
+        }
+      })
+      AT_DISPATCH_CASE(at::ScalarType::Float, [&] {
+        switch (num_experts) {
+          case 1:
+            LAUNCH_TOPK_SIGMOID_KERNEL(1);
+            break;
+          case 2:
+            LAUNCH_TOPK_SIGMOID_KERNEL(2);
+            break;
+          case 4:
+            LAUNCH_TOPK_SIGMOID_KERNEL(4);
+            break;
+          case 8:
+            LAUNCH_TOPK_SIGMOID_KERNEL(8);
+            break;
+          case 16:
+            LAUNCH_TOPK_SIGMOID_KERNEL(16);
+            break;
+          case 32:
+            LAUNCH_TOPK_SIGMOID_KERNEL(32);
+            break;
+          case 64:
+            LAUNCH_TOPK_SIGMOID_KERNEL(64);
+            break;
+          case 128:
+            LAUNCH_TOPK_SIGMOID_KERNEL(128);
+            break;
+          case 160:
+            LAUNCH_TOPK_SIGMOID_KERNEL(160);
+            break;
+          case 256:
+            LAUNCH_TOPK_SIGMOID_KERNEL(256);
+            break;
+          default:
+            TORCH_CHECK(false, "Unexpected num_experts: ", num_experts);
+        }
+      }));
   return std::make_tuple(topk_weights, topk_ids);
 }
 

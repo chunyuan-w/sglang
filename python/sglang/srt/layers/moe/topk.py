@@ -472,14 +472,10 @@ def fused_topk_cpu(
     correction_bias: torch.Tensor = None,
     scoring_func: str = "softmax",
 ):
-    # TODO: for minimax, gating_output is fp32 (it's the output of self.gate).
-    # the topk_softmax_cpu kernel currently requires gating_output to be the same dtype as hidden_states, so we need to cast it to hidden_states.dtype before calling the kernel.
-    # See Note [minimax self.gate is fp32]
-    # TODO: convert to fp32 here? currently topk_sigmoid_cpu only supports bf16 inputs
-    if gating_output.dtype != hidden_states.dtype:
-        gating_output = gating_output.to(hidden_states.dtype)
-    
     if scoring_func == "softmax":
+        # topk_softmax_cpu currently requires gating_output to match hidden_states dtype.
+        if gating_output.dtype != hidden_states.dtype:
+            gating_output = gating_output.to(hidden_states.dtype)
         if correction_bias is not None:
             raise ValueError("correction_bias is unsupported in topk_softmax_cpu kernel")
         topk_weights, topk_ids = torch.ops.sgl_kernel.topk_softmax_cpu(
