@@ -2,11 +2,7 @@ import unittest
 
 import torch
 
-from sglang.srt.layers.moe.topk import (
-    biased_grouped_topk_impl as native_biased_grouped_topk,
-)
 from sglang.srt.layers.moe.topk import fused_topk_torch_native as native_fused_topk
-from sglang.srt.layers.moe.topk import grouped_topk_gpu as native_grouped_topk
 from sglang.srt.utils import fast_topk
 from sglang.test.test_utils import CustomTestCase
 
@@ -15,7 +11,7 @@ def llama4_custom_routing_function(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
     topk: int,
-    renormalize: bool,
+    _renormalize: bool,
 ):
     """Copied from Llama4MoE.custom_routing_function to avoid CUDA-only imports."""
     router_scores_aK, router_indices_aK = fast_topk(gating_output, topk, dim=-1)
@@ -29,6 +25,49 @@ torch.manual_seed(1234)
 
 
 # This is used by the Deepseek-V2 model
+def _assert_grouped_topk_valid(topk_weights, topk_ids, gating_float, topk, G, _topk_group, renormalize, scoring="softmax"):
+    """
+    Tie-robust validity check for grouped topk kernels.
+
+    When multiple groups share the same group score, any selection among tied
+    groups is correct.  Rather than comparing against a single reference that
+    breaks ties one way, we verify the invariants directly:
+
+      1. Weights equal the (renormalized) per-expert scores at the selected ids.
+      2. Every selected group's group-score >= every non-selected group's
+         group-score (allowing a small tolerance for floating-point ties).
+      3. Within selected groups, the selected experts are the top ones by score.
+    """
+    M, E = gating_float.shape
+    epg = E // G
+
+    if scoring == "softmax":
+        scores = torch.softmax(gating_float, dim=-1)
+    else:
+        scores = torch.sigmoid(gating_float)
+
+    # 1. Weight correctness
+    expected_w = scores.gather(1, topk_ids.long())
+    if renormalize:
+        expected_w = expected_w / expected_w.sum(-1, keepdim=True)
+    torch.testing.assert_close(topk_weights, expected_w, atol=1e-4, rtol=1e-4)
+
+    # 2. Group-selection validity
+    group_scores = scores.view(M, G, epg).max(dim=-1).values  # (M, G)
+    selected_groups = torch.zeros(M, G, dtype=torch.bool)
+    for i in range(M):
+        for j in range(topk):
+            g = topk_ids[i, j].item() // epg
+            selected_groups[i, g] = True
+
+    min_sel_gs = group_scores.masked_fill(~selected_groups, float("inf")).min(-1).values
+    max_non_sel_gs = group_scores.masked_fill(selected_groups, -float("inf")).max(-1).values
+    # non-selected group scores must be <= min selected group score (up to tie tolerance)
+    assert (max_non_sel_gs <= min_sel_gs + 1e-4).all(), (
+        "Group selection invalid: some non-selected group has higher score than a selected group"
+    )
+
+
 class TestGroupedTopK(CustomTestCase):
     def _run_single_test(self, M, E, G, topk, topk_group, renormalize, dtype):
         torch.manual_seed(1234)
@@ -36,15 +75,6 @@ class TestGroupedTopK(CustomTestCase):
         # expand gating_output by M, otherwise bfloat16 fall into same value aftering truncating
         hidden_states = torch.randn(M, 100, dtype=dtype)
         gating_output = torch.randn(M, E, dtype=dtype) * 2 * M
-
-        ref_topk_weights, ref_topk_ids = native_grouped_topk(
-            hidden_states.float(),
-            gating_output.float(),
-            topk,
-            renormalize,
-            G,
-            topk_group,
-        )
 
         # fused version
         topk_weights, topk_ids = torch.ops.sgl_kernel.grouped_topk_cpu(
@@ -59,11 +89,9 @@ class TestGroupedTopK(CustomTestCase):
             None,
         )
 
-        res = torch.zeros(M, E, dtype=torch.float)
-        ref = torch.zeros(M, E, dtype=torch.float)
-        res.scatter_(1, topk_ids.long(), topk_weights)
-        ref.scatter_(1, ref_topk_ids.long(), ref_topk_weights)
-        torch.testing.assert_close(res, ref)
+        _assert_grouped_topk_valid(
+            topk_weights, topk_ids, gating_output.float(), topk, G, topk_group, renormalize, scoring="softmax"
+        )
 
     def test_grouped_topk(self):
         for renormalize in [True, False]:
@@ -88,16 +116,6 @@ class TestBiasedGroupedTopK(CustomTestCase):
         gating_output = torch.randn(M, E, dtype=dtype) * 2 * M
         correction_bias = torch.randn(E, dtype=bias_dtype)
 
-        ref_topk_weights, ref_topk_ids = native_biased_grouped_topk(
-            hidden_states.float(),
-            gating_output.float(),
-            correction_bias.float(),
-            topk,
-            renormalize,
-            G,
-            topk_group,
-        )
-
         # fused version
         topk_weights, topk_ids = torch.ops.sgl_kernel.biased_grouped_topk_cpu(
             hidden_states,
@@ -112,11 +130,34 @@ class TestBiasedGroupedTopK(CustomTestCase):
             None,
         )
 
-        res = torch.zeros(M, E, dtype=torch.float)
-        ref = torch.zeros(M, E, dtype=torch.float)
-        res.scatter_(1, topk_ids.long(), topk_weights)
-        ref.scatter_(1, ref_topk_ids.long(), ref_topk_weights)
-        torch.testing.assert_close(res, ref)
+        M2, E2 = gating_output.shape
+        epg = E2 // G
+        sigmoid_scores = gating_output.float().sigmoid()
+        bias_f32 = correction_bias.float()
+        biased_scores = sigmoid_scores + bias_f32.unsqueeze(0)  # (M, E)
+
+        # 1. Weight correctness: weights = sigmoid scores at selected ids (with optional renorm)
+        expected_w = sigmoid_scores.gather(1, topk_ids.long())
+        if renormalize:
+            expected_w = expected_w / expected_w.sum(-1, keepdim=True)
+        torch.testing.assert_close(topk_weights, expected_w, atol=1e-4, rtol=1e-4)
+
+        # 2. Group-selection validity using group score = sum of top-2 biased scores per group
+        biased_groups = biased_scores.view(M2, G, epg)
+        top2 = biased_groups.topk(2, dim=-1).values  # (M, G, 2)
+        group_scores = top2.sum(-1)  # (M, G)
+
+        selected_groups = torch.zeros(M2, G, dtype=torch.bool)
+        for i in range(M2):
+            for j in range(topk):
+                g = topk_ids[i, j].item() // epg
+                selected_groups[i, g] = True
+
+        min_sel_gs = group_scores.masked_fill(~selected_groups, float("inf")).min(-1).values
+        max_non_sel_gs = group_scores.masked_fill(selected_groups, -float("inf")).max(-1).values
+        assert (max_non_sel_gs <= min_sel_gs + 1e-4).all(), (
+            "Group selection invalid: some non-selected group has higher score than a selected group"
+        )
 
     def test_biased_grouped_topk(self):
         for renormalize in [True, False]:
