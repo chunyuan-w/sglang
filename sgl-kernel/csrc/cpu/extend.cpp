@@ -203,13 +203,26 @@ void extend_attention_kernel_impl(
             /* B     */ Btmp,
             /* C     */ s_i);
 
-        // apply causal mask
-        if (num_keys - n <= BLOCK_N) {
+        // Apply causal mask: mask future keys (col > last_col) for each query row.
+        //
+        // Original condition was `num_keys - n <= BLOCK_N` (last n-block only).
+        // That assumed BLOCK_M <= BLOCK_N/2 so non-last blocks are always fully
+        // before the queries.  With BLOCK_M=512 and BLOCK_N=768, BLOCK_M > BLOCK_N/2,
+        // so the first n-block (n=0) can contain future keys for early rows.
+        // Correct condition: mask any block whose last key (n + n_size - 1) falls
+        // at or after the first query position (m), i.e. n + n_size > m.
+        if (n + n_size > m) {
           for (int row = 0; row < m_size; ++row) {
             int last_col = m + row - n;
+            // Clamp to -1: when n > m+row every key in this block is a future
+            // key, so the entire row should be masked.  Without this clamp,
+            // last_col+1 <= 0 and fill_stub would write before row_ptr.
+            last_col = std::max(last_col, -1);
             // fill [last_col + 1, n_size) to -inf
-            float* row_ptr = s_i + row * BLOCK_N;
-            fill_stub(row_ptr + last_col + 1, -std::numeric_limits<float>::infinity(), n_size - last_col - 1);
+            if (last_col < n_size - 1) {
+              float* row_ptr = s_i + row * BLOCK_N;
+              fill_stub(row_ptr + last_col + 1, -std::numeric_limits<float>::infinity(), n_size - last_col - 1);
+            }
           }
         }
 
