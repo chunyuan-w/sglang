@@ -266,7 +266,9 @@ void topk_sigmoid_kernel_bias_impl(
           queue.begin(),
           queue.begin() + topk,
           queue.end(),
-          [](const elem_t& x, const elem_t& y) -> bool { return x.first > y.first; });
+          [](const elem_t& x, const elem_t& y) -> bool {
+            return (x.first > y.first) || (x.first == y.first && x.second < y.second);
+          });
 
       for (int64_t j = 0; j < topk; ++j) {
         topk_weights[i * topk + j] = scores[queue[j].second];
