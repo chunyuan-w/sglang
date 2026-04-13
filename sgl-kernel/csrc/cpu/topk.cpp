@@ -1,6 +1,8 @@
 #include "common.h"
 #include "vec.h"
 
+#include <type_traits>
+
 namespace {
 
 template <typename scalar_t, int SIZE>
@@ -146,15 +148,21 @@ inline void sigmoid(float* __restrict__ out, const scalar_t* __restrict__ input)
   constexpr int kVecSize = bVec::size();
   int d = 0;
   for (; d <= SIZE - kVecSize; d += kVecSize) {
-    bVec x_bvec = bVec::loadu(input + d);
-    fVec x_fvec0, x_fvec1;
-    std::tie(x_fvec0, x_fvec1) = at::vec::convert_to_float(x_bvec);
+    if constexpr (std::is_same_v<scalar_t, float>) {
+      fVec x_fvec = fVec::loadu(input + d);
+      x_fvec = one / (one + x_fvec.neg().exp_u20());
+      x_fvec.store(out + d);
+    } else {
+      bVec x_bvec = bVec::loadu(input + d);
+      fVec x_fvec0, x_fvec1;
+      std::tie(x_fvec0, x_fvec1) = at::vec::convert_to_float(x_bvec);
 
-    x_fvec0 = one / (one + x_fvec0.neg().exp_u20());
-    x_fvec1 = one / (one + x_fvec1.neg().exp_u20());
+      x_fvec0 = one / (one + x_fvec0.neg().exp_u20());
+      x_fvec1 = one / (one + x_fvec1.neg().exp_u20());
 
-    x_fvec0.store(out + d);
-    x_fvec1.store(out + d + fVec::size());
+      x_fvec0.store(out + d);
+      x_fvec1.store(out + d + fVec::size());
+    }
   }
 
   for (; d < SIZE; ++d) {
@@ -563,8 +571,7 @@ topk_sigmoid_cpu(at::Tensor& hidden_states, at::Tensor& gating_output, int64_t t
   RECORD_FUNCTION("sgl-kernel::topk_sigmoid_cpu", std::vector<c10::IValue>({hidden_states, gating_output, correction_bias}));
   CHECK_INPUT(gating_output);
 
-  const auto st = hidden_states.scalar_type();
-  CHECK_EQ(gating_output.scalar_type(), st);
+  const auto gating_st = gating_output.scalar_type();
 
   int64_t num_tokens = hidden_states.size(0);
   int64_t num_experts = gating_output.size(1);
@@ -584,7 +591,8 @@ topk_sigmoid_cpu(at::Tensor& hidden_states, at::Tensor& gating_output, int64_t t
   at::Tensor topk_weights = at::empty({num_tokens, topk}, hidden_states.options().dtype(at::kFloat));
   at::Tensor topk_ids = at::empty({num_tokens, topk}, hidden_states.options().dtype(at::kInt));
 
-  AT_DISPATCH_REDUCED_FLOATING_TYPES(st, "topk_sigmoid_kernel", [&] {
+  if (gating_st == at::kFloat) {
+    using scalar_t = float;
     switch (num_experts) {
       case 1:
         LAUNCH_TOPK_SIGMOID_KERNEL(1);
@@ -619,7 +627,44 @@ topk_sigmoid_cpu(at::Tensor& hidden_states, at::Tensor& gating_output, int64_t t
       default:
         TORCH_CHECK(false, "Unexpected num_experts: ", num_experts);
     }
-  });
+  } else {
+    AT_DISPATCH_REDUCED_FLOATING_TYPES(gating_st, "topk_sigmoid_kernel", [&] {
+      switch (num_experts) {
+        case 1:
+          LAUNCH_TOPK_SIGMOID_KERNEL(1);
+          break;
+        case 2:
+          LAUNCH_TOPK_SIGMOID_KERNEL(2);
+          break;
+        case 4:
+          LAUNCH_TOPK_SIGMOID_KERNEL(4);
+          break;
+        case 8:
+          LAUNCH_TOPK_SIGMOID_KERNEL(8);
+          break;
+        case 16:
+          LAUNCH_TOPK_SIGMOID_KERNEL(16);
+          break;
+        case 32:
+          LAUNCH_TOPK_SIGMOID_KERNEL(32);
+          break;
+        case 64:
+          LAUNCH_TOPK_SIGMOID_KERNEL(64);
+          break;
+        case 128:
+          LAUNCH_TOPK_SIGMOID_KERNEL(128);
+          break;
+        case 160:
+          LAUNCH_TOPK_SIGMOID_KERNEL(160);
+          break;
+        case 256:
+          LAUNCH_TOPK_SIGMOID_KERNEL(256);
+          break;
+        default:
+          TORCH_CHECK(false, "Unexpected num_experts: ", num_experts);
+      }
+    });
+  }
   return std::make_tuple(topk_weights, topk_ids);
 }
 

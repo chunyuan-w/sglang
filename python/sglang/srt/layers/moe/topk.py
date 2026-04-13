@@ -476,8 +476,8 @@ def fused_topk_cpu(
     # the topk_softmax_cpu kernel currently requires gating_output to be the same dtype as hidden_states, so we need to cast it to hidden_states.dtype before calling the kernel.
     # See Note [minimax self.gate is fp32]
     # TODO: convert to fp32 here? currently topk_sigmoid_cpu only supports bf16 inputs
-    if gating_output.dtype != hidden_states.dtype:
-        gating_output = gating_output.to(hidden_states.dtype)
+    # if gating_output.dtype != hidden_states.dtype:
+    #     gating_output = gating_output.to(hidden_states.dtype)
     
     if scoring_func == "softmax":
         if correction_bias is not None:

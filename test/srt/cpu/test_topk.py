@@ -160,6 +160,36 @@ class TestTopK(CustomTestCase):
         # breakpoint()
         torch.testing.assert_close(res, ref)
 
+    def _run_mixed_dtype_sigmoid_test(self, M, E, topk, renormalize, has_correction_bias):
+        torch.manual_seed(16)
+
+        hidden_states = torch.randn(M, 100, dtype=torch.bfloat16)
+
+        base = torch.linspace(-6, 6, E, dtype=torch.float32)
+        gating_output = base.unsqueeze(0).repeat(M, 1)
+        gating_output += torch.randn_like(gating_output) * 0.1
+
+        correction_bias = torch.randn(E, dtype=torch.float32) if has_correction_bias else None
+
+        ref_topk_weights, ref_topk_ids = native_fused_topk(
+            hidden_states.float(),
+            gating_output,
+            topk,
+            renormalize,
+            correction_bias,
+            "sigmoid",
+        )
+
+        topk_weights, topk_ids = torch.ops.sgl_kernel.topk_sigmoid_cpu(
+            hidden_states, gating_output, topk, renormalize, correction_bias
+        )
+
+        res = torch.zeros(M, E, dtype=torch.float)
+        ref = torch.zeros(M, E, dtype=torch.float)
+        res.scatter_(1, topk_ids.long(), topk_weights)
+        ref.scatter_(1, ref_topk_ids.long(), ref_topk_weights)
+        torch.testing.assert_close(res, ref)
+
     def test_topk(self):
         for renormalize in [True, False]:
             # for correction_bias in [False, True]:
@@ -170,6 +200,7 @@ class TestTopK(CustomTestCase):
                 for scoring_func in ["sigmoid"]:
                     # self._run_single_test(16, 8, 2, renormalize, has_correction_bias, scoring_func, torch.bfloat16)
                     self._run_single_test(123, 256, 8, renormalize, has_correction_bias, scoring_func, torch.bfloat16)
+                    self._run_mixed_dtype_sigmoid_test(123, 256, 8, renormalize, has_correction_bias)
                     
                     # self._run_single_test(123, 16, 3, renormalize, correction_bias, scoring_func, torch.bfloat16)
                     # self._run_single_test(123, 32, 3, renormalize, correction_bias, scoring_func, torch.bfloat16)
