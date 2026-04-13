@@ -145,14 +145,19 @@ inline void sigmoid(float* __restrict__ out, const scalar_t* __restrict__ input)
 
   const fVec one = fVec(1.f);
 
-  constexpr int kVecSize = bVec::size();
-  int d = 0;
-  for (; d <= SIZE - kVecSize; d += kVecSize) {
-    if constexpr (std::is_same_v<scalar_t, float>) {
-      fVec x_fvec = fVec::loadu(input + d);
-      x_fvec = one / (one + x_fvec.neg().exp_u20());
-      x_fvec.store(out + d);
-    } else {
+
+  if constexpr (std::is_same_v<scalar_t, float>) {
+    // Use high-accuracy scalar exp for fp32 routing logits to better match
+    // torch-native sigmoid/topk ordering near saturated values.
+    for (int d = 0; d < SIZE; ++d) {
+      float x = input[d];
+      out[d] = 1.f / (1.f + std::exp(-x));
+    }
+    return;
+  } else {
+    constexpr int kVecSize = bVec::size();
+    int d = 0;
+    for (; d <= SIZE - kVecSize; d += kVecSize) {
       bVec x_bvec = bVec::loadu(input + d);
       fVec x_fvec0, x_fvec1;
       std::tie(x_fvec0, x_fvec1) = at::vec::convert_to_float(x_bvec);
@@ -163,15 +168,14 @@ inline void sigmoid(float* __restrict__ out, const scalar_t* __restrict__ input)
       x_fvec0.store(out + d);
       x_fvec1.store(out + d + fVec::size());
     }
-  }
 
-  for (; d < SIZE; ++d) {
-    float x = static_cast<float>(input[d]);
-    out[d] = 1.f / (1.f + std::exp(-x));
+    for (; d < SIZE; ++d) {
+      float x = static_cast<float>(input[d]);
+      out[d] = 1.f / (1.f + std::exp(-x));
+    }
   }
 
 }
-
 template <typename scalar_t, typename param_t, int SIZE>
 inline void
 apply_bias(float* __restrict__ scores2, const float* __restrict__ scores, const param_t* __restrict__ bias) {
