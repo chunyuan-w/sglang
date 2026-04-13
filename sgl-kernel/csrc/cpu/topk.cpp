@@ -264,7 +264,7 @@ void topk_sigmoid_kernel_bias_impl(
 
       std::partial_sort(
           queue.begin(),
-          queue.begin() + num_experts_per_group,
+          queue.begin() + topk,
           queue.end(),
           [](const elem_t& x, const elem_t& y) -> bool { return x.first > y.first; });
 
