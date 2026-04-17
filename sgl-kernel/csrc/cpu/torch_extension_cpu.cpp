@@ -121,6 +121,18 @@ at::Tensor flash_attn_varlen_func(
     int64_t max_seqlen_k,
     bool causal);
 
+// fused grid self-attention (QKV + flash attention + gating + output projection)
+at::Tensor fused_grid_attention(
+    at::Tensor& pair,
+    at::Tensor& bias,
+    at::Tensor& q_weight,
+    at::Tensor& k_weight,
+    at::Tensor& v_weight,
+    at::Tensor& gating_weight,
+    at::Tensor& output_weight,
+    int64_t num_heads,
+    bool is_vnni);
+
 // linear attention
 std::tuple<at::Tensor, at::Tensor> chunk_gated_delta_rule_cpu(
     const at::Tensor& query,
@@ -413,6 +425,12 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
       "flash_attn_varlen_func(Tensor q, Tensor k, Tensor v, Tensor bias, Tensor cu_seqlens_q, Tensor cu_seqlens_k, "
       "int max_seqlen_q, int max_seqlen_k, bool causal) -> Tensor");
   m.impl("flash_attn_varlen_func", torch::kCPU, &flash_attn_varlen_func);
+
+  // fused grid self-attention
+  m.def(
+      "fused_grid_attention(Tensor pair, Tensor bias, Tensor q_weight, Tensor k_weight, Tensor v_weight, "
+      "Tensor gating_weight, Tensor output_weight, int num_heads, bool is_vnni) -> Tensor");
+  m.impl("fused_grid_attention", torch::kCPU, &fused_grid_attention);
 
   // linear attn
   m.def(
