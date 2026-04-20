@@ -307,12 +307,96 @@ void fused_attention_stage_impl(
   });
 }
 
+// Per-row softmax for the non-flash core: scale + bias, max, exp+sum, normalize,
+// cast to bf16, zero the [N, N_pad) tail so it contributes 0 to attn @ V.
+//
+// row_fp32 is rewritten in place (scratch for the three passes).
+template <typename scalar_t>
+inline void softmax_row_to_bf16(
+    float* __restrict__ row_fp32,
+    scalar_t* __restrict__ row_out,
+    const scalar_t* __restrict__ bias_row,
+    int N,
+    int N_pad,
+    float sm_scale) {
+  using bVec = at::vec::Vectorized<scalar_t>;
+  using fVec = at::vec::Vectorized<float>;
+  constexpr int kBVec = bVec::size();  // 32 for bf16
+  constexpr int kFVec = fVec::size();  // 16 for float
+
+  const fVec vscale(sm_scale);
+
+  // Pass 1: row = row * scale + bias; track max.
+  fVec vmax(-std::numeric_limits<float>::infinity());
+  int n = 0;
+  for (; n <= N - kBVec; n += kBVec) {
+    fVec l0 = fVec::loadu(row_fp32 + n);
+    fVec l1 = fVec::loadu(row_fp32 + n + kFVec);
+    fVec b0, b1;
+    std::tie(b0, b1) = load_float_vec2<scalar_t>(bias_row + n);
+    l0 = l0 * vscale + b0;
+    l1 = l1 * vscale + b1;
+    l0.store(row_fp32 + n);
+    l1.store(row_fp32 + n + kFVec);
+    vmax = at::vec::maximum(vmax, at::vec::maximum(l0, l1));
+  }
+  float max_val = at::vec::vec_reduce_all<float>(
+      [](fVec a, fVec b) { return at::vec::maximum(a, b); }, vmax);
+  for (; n < N; ++n) {
+    float v = row_fp32[n] * sm_scale + static_cast<float>(bias_row[n]);
+    row_fp32[n] = v;
+    if (v > max_val) max_val = v;
+  }
+
+  // Pass 2: row = exp(row - max); sum.
+  const fVec vmax2(max_val);
+  fVec vsum(0.f);
+  n = 0;
+  for (; n <= N - kBVec; n += kBVec) {
+    fVec e0 = (fVec::loadu(row_fp32 + n) - vmax2).exp_u20();
+    fVec e1 = (fVec::loadu(row_fp32 + n + kFVec) - vmax2).exp_u20();
+    e0.store(row_fp32 + n);
+    e1.store(row_fp32 + n + kFVec);
+    vsum = vsum + e0 + e1;
+  }
+  float sum_val = at::vec::vec_reduce_all<float>(
+      [](fVec a, fVec b) { return a + b; }, vsum);
+  for (; n < N; ++n) {
+    float e = std::exp(row_fp32[n] - max_val);
+    row_fp32[n] = e;
+    sum_val += e;
+  }
+
+  // Pass 3: row_out = bf16(row / sum); zero the [N, N_pad) tail.
+  const float inv_sum = 1.f / sum_val;
+  const fVec vinv(inv_sum);
+  n = 0;
+  for (; n <= N - kBVec; n += kBVec) {
+    fVec l0 = fVec::loadu(row_fp32 + n) * vinv;
+    fVec l1 = fVec::loadu(row_fp32 + n + kFVec) * vinv;
+    bVec bout = convert_from_float_ext<scalar_t>(l0, l1);
+    bout.store(row_out + n);
+  }
+  for (; n < N; ++n) {
+    row_out[n] = static_cast<scalar_t>(row_fp32[n] * inv_sum);
+  }
+  for (int p = N; p < N_pad; ++p) {
+    row_out[p] = scalar_t(0);
+  }
+}
+
 // v2 core: consumes an already-projected QKVG buffer [B, N, 4*D] produced by a
 // single concat weight_packed_linear (stage A), and emits the gated attention
 // output [B, N, D].  The final out_proj is run outside as stage C.  This keeps
 // QKV+gating in a large-M GEMM (pair streamed once per projection-group) and
 // only fuses the attention + sigmoid-gate tail that actually benefits.
-template <typename scalar_t, int BLOCK_M, int BLOCK_N>
+//
+// Uses a non-flash softmax: per (bs, h) we pack K and V to VNNI layout once,
+// then per M-block do two brgemms (Q @ K^T over the full N_pad, softmax @ V
+// over the full N_pad).  Materialized logits [BLOCK_M, N_pad] fp32 fit in L2
+// for N up to ~8k with BLOCK_M=32, so flash-style streaming softmax adds
+// per-chunk rescaling overhead with no cache-fit benefit.
+template <typename scalar_t, int BLOCK_M>
 void fused_attention_core_impl(
     scalar_t* __restrict__ gated_attn,   // [B, N, H*K]
     const scalar_t* __restrict__ qkvg,   // [B, N, 4*H*K] (Q|K|V|G concat on last dim)
@@ -328,6 +412,7 @@ void fused_attention_core_impl(
     int buffer_size_per_thread) {
   const int D = H * K;
   const int QKVG_STRIDE = 4 * D;  // row stride within qkvg (element count)
+  const int N_pad = div_up(N, TILE_K) * TILE_K;  // pad to AMX K-tile alignment
 
   parallel_for(B * H, [&](int begin, int end) {
     int bs{0}, head_id{0};
@@ -335,6 +420,7 @@ void fused_attention_core_impl(
 
     int tid = get_thread_num();
     char* base = reinterpret_cast<char*>(buffer) + static_cast<size_t>(tid) * buffer_size_per_thread;
+    char* base0 = base;
 
     auto bump = [&](size_t nbytes) {
       void* p = base;
@@ -342,35 +428,40 @@ void fused_attention_core_impl(
       return p;
     };
 
-    // Contiguous per-head K and V scratch (streamed through all Q blocks).
+    // Gather buffers for this head's K/V (strided read from qkvg then packed).
     scalar_t* K_contig = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * N * K));
     scalar_t* V_contig = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * N * K));
 
-    // Flash-attention scratch (s_i aliased as s_delta for the second gemm).
-    float* s_i = reinterpret_cast<float*>(bump(sizeof(float) * BLOCK_M * BLOCK_N));
-    float* v_prime = reinterpret_cast<float*>(bump(sizeof(float) * BLOCK_M * K));
-    scalar_t* Btmp = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * BLOCK_N * K));
-    scalar_t* Q_block = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * BLOCK_M * K));
+    // VNNI-packed K and V, reused across all M-blocks of this (bs, head).
+    scalar_t* K_vnni = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * N_pad * K));
+    scalar_t* V_vnni = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * N_pad * K));
 
-    scalar_t* s_delta = reinterpret_cast<scalar_t*>(s_i);
-    alignas(64) float s_prime[BLOCK_M];
-    alignas(64) float m_prime[BLOCK_M];
+    // Non-flash scratch: full [BLOCK_M, N_pad] logits + bf16 softmax for the
+    // attn @ V brgemm.  For N=4655 this is ~600KB + ~300KB, inside GNR's 2MB L2.
+    float* logits_fp32 = reinterpret_cast<float*>(bump(sizeof(float) * BLOCK_M * N_pad));
+    scalar_t* softmax_bf16 = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * BLOCK_M * N_pad));
+    float* v_prime = reinterpret_cast<float*>(bump(sizeof(float) * BLOCK_M * K));
+    scalar_t* Q_block = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * BLOCK_M * K));
+    (void)base0;  // silence unused warning; base tracks offsets via closure
+
+    // Zero the packed-K/V tail regions once per thread: pack_vnni{,2} write only
+    // columns/rows in [0, N); the [N, N_pad) padding must be zero so the next
+    // brgemm gets 0-contributions there.  Safe to do on first entry since these
+    // buffers are not touched elsewhere beyond pack_vnni output.
+    std::memset(K_vnni, 0, sizeof(scalar_t) * N_pad * K);
+    std::memset(V_vnni, 0, sizeof(scalar_t) * N_pad * K);
 
     for (int idx = begin; idx < end; ++idx) {
       const scalar_t* qkvg_bs = qkvg + static_cast<size_t>(bs) * N * QKVG_STRIDE;
       scalar_t* attn_bs = gated_attn + static_cast<size_t>(bs) * N * D;
 
       // In qkvg, each row is [Q(D) | K(D) | V(D) | G(D)].
-      // Per-head slice offsets within a row:
       const size_t Q_off = static_cast<size_t>(head_id) * K;
       const size_t K_off = static_cast<size_t>(D) + static_cast<size_t>(head_id) * K;
       const size_t V_off = static_cast<size_t>(2 * D) + static_cast<size_t>(head_id) * K;
       const size_t G_off = static_cast<size_t>(3 * D) + static_cast<size_t>(head_id) * K;
 
       // Gather this head's K/V into contiguous scratch once per (bs, head).
-      // Streaming from the strided QKVG buffer inside the flash-attn loop was
-      // tried but hurt perf badly because each 32-elem K row leaves 480 elems
-      // of the cache line unused.
       for (int n = 0; n < N; ++n) {
         const scalar_t* src_k = qkvg_bs + static_cast<size_t>(n) * QKVG_STRIDE + K_off;
         const scalar_t* src_v = qkvg_bs + static_cast<size_t>(n) * QKVG_STRIDE + V_off;
@@ -378,79 +469,68 @@ void fused_attention_core_impl(
         std::memcpy(V_contig + static_cast<size_t>(n) * K, src_v, sizeof(scalar_t) * K);
       }
 
+      // Pack K into [K/2, N_pad, 2] and V into [N_pad/2, K, 2] once per (bs, h).
+      pack_vnni<scalar_t>(
+          /* dst */ K_vnni,
+          /* src */ K_contig,
+          /* N */ N,
+          /* K */ K,
+          /* ld_src */ K,
+          /* ld_dst */ N_pad);
+      pack_vnni2<scalar_t>(
+          /* dst */ V_vnni,
+          /* src */ V_contig,
+          /* K */ N,
+          /* N */ K,
+          /* ld_src */ K,
+          /* ld_dst */ K);
+
       const scalar_t* bias_h = bias + static_cast<size_t>(head_id) * bias_strideH;
 
       for (int m = 0; m < N; m += BLOCK_M) {
         int m_size = std::min(BLOCK_M, N - m);
 
-        // Gather the current Q block to a contig buffer for brgemm.
+        // Gather Q block to a contig buffer for brgemm.
         for (int r = 0; r < m_size; ++r) {
           const scalar_t* src_q = qkvg_bs + static_cast<size_t>(m + r) * QKVG_STRIDE + Q_off;
           std::memcpy(Q_block + static_cast<size_t>(r) * K, src_q, sizeof(scalar_t) * K);
         }
 
-        fill_stub(v_prime, 0.f, m_size * K);
-        fill_stub(s_prime, 0.f, m_size);
-        fill_stub(m_prime, -std::numeric_limits<float>::infinity(), m_size);
+        // ---- Q @ K^T -> logits_fp32 [m_size, N_pad] ----
+        at::native::cpublas::brgemm(
+            /* M */ m_size, /* N */ N_pad, /* K */ K,
+            /* lda */ K, /* ldb */ N_pad, /* ldc */ N_pad,
+            /* add_C */ false,
+            Q_block,
+            K_vnni,
+            logits_fp32);
 
-        for (int n = 0; n < N; n += BLOCK_N) {
-          int n_size = std::min(BLOCK_N, N - n);
-          const int padded_n_size = div_up(n_size, TILE_K) * TILE_K;
-
-          pack_vnni<scalar_t>(
-              /* dst */ Btmp,
-              /* src */ K_contig + static_cast<size_t>(n) * K,
-              /* N */ n_size,
-              /* K */ K,
-              /* ld_src */ K,
-              /* ld_dst */ BLOCK_N);
-
-          at::native::cpublas::brgemm(
-              /* M */ m_size, /* N */ n_size, /* K */ K,
-              /* lda */ K, /* ldb */ BLOCK_N, /* ldc */ BLOCK_N,
-              /* add_C */ false,
-              Q_block,
-              Btmp,
-              s_i);
-
-          const scalar_t* bias_ptr = bias_h + static_cast<size_t>(m) * bias_strideM + n;
-          flash_attn_softmax<scalar_t, BLOCK_M, BLOCK_N>::apply(
-              s_i,
-              s_delta,
-              v_prime,
-              s_prime,
-              m_prime,
-              m_size,
-              n_size,
-              padded_n_size,
-              K,
-              sm_scale,
-              bias_ptr,
-              bias_strideM);
-
-          pack_vnni2<scalar_t>(
-              /* dst */ Btmp,
-              /* src */ V_contig + static_cast<size_t>(n) * K,
-              /* K */ n_size,
-              /* N */ K,
-              /* ld_src */ K,
-              /* ld_dst */ K);
-
-          at::native::cpublas::brgemm(
-              /* M */ m_size, /* N */ K, /* K */ padded_n_size,
-              /* lda */ BLOCK_N, /* ldb */ K, /* ldc */ K,
-              /* add_C */ true,
-              s_delta,
-              Btmp,
-              v_prime);
+        // ---- softmax per row (scale + bias + normalize + cast to bf16) ----
+        for (int r = 0; r < m_size; ++r) {
+          const scalar_t* bias_row = bias_h + static_cast<size_t>(m + r) * bias_strideM;
+          softmax_row_to_bf16<scalar_t>(
+              logits_fp32 + static_cast<size_t>(r) * N_pad,
+              softmax_bf16 + static_cast<size_t>(r) * N_pad,
+              bias_row,
+              N,
+              N_pad,
+              sm_scale);
         }
 
-        // gated_attn[bs, m:m+m_size, head*K:(head+1)*K] = sigmoid(G) * (v_prime / s_prime)
+        // ---- softmax @ V -> v_prime [m_size, K] ----
+        at::native::cpublas::brgemm(
+            /* M */ m_size, /* N */ K, /* K */ N_pad,
+            /* lda */ N_pad, /* ldb */ K, /* ldc */ K,
+            /* add_C */ false,
+            softmax_bf16,
+            V_vnni,
+            v_prime);
+
+        // ---- sigmoid(G) * v_prime -> gated_attn (softmax already normalized) ----
         for (int r = 0; r < m_size; ++r) {
-          float inv_s = 1.f / s_prime[r];
           scalar_t* dst = attn_bs + static_cast<size_t>(m + r) * D + static_cast<size_t>(head_id) * K;
           const scalar_t* g_row = qkvg_bs + static_cast<size_t>(m + r) * QKVG_STRIDE + G_off;
-          sigmoid_mul_scale_bf16gate_stub<scalar_t>(dst, g_row, v_prime + r * K, inv_s, K);
+          sigmoid_mul_scale_bf16gate_stub<scalar_t>(dst, g_row, v_prime + r * K, /*inv_s=*/1.f, K);
         }
       }
 
@@ -618,22 +698,23 @@ at::Tensor fused_grid_attention_v2(
   auto gated_attn = at::empty({B, N, D}, pair.options());
 
   constexpr int BLOCK_M = 32;
-  constexpr int BLOCK_N = 128;
-  static_assert(BLOCK_M <= BLOCK_N, "flash_attn_softmax assumes BLOCK_M <= BLOCK_N.");
+  const int N_pad = div_up(N, TILE_K) * TILE_K;
 
   const int num_threads = at::get_num_threads();
   const int per_thread_bytes =
-      /* K_contig */ sizeof(uint16_t) * N * K +
-      /* V_contig */ sizeof(uint16_t) * N * K +
-      /* s_i      */ sizeof(float) * BLOCK_M * BLOCK_N +
-      /* v_prime  */ sizeof(float) * BLOCK_M * K +
-      /* Btmp     */ sizeof(uint16_t) * BLOCK_N * K +
-      /* Q_block  */ sizeof(uint16_t) * BLOCK_M * K +
-      /* alignment padding */ 64 * 8;
+      /* K_contig     */ sizeof(uint16_t) * N * K +
+      /* V_contig     */ sizeof(uint16_t) * N * K +
+      /* K_vnni       */ sizeof(uint16_t) * N_pad * K +
+      /* V_vnni       */ sizeof(uint16_t) * N_pad * K +
+      /* logits_fp32  */ sizeof(float) * BLOCK_M * N_pad +
+      /* softmax_bf16 */ sizeof(uint16_t) * BLOCK_M * N_pad +
+      /* v_prime      */ sizeof(float) * BLOCK_M * K +
+      /* Q_block      */ sizeof(uint16_t) * BLOCK_M * K +
+      /* alignment padding */ 64 * 10;
   auto buffer = at::empty({num_threads, per_thread_bytes}, pair.options().dtype(at::kChar));
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(pair.scalar_type(), "fused_grid_attention_v2", [&] {
-    fused_attention_core_impl<scalar_t, BLOCK_M, BLOCK_N>(
+    fused_attention_core_impl<scalar_t, BLOCK_M>(
         gated_attn.data_ptr<scalar_t>(),
         qkvg.data_ptr<scalar_t>(),
         bias.data_ptr<scalar_t>(),
