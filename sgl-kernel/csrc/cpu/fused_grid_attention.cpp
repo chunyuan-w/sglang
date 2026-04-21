@@ -22,7 +22,22 @@
 #include "flash_attn.h"  // also transitively includes vec_pack.h (no header guard)
 #include "gemm.h"
 
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
 namespace {
+
+// Gate per-call stage timing for fused_grid_attention_v2 behind SGL_V2_PROFILE=1.
+// Reading the env once at first use keeps the fast path free of getenv calls.
+inline bool v2_profile_enabled() {
+  static const bool enabled = []{
+    const char* s = std::getenv("SGL_V2_PROFILE");
+    return s && s[0] != '\0' && std::strcmp(s, "0") != 0;
+  }();
+  return enabled;
+}
 
 template <typename scalar_t>
 inline void cast_copy_stub(scalar_t* __restrict__ out, const float* __restrict__ input, int64_t size) {
@@ -875,19 +890,27 @@ at::Tensor fused_grid_attention_v2(
   const int bias_strideM = bias.stride(1);
   const double sm_scale = 1.0 / std::sqrt(static_cast<double>(K));
 
+  using clock = std::chrono::high_resolution_clock;
+  const bool prof = v2_profile_enabled();
+  auto t_start = prof ? clock::now() : clock::time_point{};
+
+  TORCH_CHECK(
+      qkvg_weight.size(0) * 2 == 4 * D || qkvg_weight.numel() == 4 * D * D,
+      "qkvg_weight must map D -> 4*D");
+
   // ----- Stage A: one concat QKVG GEMM, pair streamed once -----
   auto pair_2d = pair.view({static_cast<int64_t>(B) * N, D});
-  auto qkvg_2d = weight_packed_linear(pair_2d, qkvg_weight, /*bias=*/std::nullopt, /*is_vnni=*/true);
-  TORCH_CHECK(
-      qkvg_2d.size(1) == 4 * D,
-      "qkvg_weight must map D -> 4*D; got output dim ",
-      qkvg_2d.size(1),
-      ", expected ",
-      4 * D);
+  auto qkvg_2d = at::empty({static_cast<int64_t>(B) * N, 4 * D}, pair.options());
+  auto t_qkvg_alloc = prof ? clock::now() : clock::time_point{};
+
+  weight_packed_linear_out(qkvg_2d, pair_2d, qkvg_weight, /*bias=*/std::nullopt, /*is_vnni=*/true);
+  auto t_qkvg_gemm = prof ? clock::now() : clock::time_point{};
+
   auto qkvg = qkvg_2d.view({B, N, 4 * D});
 
   // ----- Stage B: fused flash-attn + sigmoid(G) * attn -----
   auto gated_attn = at::empty({B, N, D}, pair.options());
+  auto t_gated_alloc = prof ? clock::now() : clock::time_point{};
 
   constexpr int BLOCK_M = 32;
   const int N_pad = div_up(N, TILE_K) * TILE_K;
@@ -904,6 +927,7 @@ at::Tensor fused_grid_attention_v2(
       /* Q_block      */ sizeof(uint16_t) * BLOCK_M * K +
       /* alignment padding */ 64 * 10;
   auto buffer = at::empty({num_threads, per_thread_bytes}, pair.options().dtype(at::kChar));
+  auto t_buf_alloc = prof ? clock::now() : clock::time_point{};
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(pair.scalar_type(), "fused_grid_attention_v2", [&] {
     fused_attention_core_impl<scalar_t, BLOCK_M>(
@@ -920,10 +944,37 @@ at::Tensor fused_grid_attention_v2(
         buffer.data_ptr(),
         per_thread_bytes);
   });
+  auto t_attn = prof ? clock::now() : clock::time_point{};
 
   // ----- Stage C: final output projection -----
   auto gated_attn_2d = gated_attn.view({static_cast<int64_t>(B) * N, D});
-  auto out_2d = weight_packed_linear(gated_attn_2d, output_weight, /*bias=*/std::nullopt, /*is_vnni=*/true);
+  auto out_2d = at::empty({static_cast<int64_t>(B) * N, D}, pair.options());
+  auto t_out_alloc = prof ? clock::now() : clock::time_point{};
+
+  weight_packed_linear_out(out_2d, gated_attn_2d, output_weight, /*bias=*/std::nullopt, /*is_vnni=*/true);
+  auto t_out_gemm = prof ? clock::now() : clock::time_point{};
+
+  if (prof) {
+    auto ms = [](clock::time_point a, clock::time_point b) {
+      return std::chrono::duration<double, std::milli>(b - a).count();
+    };
+    // Stage A split into qkvg-alloc (~22 GB at N=4655) vs gemm,
+    // Stage B split into gated_attn-alloc (~5.5 GB) / per-thread scratch / attn core,
+    // Stage C split into output-alloc (~5.5 GB) vs output gemm.
+    std::fprintf(
+        stderr,
+        "[v2] qkvg_alloc=%7.2f qkvg_gemm=%7.2f gated_alloc=%7.2f buf_alloc=%6.2f attn=%8.2f out_alloc=%7.2f out_gemm=%7.2f total=%8.2f ms\n",
+        ms(t_start, t_qkvg_alloc),
+        ms(t_qkvg_alloc, t_qkvg_gemm),
+        ms(t_qkvg_gemm, t_gated_alloc),
+        ms(t_gated_alloc, t_buf_alloc),
+        ms(t_buf_alloc, t_attn),
+        ms(t_attn, t_out_alloc),
+        ms(t_out_alloc, t_out_gemm),
+        ms(t_start, t_out_gemm));
+    std::fflush(stderr);
+  }
+
   return out_2d.view({B, N, D});
 }
 
