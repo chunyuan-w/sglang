@@ -799,6 +799,85 @@ at::Tensor convert_weight_packed(at::Tensor& weight) {
   return packed_weight;
 }
 
+// Variant of weight_packed_linear that writes into a caller-provided `out`
+// tensor instead of allocating a fresh one.  Used by fused_grid_attention_v2
+// to keep the [B,N,4D] qkvg (~22 GB at N=4655, bf16) persistent across calls.
+void weight_packed_linear_out(
+    at::Tensor& out,
+    at::Tensor& mat1,
+    at::Tensor& mat2,
+    const std::optional<at::Tensor>& bias,
+    bool is_vnni) {
+  RECORD_FUNCTION("sgl-kernel::weight_packed_linear_out", std::vector<c10::IValue>({mat1, mat2, bias}));
+
+  auto packed_w = is_vnni ? mat2 : convert_weight_packed(mat2);
+  bool use_fma_gemm = false;
+  if (packed_w.scalar_type() == at::kFloat) {
+    use_fma_gemm = true;
+  }
+
+  int64_t M = mat1.size(0);
+  int64_t K = mat1.size(1);
+  int64_t N = use_fma_gemm ? mat2.size(1) : mat2.size(0);
+
+  CHECK_LAST_DIM_CONTIGUOUS_INPUT(mat1);
+  CHECK_INPUT(mat2);
+  CHECK_DIM(2, mat1);
+  CHECK_DIM(2, mat2);
+  if (!use_fma_gemm) {
+    CHECK_EQ(mat1.size(1), K);
+  }
+  TORCH_CHECK(
+      out.dim() == 2 && out.size(0) == M && out.size(1) == N,
+      "weight_packed_linear_out: out must be [",
+      M,
+      ", ",
+      N,
+      "], got ",
+      out.sizes());
+  TORCH_CHECK(
+      out.scalar_type() == mat1.scalar_type(),
+      "weight_packed_linear_out: out dtype must match mat1");
+
+  auto dispatch_type = mat1.scalar_type();
+  int64_t out_strideM = out.stride(0);
+  int64_t mat1_strideM = mat1.stride(0);
+
+  const bool has_bias = bias.has_value();
+  const float* bias_data = nullptr;
+  if (has_bias) {
+    CHECK_EQ(bias.value().size(0), N);
+    bias_data = bias.value().data_ptr<float>();
+  }
+
+  AT_DISPATCH_REDUCED_FLOATING_TYPES(dispatch_type, "weight_packed_linear_out", [&] {
+    if (use_fma_gemm) {
+      weight_packed_linear_kernel_impl<scalar_t>(
+          out.data_ptr<scalar_t>(),
+          mat1.data_ptr<scalar_t>(),
+          packed_w.data_ptr<float>(),
+          bias_data,
+          nullptr,
+          M,
+          N,
+          K,
+          mat1_strideM,
+          out_strideM);
+    } else {
+      weight_packed_linear_kernel_impl<scalar_t>(
+          out.data_ptr<scalar_t>(),
+          mat1.data_ptr<scalar_t>(),
+          packed_w.data_ptr<scalar_t>(),
+          bias_data,
+          M,
+          N,
+          K,
+          mat1_strideM,
+          out_strideM);
+    }
+  });
+}
+
 // mat1 : [M, K]
 // mat2 : [N, K] ([K, N] if use_fma_gemm)
 // bias : [N]

@@ -73,6 +73,17 @@ inline int64_t get_4bit_block_k_size(int64_t group_size) {
 // pack weight to vnni format
 at::Tensor convert_weight_packed(at::Tensor& weight);
 
+// Variant of weight_packed_linear that writes into a caller-provided `out`.
+// Lets callers reuse a persistent output buffer across calls so first-touch /
+// THP cost is paid once instead of per invocation.  `out` must be a
+// contiguous [M, N] tensor with the same dtype as `mat1`.
+void weight_packed_linear_out(
+    at::Tensor& out,
+    at::Tensor& mat1,
+    at::Tensor& mat2,
+    const std::optional<at::Tensor>& bias,
+    bool is_vnni);
+
 // pack weight to vnni format for int4
 std::tuple<at::Tensor, at::Tensor, at::Tensor>
 convert_weight_packed_scale_zp(at::Tensor qweight, at::Tensor qzeros, at::Tensor scales);
