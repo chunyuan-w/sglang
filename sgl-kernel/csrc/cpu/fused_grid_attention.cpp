@@ -875,6 +875,20 @@ at::Tensor fused_grid_attention_v2(
   const int bias_strideM = bias.stride(1);
   const double sm_scale = 1.0 / std::sqrt(static_cast<double>(K));
 
+  // ----- Stage A: one concat QKVG GEMM, pair streamed once -----
+  auto pair_2d = pair.view({static_cast<int64_t>(B) * N, D});
+  auto qkvg_2d = weight_packed_linear(pair_2d, qkvg_weight, /*bias=*/std::nullopt, /*is_vnni=*/true);
+  TORCH_CHECK(
+      qkvg_2d.size(1) == 4 * D,
+      "qkvg_weight must map D -> 4*D; got output dim ",
+      qkvg_2d.size(1),
+      ", expected ",
+      4 * D);
+  auto qkvg = qkvg_2d.view({B, N, 4 * D});
+
+  // ----- Stage B: fused flash-attn + sigmoid(G) * attn -----
+  auto gated_attn = at::empty({B, N, D}, pair.options());
+
   constexpr int BLOCK_M = 32;
   const int N_pad = div_up(N, TILE_K) * TILE_K;
 
@@ -889,60 +903,12 @@ at::Tensor fused_grid_attention_v2(
       /* v_prime      */ sizeof(float) * BLOCK_M * K +
       /* Q_block      */ sizeof(uint16_t) * BLOCK_M * K +
       /* alignment padding */ 64 * 10;
+  auto buffer = at::empty({num_threads, per_thread_bytes}, pair.options().dtype(at::kChar));
 
-  // Function-local persistent scratchpad — mirrors libxsmm's scratchpad pool.
-  // The [B,N,4D] qkvg alone is ~22 GB at N=4655/bf16; allocating it fresh each
-  // call page-faults for ~5 GB of new mmap memory and picks up unpredictable
-  // THP coalescing, which is what drove v2's 3.9↔4.8 s iter-to-iter variance.
-  // Keeping qkvg, gated_attn, and the per-thread scratch alive across calls
-  // pays the first-touch cost once.
-  struct V2Cache {
-    at::Tensor qkvg;
-    at::Tensor gated_attn;
-    at::Tensor scratch;
-    int64_t B = -1, N = -1, D = -1;
-    int num_threads = -1;
-    int64_t per_thread_bytes = -1;
-    c10::ScalarType dtype = c10::ScalarType::Undefined;
-  };
-  static V2Cache cache;
-
-  const bool shape_changed = !cache.qkvg.defined()
-      || cache.B != B || cache.N != N || cache.D != D
-      || cache.num_threads != num_threads
-      || cache.per_thread_bytes != per_thread_bytes
-      || cache.dtype != pair.scalar_type();
-  if (shape_changed) {
-    cache.qkvg = at::empty({B, N, 4 * D}, pair.options());
-    cache.gated_attn = at::empty({B, N, D}, pair.options());
-    cache.scratch = at::empty({num_threads, per_thread_bytes}, pair.options().dtype(at::kChar));
-    cache.qkvg.fill_(0);  // pre-touch so first use doesn't pay the fault storm
-    cache.gated_attn.fill_(0);
-    cache.scratch.fill_(0);
-    cache.B = B;
-    cache.N = N;
-    cache.D = D;
-    cache.num_threads = num_threads;
-    cache.per_thread_bytes = per_thread_bytes;
-    cache.dtype = pair.scalar_type();
-  }
-  auto& qkvg_cached = cache.qkvg;
-  auto& gated_attn = cache.gated_attn;
-  auto& buffer = cache.scratch;
-
-  // ----- Stage A: one concat QKVG GEMM, pair streamed once, into cached qkvg -----
-  TORCH_CHECK(
-      qkvg_weight.size(0) == 4 * D || qkvg_weight.numel() == 4 * D * D,
-      "qkvg_weight must map D -> 4*D");
-  auto pair_2d = pair.view({static_cast<int64_t>(B) * N, D});
-  auto qkvg_2d = qkvg_cached.view({static_cast<int64_t>(B) * N, 4 * D});
-  weight_packed_linear_out(qkvg_2d, pair_2d, qkvg_weight, /*bias=*/std::nullopt, /*is_vnni=*/true);
-
-  // ----- Stage B: fused flash-attn + sigmoid(G) * attn -----
   AT_DISPATCH_REDUCED_FLOATING_TYPES(pair.scalar_type(), "fused_grid_attention_v2", [&] {
     fused_attention_core_impl<scalar_t, BLOCK_M>(
         gated_attn.data_ptr<scalar_t>(),
-        qkvg_cached.data_ptr<scalar_t>(),
+        qkvg.data_ptr<scalar_t>(),
         bias.data_ptr<scalar_t>(),
         B,
         N,
@@ -953,6 +919,115 @@ at::Tensor fused_grid_attention_v2(
         static_cast<float>(sm_scale),
         buffer.data_ptr(),
         per_thread_bytes);
+  });
+
+  // ----- Stage C: final output projection -----
+  auto gated_attn_2d = gated_attn.view({static_cast<int64_t>(B) * N, D});
+  auto out_2d = weight_packed_linear(gated_attn_2d, output_weight, /*bias=*/std::nullopt, /*is_vnni=*/true);
+  return out_2d.view({B, N, D});
+}
+
+// v4: B-tiled v2.  Keeps v2's single concat-QKVG GEMM but processes the outer
+// batch dim in chunks of BLOCK_B rows, so the qkvg intermediate lives in a
+// small reusable scratch (~76 MB at BLOCK_B=16, N=4655/bf16) instead of a
+// fresh 22 GB allocation per call.  The scratch fits in L3, so stage-A writes
+// and stage-B reads stay mostly on-chip, and there is no fault storm or THP
+// lottery on multi-GB mmap memory.  Stateless: no persistent cache needed.
+//
+//   pair          : [B, N, D]
+//   bias          : [H, N, N]
+//   qkvg_weight   : packed [4*D, D] (concat of Q|K|V|G)
+//   output_weight : packed [D, D]
+//   returns       : [B, N, D]
+at::Tensor fused_grid_attention_v4(
+    at::Tensor& pair,
+    at::Tensor& bias,
+    at::Tensor& qkvg_weight,
+    at::Tensor& output_weight,
+    int64_t num_heads,
+    bool is_vnni) {
+  RECORD_FUNCTION(
+      "sgl_kernel::fused_grid_attention_v4",
+      std::vector<c10::IValue>({pair, bias, qkvg_weight, output_weight, num_heads}));
+
+  CHECK_INPUT(pair);
+  CHECK_DIM(3, pair);
+  CHECK_LAST_DIM_CONTIGUOUS_INPUT(bias);
+  CHECK_DIM(3, bias);
+  CHECK_INPUT(qkvg_weight);
+  CHECK_INPUT(output_weight);
+  TORCH_CHECK(is_vnni, "fused_grid_attention_v4 currently requires pre-packed weights (is_vnni=True).");
+
+  const int B = pair.size(0);
+  const int N = pair.size(1);
+  const int D = pair.size(2);
+  const int H = static_cast<int>(num_heads);
+  TORCH_CHECK(D % H == 0, "pair feature dim ", D, " not divisible by num_heads ", H);
+  const int K = D / H;
+
+  CHECK_EQ(bias.size(0), H);
+  CHECK_EQ(bias.size(1), N);
+  CHECK_EQ(bias.size(2), N);
+
+  const int bias_strideH = bias.stride(0);
+  const int bias_strideM = bias.stride(1);
+  const double sm_scale = 1.0 / std::sqrt(static_cast<double>(K));
+
+  constexpr int BLOCK_M = 32;
+  // B-chunk size.  Chosen so qkvg_chunk = BLOCK_B * N * 4D * sizeof(bf16)
+  // stays in the ~100 MB ballpark — fits in L3 on SPR/GNR class CPUs at
+  // N ≤ ~5k, which is where we care about this kernel.  Tune per machine if
+  // N or L3 differs significantly.
+  constexpr int BLOCK_B = 16;
+  const int N_pad = div_up(N, TILE_K) * TILE_K;
+
+  // Full-size output buffer, same as v2/v3.
+  auto gated_attn = at::empty({B, N, D}, pair.options());
+
+  // Reusable B-chunk qkvg scratch.  Allocated at full BLOCK_B so the last
+  // (potentially smaller) tail chunk reuses the same buffer.
+  auto qkvg_chunk = at::empty({static_cast<int64_t>(BLOCK_B) * N, 4 * D}, pair.options());
+
+  const int num_threads = at::get_num_threads();
+  const int per_thread_bytes =
+      /* K_contig     */ sizeof(uint16_t) * N * K +
+      /* V_contig     */ sizeof(uint16_t) * N * K +
+      /* K_vnni       */ sizeof(uint16_t) * N_pad * K +
+      /* V_vnni       */ sizeof(uint16_t) * N_pad * K +
+      /* logits_fp32  */ sizeof(float) * BLOCK_M * N_pad +
+      /* softmax_bf16 */ sizeof(uint16_t) * BLOCK_M * N_pad +
+      /* v_prime      */ sizeof(float) * BLOCK_M * K +
+      /* Q_block      */ sizeof(uint16_t) * BLOCK_M * K +
+      /* alignment padding */ 64 * 10;
+  auto buffer = at::empty({num_threads, per_thread_bytes}, pair.options().dtype(at::kChar));
+
+  AT_DISPATCH_REDUCED_FLOATING_TYPES(pair.scalar_type(), "fused_grid_attention_v4", [&] {
+    for (int b_start = 0; b_start < B; b_start += BLOCK_B) {
+      const int b_size = std::min(BLOCK_B, B - b_start);
+
+      // Stage A: pair_chunk @ qkvg_weight -> qkvg_chunk (first b_size*N rows).
+      auto pair_chunk_2d = pair
+          .narrow(/*dim=*/0, /*start=*/b_start, /*length=*/b_size)
+          .reshape({static_cast<int64_t>(b_size) * N, D});
+      auto qkvg_chunk_2d = qkvg_chunk.narrow(/*dim=*/0, /*start=*/0, /*length=*/static_cast<int64_t>(b_size) * N);
+      weight_packed_linear_out(
+          qkvg_chunk_2d, pair_chunk_2d, qkvg_weight, /*bias=*/std::nullopt, /*is_vnni=*/true);
+
+      // Stage B: attention on this chunk, writing into the chunk's slice of gated_attn.
+      fused_attention_core_impl<scalar_t, BLOCK_M>(
+          gated_attn.data_ptr<scalar_t>() + static_cast<size_t>(b_start) * N * D,
+          qkvg_chunk.data_ptr<scalar_t>(),
+          bias.data_ptr<scalar_t>(),
+          b_size,
+          N,
+          H,
+          K,
+          bias_strideH,
+          bias_strideM,
+          static_cast<float>(sm_scale),
+          buffer.data_ptr(),
+          per_thread_bytes);
+    }
   });
 
   // ----- Stage C: final output projection -----
