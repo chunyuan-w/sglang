@@ -84,6 +84,21 @@ void weight_packed_linear_out(
     const std::optional<at::Tensor>& bias,
     bool is_vnni);
 
+// Serial (single-threaded) variant of weight_packed_linear with raw-pointer
+// arguments — no internal parallel region, so it can be called from inside an
+// outer at::parallel_for.  The `mat2_packed` buffer must already be in the
+// packed VNNI layout produced by convert_weight_packed.
+template <typename scalar_t>
+void weight_packed_linear_serial_impl(
+    scalar_t* __restrict__ out,
+    const scalar_t* __restrict__ mat1,
+    const scalar_t* __restrict__ mat2_packed,
+    int64_t M,
+    int64_t N,
+    int64_t K,
+    int64_t mat1_strideM,
+    int64_t out_strideM);
+
 // pack weight to vnni format for int4
 std::tuple<at::Tensor, at::Tensor, at::Tensor>
 convert_weight_packed_scale_zp(at::Tensor qweight, at::Tensor qzeros, at::Tensor scales);

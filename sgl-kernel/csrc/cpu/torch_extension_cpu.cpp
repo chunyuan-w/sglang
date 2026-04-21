@@ -160,6 +160,14 @@ at::Tensor fused_grid_attention_v4(
     int64_t num_heads,
     bool is_vnni);
 
+at::Tensor fused_grid_attention_v5(
+    at::Tensor& pair,
+    at::Tensor& bias,
+    at::Tensor& qkvg_weight,
+    at::Tensor& output_weight,
+    int64_t num_heads,
+    bool is_vnni);
+
 // linear attention
 std::tuple<at::Tensor, at::Tensor> chunk_gated_delta_rule_cpu(
     const at::Tensor& query,
@@ -473,6 +481,11 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
       "fused_grid_attention_v4(Tensor pair, Tensor bias, Tensor qkvg_weight, Tensor output_weight, "
       "int num_heads, bool is_vnni) -> Tensor");
   m.impl("fused_grid_attention_v4", torch::kCPU, &fused_grid_attention_v4);
+
+  m.def(
+      "fused_grid_attention_v5(Tensor pair, Tensor bias, Tensor qkvg_weight, Tensor output_weight, "
+      "int num_heads, bool is_vnni) -> Tensor");
+  m.impl("fused_grid_attention_v5", torch::kCPU, &fused_grid_attention_v5);
 
   // linear attn
   m.def(
