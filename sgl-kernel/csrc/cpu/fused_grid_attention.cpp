@@ -540,6 +540,198 @@ void fused_attention_core_impl(
   });
 }
 
+// v3 core: v1's per-head tiled projection layout (no [B,N,4*D] intermediate)
+// married to v2's full-[BLOCK_M, N_pad] attention core.  Stays entirely on
+// per-thread scratch; the only multi-GB allocation is the final gated output
+// (same as v1 / TPP), so the THP / first-touch-fault variance that plagues v2
+// disappears while keeping v2's single-softmax / single-GEMM tail.
+template <typename scalar_t, int BLOCK_M>
+void fused_attention_proj_core_impl(
+    scalar_t* __restrict__ gated_attn,   // [B, N, H*K]
+    const scalar_t* __restrict__ pair,   // [B, N, H*K]
+    const scalar_t* __restrict__ bias,   // [H, N, N]
+    const scalar_t* __restrict__ q_w,    // packed: [D/2, D, 2]  (viewed as [H, D/2, K, 2])
+    const scalar_t* __restrict__ k_w,    // packed: [D/2, D, 2]
+    const scalar_t* __restrict__ v_w,    // packed: [D/2, D, 2]
+    const scalar_t* __restrict__ g_w,    // packed: [D/2, D, 2]
+    int B,
+    int N,
+    int H,
+    int K,
+    int bias_strideH,
+    int bias_strideM,
+    float sm_scale,
+    void* __restrict__ buffer,
+    int buffer_size_per_thread) {
+  const int D = H * K;
+  const int N_pad = div_up(N, TILE_K) * TILE_K;
+  TORCH_CHECK(
+      K == block_size_n(),
+      "fused_grid_attention_v3 requires per-head dim K == BLOCK_N (=",
+      block_size_n(),
+      "), got K=",
+      K);
+
+  parallel_for(B * H, [&](int begin, int end) {
+    int bs{0}, head_id{0};
+    data_index_init(begin, bs, B, head_id, H);
+
+    int tid = get_thread_num();
+    char* base = reinterpret_cast<char*>(buffer) + static_cast<size_t>(tid) * buffer_size_per_thread;
+
+    auto bump = [&](size_t nbytes) {
+      void* p = base;
+      base += (nbytes + 63) & ~size_t{63};
+      return p;
+    };
+
+    // Per-head full projections (bf16, reused across all M-blocks).
+    scalar_t* K_full = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * N * K));
+    scalar_t* V_full = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * N * K));
+
+    // VNNI-packed K and V, reused across all M-blocks of this (bs, head).
+    scalar_t* K_vnni = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * N_pad * K));
+    scalar_t* V_vnni = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * N_pad * K));
+
+    // Attention scratch.
+    float* logits_fp32 = reinterpret_cast<float*>(bump(sizeof(float) * BLOCK_M * N_pad));
+    scalar_t* softmax_bf16 = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * BLOCK_M * N_pad));
+    float* v_prime = reinterpret_cast<float*>(bump(sizeof(float) * BLOCK_M * K));
+
+    // Projection scratch (fp32 brgemm accumulator + bf16 Q row cache).
+    float* Ctmp = reinterpret_cast<float*>(bump(sizeof(float) * BLOCK_M * K));
+    scalar_t* Q_block = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * BLOCK_M * K));
+
+    // Zero the [N, N_pad) tail of packed K/V so the attention brgemm's padded
+    // tile contributes nothing.  Done once per thread.
+    std::memset(K_vnni, 0, sizeof(scalar_t) * N_pad * K);
+    std::memset(V_vnni, 0, sizeof(scalar_t) * N_pad * K);
+
+    for (int idx = begin; idx < end; ++idx) {
+      const scalar_t* pair_bs = pair + static_cast<size_t>(bs) * N * D;
+      scalar_t* attn_bs = gated_attn + static_cast<size_t>(bs) * N * D;
+
+      // Per-head slice of each packed weight: block `head_id` in the NB dim.
+      const scalar_t* q_w_h = q_w + static_cast<size_t>(head_id) * K * D;
+      const scalar_t* k_w_h = k_w + static_cast<size_t>(head_id) * K * D;
+      const scalar_t* v_w_h = v_w + static_cast<size_t>(head_id) * K * D;
+      const scalar_t* g_w_h = g_w + static_cast<size_t>(head_id) * K * D;
+
+      // ----- K projection for the entire sequence -----
+      for (int m = 0; m < N; m += BLOCK_M) {
+        int m_sz = std::min(BLOCK_M, N - m);
+        at::native::cpublas::brgemm(
+            /* M */ m_sz, /* N */ K, /* K */ D,
+            /* lda */ D, /* ldb */ K, /* ldc */ K,
+            /* add_C */ false,
+            pair_bs + static_cast<size_t>(m) * D,
+            k_w_h,
+            Ctmp);
+        for (int r = 0; r < m_sz; ++r) {
+          cast_copy_stub<scalar_t>(K_full + static_cast<size_t>(m + r) * K, Ctmp + r * K, K);
+        }
+      }
+
+      // ----- V projection for the entire sequence -----
+      for (int m = 0; m < N; m += BLOCK_M) {
+        int m_sz = std::min(BLOCK_M, N - m);
+        at::native::cpublas::brgemm(
+            /* M */ m_sz, /* N */ K, /* K */ D,
+            /* lda */ D, /* ldb */ K, /* ldc */ K,
+            /* add_C */ false,
+            pair_bs + static_cast<size_t>(m) * D,
+            v_w_h,
+            Ctmp);
+        for (int r = 0; r < m_sz; ++r) {
+          cast_copy_stub<scalar_t>(V_full + static_cast<size_t>(m + r) * K, Ctmp + r * K, K);
+        }
+      }
+
+      // Pack K once as [K/2, N_pad, 2] and V once as [N_pad/2, K, 2].
+      pack_vnni<scalar_t>(
+          /* dst */ K_vnni,
+          /* src */ K_full,
+          /* N */ N,
+          /* K */ K,
+          /* ld_src */ K,
+          /* ld_dst */ N_pad);
+      pack_vnni2<scalar_t>(
+          /* dst */ V_vnni,
+          /* src */ V_full,
+          /* K */ N,
+          /* N */ K,
+          /* ld_src */ K,
+          /* ld_dst */ K);
+
+      const scalar_t* bias_h = bias + static_cast<size_t>(head_id) * bias_strideH;
+
+      for (int m = 0; m < N; m += BLOCK_M) {
+        int m_size = std::min(BLOCK_M, N - m);
+
+        // ---- Q projection for this block ----
+        at::native::cpublas::brgemm(
+            /* M */ m_size, /* N */ K, /* K */ D,
+            /* lda */ D, /* ldb */ K, /* ldc */ K,
+            /* add_C */ false,
+            pair_bs + static_cast<size_t>(m) * D,
+            q_w_h,
+            Ctmp);
+        for (int r = 0; r < m_size; ++r) {
+          cast_copy_stub<scalar_t>(Q_block + static_cast<size_t>(r) * K, Ctmp + r * K, K);
+        }
+
+        // ---- Q @ K^T -> logits_fp32 [m_size, N_pad] ----
+        at::native::cpublas::brgemm(
+            /* M */ m_size, /* N */ N_pad, /* K */ K,
+            /* lda */ K, /* ldb */ N_pad, /* ldc */ N_pad,
+            /* add_C */ false,
+            Q_block,
+            K_vnni,
+            logits_fp32);
+
+        // ---- softmax per row (scale + bias + normalize + cast to bf16) ----
+        for (int r = 0; r < m_size; ++r) {
+          const scalar_t* bias_row = bias_h + static_cast<size_t>(m + r) * bias_strideM;
+          softmax_row_to_bf16<scalar_t>(
+              logits_fp32 + static_cast<size_t>(r) * N_pad,
+              softmax_bf16 + static_cast<size_t>(r) * N_pad,
+              bias_row,
+              N,
+              N_pad,
+              sm_scale);
+        }
+
+        // ---- softmax @ V -> v_prime [m_size, K] ----
+        at::native::cpublas::brgemm(
+            /* M */ m_size, /* N */ K, /* K */ N_pad,
+            /* lda */ N_pad, /* ldb */ K, /* ldc */ K,
+            /* add_C */ false,
+            softmax_bf16,
+            V_vnni,
+            v_prime);
+
+        // ---- Gating projection for this block (fp32 Ctmp) ----
+        at::native::cpublas::brgemm(
+            /* M */ m_size, /* N */ K, /* K */ D,
+            /* lda */ D, /* ldb */ K, /* ldc */ K,
+            /* add_C */ false,
+            pair_bs + static_cast<size_t>(m) * D,
+            g_w_h,
+            Ctmp);
+
+        // ---- sigmoid(G) * v_prime -> gated_attn (softmax already normalized) ----
+        for (int r = 0; r < m_size; ++r) {
+          scalar_t* dst = attn_bs + static_cast<size_t>(m + r) * D + static_cast<size_t>(head_id) * K;
+          sigmoid_mul_scale_stub<scalar_t>(dst, Ctmp + r * K, v_prime + r * K, /*inv_s=*/1.f, K);
+        }
+      }
+
+      data_index_step(bs, B, head_id, H);
+    }
+    at::native::cpublas::brgemm_release();
+  });
+}
+
 }  // anonymous namespace
 
 // Declared in gemm.cpp; reused for the final output projection.
@@ -730,6 +922,132 @@ at::Tensor fused_grid_attention_v2(
   });
 
   // ----- Stage C: final output projection -----
+  auto gated_attn_2d = gated_attn.view({static_cast<int64_t>(B) * N, D});
+  auto out_2d = weight_packed_linear(gated_attn_2d, output_weight, /*bias=*/std::nullopt, /*is_vnni=*/true);
+  return out_2d.view({B, N, D});
+}
+
+// v3: v1's per-head tiled projection layout + v2's full-logit attention core.
+// No [B, N, 4*D] qkvg intermediate.  Only multi-GB allocation is the [B, N, D]
+// gated_attn output (same footprint as v1 / TPP), so THP / first-touch-fault
+// variance is eliminated while keeping v2's single-softmax speed.
+//
+//   pair          : [B, N, D]
+//   bias          : [H, N, N]
+//   q/k/v/g_w     : packed [D/2, D, 2]
+//   output_weight : packed [D, D]
+//   returns       : [B, N, D]
+at::Tensor fused_grid_attention_v3(
+    at::Tensor& pair,
+    at::Tensor& bias,
+    at::Tensor& q_weight,
+    at::Tensor& k_weight,
+    at::Tensor& v_weight,
+    at::Tensor& gating_weight,
+    at::Tensor& output_weight,
+    int64_t num_heads,
+    bool is_vnni) {
+  RECORD_FUNCTION(
+      "sgl_kernel::fused_grid_attention_v3",
+      std::vector<c10::IValue>({pair, bias, q_weight, k_weight, v_weight, gating_weight, output_weight, num_heads}));
+
+  CHECK_INPUT(pair);
+  CHECK_DIM(3, pair);
+  CHECK_LAST_DIM_CONTIGUOUS_INPUT(bias);
+  CHECK_DIM(3, bias);
+  CHECK_INPUT(q_weight);
+  CHECK_INPUT(k_weight);
+  CHECK_INPUT(v_weight);
+  CHECK_INPUT(gating_weight);
+  CHECK_INPUT(output_weight);
+  TORCH_CHECK(is_vnni, "fused_grid_attention_v3 currently requires pre-packed weights (is_vnni=True).");
+
+  const int B = pair.size(0);
+  const int N = pair.size(1);
+  const int D = pair.size(2);
+  const int H = static_cast<int>(num_heads);
+  TORCH_CHECK(D % H == 0, "pair feature dim ", D, " not divisible by num_heads ", H);
+  const int K = D / H;
+
+  CHECK_EQ(bias.size(0), H);
+  CHECK_EQ(bias.size(1), N);
+  CHECK_EQ(bias.size(2), N);
+
+  const int bias_strideH = bias.stride(0);
+  const int bias_strideM = bias.stride(1);
+  const double sm_scale = 1.0 / std::sqrt(static_cast<double>(K));
+
+  constexpr int BLOCK_M = 32;
+  const int N_pad = div_up(N, TILE_K) * TILE_K;
+
+  const int num_threads = at::get_num_threads();
+  const int per_thread_bytes =
+      /* K_full       */ sizeof(uint16_t) * N * K +
+      /* V_full       */ sizeof(uint16_t) * N * K +
+      /* K_vnni       */ sizeof(uint16_t) * N_pad * K +
+      /* V_vnni       */ sizeof(uint16_t) * N_pad * K +
+      /* logits_fp32  */ sizeof(float) * BLOCK_M * N_pad +
+      /* softmax_bf16 */ sizeof(uint16_t) * BLOCK_M * N_pad +
+      /* v_prime      */ sizeof(float) * BLOCK_M * K +
+      /* Ctmp         */ sizeof(float) * BLOCK_M * K +
+      /* Q_block      */ sizeof(uint16_t) * BLOCK_M * K +
+      /* alignment padding */ 64 * 10;
+
+  // Function-local persistent scratch — mirrors libxsmm's scratchpad pool.
+  // Keeps gated_attn (~5.5 GB @ N=4655) and the per-thread scratch (~240 MB)
+  // across calls so we don't re-pay first-touch / THP-coalesce cost each time.
+  // Shape key covers everything that changes the layout; on mismatch we
+  // realloc + pre-touch.
+  struct V3Cache {
+    at::Tensor gated_attn;
+    at::Tensor scratch;
+    int64_t B = -1, N = -1, D = -1;
+    int num_threads = -1;
+    int64_t per_thread_bytes = -1;
+    c10::ScalarType dtype = c10::ScalarType::Undefined;
+  };
+  static V3Cache cache;
+
+  const bool shape_changed = !cache.gated_attn.defined()
+      || cache.B != B || cache.N != N || cache.D != D
+      || cache.num_threads != num_threads
+      || cache.per_thread_bytes != per_thread_bytes
+      || cache.dtype != pair.scalar_type();
+  if (shape_changed) {
+    cache.gated_attn = at::empty({B, N, D}, pair.options());
+    cache.scratch = at::empty({num_threads, per_thread_bytes}, pair.options().dtype(at::kChar));
+    cache.gated_attn.fill_(0);  // pre-touch once so first-use faults stay off the hot path
+    cache.scratch.fill_(0);
+    cache.B = B;
+    cache.N = N;
+    cache.D = D;
+    cache.num_threads = num_threads;
+    cache.per_thread_bytes = per_thread_bytes;
+    cache.dtype = pair.scalar_type();
+  }
+  auto& gated_attn = cache.gated_attn;
+  auto& buffer = cache.scratch;
+
+  AT_DISPATCH_REDUCED_FLOATING_TYPES(pair.scalar_type(), "fused_grid_attention_v3", [&] {
+    fused_attention_proj_core_impl<scalar_t, BLOCK_M>(
+        gated_attn.data_ptr<scalar_t>(),
+        pair.data_ptr<scalar_t>(),
+        bias.data_ptr<scalar_t>(),
+        q_weight.data_ptr<scalar_t>(),
+        k_weight.data_ptr<scalar_t>(),
+        v_weight.data_ptr<scalar_t>(),
+        gating_weight.data_ptr<scalar_t>(),
+        B,
+        N,
+        H,
+        K,
+        bias_strideH,
+        bias_strideM,
+        static_cast<float>(sm_scale),
+        buffer.data_ptr(),
+        per_thread_bytes);
+  });
+
   auto gated_attn_2d = gated_attn.view({static_cast<int64_t>(B) * N, D});
   auto out_2d = weight_packed_linear(gated_attn_2d, output_weight, /*bias=*/std::nullopt, /*is_vnni=*/true);
   return out_2d.view({B, N, D});
