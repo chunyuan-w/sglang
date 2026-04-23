@@ -1406,40 +1406,11 @@ at::Tensor fused_grid_attention_v3(
       /* Q_block      */ sizeof(uint16_t) * BLOCK_M * K +
       /* alignment padding */ 64 * 10;
 
-  // Function-local persistent scratch — mirrors libxsmm's scratchpad pool.
-  // Keeps gated_attn (~5.5 GB @ N=4655) and the per-thread scratch (~240 MB)
-  // across calls so we don't re-pay first-touch / THP-coalesce cost each time.
-  // Shape key covers everything that changes the layout; on mismatch we
-  // realloc + pre-touch.
-  struct V3Cache {
-    at::Tensor gated_attn;
-    at::Tensor scratch;
-    int64_t B = -1, N = -1, D = -1;
-    int num_threads = -1;
-    int64_t per_thread_bytes = -1;
-    c10::ScalarType dtype = c10::ScalarType::Undefined;
-  };
-  static V3Cache cache;
-
-  const bool shape_changed = !cache.gated_attn.defined()
-      || cache.B != B || cache.N != N || cache.D != D
-      || cache.num_threads != num_threads
-      || cache.per_thread_bytes != per_thread_bytes
-      || cache.dtype != pair.scalar_type();
-  if (shape_changed) {
-    cache.gated_attn = at::empty({B, N, D}, pair.options());
-    cache.scratch = at::empty({num_threads, per_thread_bytes}, pair.options().dtype(at::kChar));
-    cache.gated_attn.fill_(0);  // pre-touch once so first-use faults stay off the hot path
-    cache.scratch.fill_(0);
-    cache.B = B;
-    cache.N = N;
-    cache.D = D;
-    cache.num_threads = num_threads;
-    cache.per_thread_bytes = per_thread_bytes;
-    cache.dtype = pair.scalar_type();
-  }
-  auto& gated_attn = cache.gated_attn;
-  auto& buffer = cache.scratch;
+  // Allocate fresh per call, mirroring TPP's pattern: tcmalloc's span retention
+  // is expected to hand back warm VAs across iterations.  No function-local
+  // cache — if perf is stable and matches TPP, the cache was redundant.
+  auto gated_attn = at::empty({B, N, D}, pair.options());
+  auto buffer = at::empty({num_threads, per_thread_bytes}, pair.options().dtype(at::kChar));
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(pair.scalar_type(), "fused_grid_attention_v3", [&] {
     fused_attention_proj_core_impl<scalar_t, BLOCK_M>(
@@ -1461,7 +1432,13 @@ at::Tensor fused_grid_attention_v3(
         per_thread_bytes);
   });
 
+  // Write the out_proj result back into `pair` in place — same trick TPP uses
+  // (`_attention_impl` passes `&pair_a[i][j][0][0]` as out_gemm's C ptr).  The
+  // Python wrapper always feeds us a fresh pair (post-LayerNorm), so clobbering
+  // it is safe.  This matches TPP's one-big-alloc pattern: gated_attn is the
+  // only 5.5 GB intermediate; the final output reuses the caller's buffer.
   auto gated_attn_2d = gated_attn.view({static_cast<int64_t>(B) * N, D});
-  auto out_2d = weight_packed_linear(gated_attn_2d, output_weight, /*bias=*/std::nullopt, /*is_vnni=*/true);
-  return out_2d.view({B, N, D});
+  auto pair_2d = pair.view({static_cast<int64_t>(B) * N, D});
+  weight_packed_linear_out(pair_2d, gated_attn_2d, output_weight, /*bias=*/std::nullopt, /*is_vnni=*/true);
+  return pair;
 }
