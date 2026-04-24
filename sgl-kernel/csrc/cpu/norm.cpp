@@ -391,6 +391,7 @@ void fused_add_layernorm_kernel_impl(
     scalar_t* __restrict__ input,
     scalar_t* __restrict__ residual,
     const scalar_t* __restrict__ weight,
+    const scalar_t* __restrict__ bias,
     float* __restrict__ buffer,
     int64_t batch_size,
     int64_t hidden_size,
@@ -483,6 +484,14 @@ void fused_add_layernorm_kernel_impl(
         x_fvec0 = (x_fvec0 - mean_fvec) * scale_fvec * w_fvec0;
         x_fvec1 = (x_fvec1 - mean_fvec) * scale_fvec * w_fvec1;
 
+        if (bias != nullptr) {
+          bVec b_bvec = bVec::loadu(bias + d);
+          fVec b_fvec0, b_fvec1;
+          std::tie(b_fvec0, b_fvec1) = at::vec::convert_to_float(b_bvec);
+          x_fvec0 = x_fvec0 + b_fvec0;
+          x_fvec1 = x_fvec1 + b_fvec1;
+        }
+
         bVec x_bvec = convert_from_float_ext<scalar_t>(x_fvec0, x_fvec1);
         x_bvec.store(input_ptr + d);
       }
@@ -490,6 +499,9 @@ void fused_add_layernorm_kernel_impl(
       for (; d < hidden_size; ++d) {
         float normalized = (buffer_ptr[d] - mean) * rsqrt_var;
         float x_val = normalized * static_cast<float>(weight[d]);
+        if (bias != nullptr) {
+          x_val += static_cast<float>(bias[d]);
+        }
         input_ptr[d] = static_cast<scalar_t>(x_val);
       }
     }
@@ -545,7 +557,8 @@ at::Tensor rmsnorm_cpu(at::Tensor& input, at::Tensor& weight, double eps) {
 
 // input : {batch_size, hidden_size}
 // weight: {hidden_size}
-void layernorm_cpu(at::Tensor& input, at::Tensor& weight, double eps) {
+// bias  : {hidden_size} (optional)
+void layernorm_cpu(at::Tensor& input, at::Tensor& weight, const std::optional<at::Tensor>& bias, double eps) {
   RECORD_FUNCTION("sgl-kernel::layernorm_cpu", std::vector<c10::IValue>({input, weight}));
 
   CHECK_LAST_DIM_CONTIGUOUS_INPUT(input);
@@ -553,6 +566,11 @@ void layernorm_cpu(at::Tensor& input, at::Tensor& weight, double eps) {
   CHECK_DIM(2, input);
   CHECK_DIM(1, weight);
   CHECK_EQ(input.size(1), weight.size(0));
+  if (bias.has_value()) {
+    CHECK_INPUT(bias.value());
+    CHECK_DIM(1, bias.value());
+    CHECK_EQ(bias.value().size(0), weight.size(0));
+  }
   int64_t batch_size = input.size(0);
   int64_t hidden_size = input.size(1);
   int64_t input_strideN = input.stride(0);
@@ -564,6 +582,7 @@ void layernorm_cpu(at::Tensor& input, at::Tensor& weight, double eps) {
         input.data_ptr<scalar_t>(),
         nullptr,
         weight.data_ptr<scalar_t>(),
+        bias.has_value() ? bias.value().data_ptr<scalar_t>() : nullptr,
         buffer.data_ptr<float>(),
         batch_size,
         hidden_size,
@@ -802,6 +821,7 @@ void fused_add_layernorm_cpu(at::Tensor& input, at::Tensor& residual, at::Tensor
         input.data_ptr<scalar_t>(),
         residual.data_ptr<scalar_t>(),
         weight.data_ptr<scalar_t>(),
+        nullptr,
         buffer.data_ptr<float>(),
         batch_size,
         hidden_size,
