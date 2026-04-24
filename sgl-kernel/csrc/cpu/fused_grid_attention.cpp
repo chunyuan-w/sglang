@@ -57,6 +57,29 @@ inline void cast_copy_stub(scalar_t* __restrict__ out, const float* __restrict__
   }
 }
 
+// Same as cast_copy_stub but bakes a scalar multiply into the cast.  Used by
+// v3 to pre-scale Q by sm_scale after the Q-projection brgemm, so the softmax
+// core doesn't need to multiply each logit by sm_scale.
+template <typename scalar_t>
+inline void cast_copy_scale_stub(
+    scalar_t* __restrict__ out, const float* __restrict__ input, float scale, int64_t size) {
+  using bVec = at::vec::Vectorized<scalar_t>;
+  using fVec = at::vec::Vectorized<float>;
+  constexpr int kVecSize = bVec::size();
+  const fVec vscale(scale);
+  int64_t d = 0;
+#pragma GCC unroll 4
+  for (; d <= size - kVecSize; d += kVecSize) {
+    fVec a0 = fVec::loadu(input + d) * vscale;
+    fVec a1 = fVec::loadu(input + d + fVec::size()) * vscale;
+    bVec out_vec = convert_from_float_ext<scalar_t>(a0, a1);
+    out_vec.store(out + d);
+  }
+  for (; d < size; ++d) {
+    out[d] = static_cast<scalar_t>(input[d] * scale);
+  }
+}
+
 template <typename scalar_t>
 inline void sigmoid_mul_scale_bf16gate_stub(
     scalar_t* __restrict__ out,
@@ -326,7 +349,11 @@ void fused_attention_stage_impl(
 // cast to bf16, zero the [N, N_pad) tail so it contributes 0 to attn @ V.
 //
 // row_fp32 is rewritten in place (scratch for the three passes).
-template <typename scalar_t>
+//
+// HAS_SCALE=true  : classic v2 path — row = row * sm_scale + bias in pass 1.
+// HAS_SCALE=false : v3 path — sm_scale is already baked into Q, so pass 1
+//                   is just row = row + bias (sm_scale param unused).
+template <typename scalar_t, bool HAS_SCALE = true>
 inline void softmax_row_to_bf16(
     float* __restrict__ row_fp32,
     scalar_t* __restrict__ row_out,
@@ -340,8 +367,9 @@ inline void softmax_row_to_bf16(
   constexpr int kFVec = fVec::size();  // 16 for float
 
   const fVec vscale(sm_scale);
+  (void)vscale;  // silence unused warning when HAS_SCALE=false
 
-  // Pass 1: row = row * scale + bias; track max.
+  // Pass 1: row = row * scale + bias (or row + bias if scale is already baked in); track max.
   fVec vmax(-std::numeric_limits<float>::infinity());
   int n = 0;
   for (; n <= N - kBVec; n += kBVec) {
@@ -349,8 +377,13 @@ inline void softmax_row_to_bf16(
     fVec l1 = fVec::loadu(row_fp32 + n + kFVec);
     fVec b0, b1;
     std::tie(b0, b1) = load_float_vec2<scalar_t>(bias_row + n);
-    l0 = l0 * vscale + b0;
-    l1 = l1 * vscale + b1;
+    if constexpr (HAS_SCALE) {
+      l0 = l0 * vscale + b0;
+      l1 = l1 * vscale + b1;
+    } else {
+      l0 = l0 + b0;
+      l1 = l1 + b1;
+    }
     l0.store(row_fp32 + n);
     l1.store(row_fp32 + n + kFVec);
     vmax = at::vec::maximum(vmax, at::vec::maximum(l0, l1));
@@ -358,7 +391,8 @@ inline void softmax_row_to_bf16(
   float max_val = at::vec::vec_reduce_all<float>(
       [](fVec a, fVec b) { return at::vec::maximum(a, b); }, vmax);
   for (; n < N; ++n) {
-    float v = row_fp32[n] * sm_scale + static_cast<float>(bias_row[n]);
+    float v = HAS_SCALE ? (row_fp32[n] * sm_scale + static_cast<float>(bias_row[n]))
+                        : (row_fp32[n] + static_cast<float>(bias_row[n]));
     row_fp32[n] = v;
     if (v > max_val) max_val = v;
   }
@@ -797,29 +831,30 @@ void fused_attention_proj_core_impl(
       const scalar_t* v_w_h = v_w + static_cast<size_t>(head_id) * K * D;
       const scalar_t* g_w_h = g_w + static_cast<size_t>(head_id) * K * D;
 
-      // ----- K projection for the entire sequence -----
+      // ----- K + V projections for the entire sequence (interleaved) -----
+      // Single M-loop so pair rows are loaded once per m-block and are hot in
+      // L1 for both the K and V brgemms.  Two brgemm calls per iteration, but
+      // they share the same pair tile and same per-(bs, head) TLB state.
       for (int m = 0; m < N; m += BLOCK_M) {
         int m_sz = std::min(BLOCK_M, N - m);
+        const scalar_t* pair_m = pair_bs + static_cast<size_t>(m) * D;
+        // K projection.
         at::native::cpublas::brgemm(
             /* M */ m_sz, /* N */ K, /* K */ D,
             /* lda */ D, /* ldb */ K, /* ldc */ K,
             /* add_C */ false,
-            pair_bs + static_cast<size_t>(m) * D,
+            pair_m,
             k_w_h,
             Ctmp);
         for (int r = 0; r < m_sz; ++r) {
           cast_copy_stub<scalar_t>(K_full + static_cast<size_t>(m + r) * K, Ctmp + r * K, K);
         }
-      }
-
-      // ----- V projection for the entire sequence -----
-      for (int m = 0; m < N; m += BLOCK_M) {
-        int m_sz = std::min(BLOCK_M, N - m);
+        // V projection (reuses pair_m still hot in L1).
         at::native::cpublas::brgemm(
             /* M */ m_sz, /* N */ K, /* K */ D,
             /* lda */ D, /* ldb */ K, /* ldc */ K,
             /* add_C */ false,
-            pair_bs + static_cast<size_t>(m) * D,
+            pair_m,
             v_w_h,
             Ctmp);
         for (int r = 0; r < m_sz; ++r) {
@@ -848,7 +883,10 @@ void fused_attention_proj_core_impl(
       for (int m = 0; m < N; m += BLOCK_M) {
         int m_size = std::min(BLOCK_M, N - m);
 
-        // ---- Q projection for this block ----
+        // ---- Q projection for this block; bake sm_scale into Q ----
+        // Matches TPP's `scale(tmp_q, tmp_q, scaling)` right after Q-proj, so
+        // the softmax doesn't multiply every logit by sm_scale (saves ~N flops
+        // per row vs ~K flops here).
         at::native::cpublas::brgemm(
             /* M */ m_size, /* N */ K, /* K */ D,
             /* lda */ D, /* ldb */ K, /* ldc */ K,
@@ -857,10 +895,10 @@ void fused_attention_proj_core_impl(
             q_w_h,
             Ctmp);
         for (int r = 0; r < m_size; ++r) {
-          cast_copy_stub<scalar_t>(Q_block + static_cast<size_t>(r) * K, Ctmp + r * K, K);
+          cast_copy_scale_stub<scalar_t>(Q_block + static_cast<size_t>(r) * K, Ctmp + r * K, sm_scale, K);
         }
 
-        // ---- Q @ K^T -> logits_fp32 [m_size, N_pad] ----
+        // ---- Q @ K^T -> logits_fp32 [m_size, N_pad] (sm_scale already in Q) ----
         at::native::cpublas::brgemm(
             /* M */ m_size, /* N */ N_pad, /* K */ K,
             /* lda */ K, /* ldb */ N_pad, /* ldc */ N_pad,
@@ -869,16 +907,16 @@ void fused_attention_proj_core_impl(
             K_vnni,
             logits_fp32);
 
-        // ---- softmax per row (scale + bias + normalize + cast to bf16) ----
+        // ---- softmax per row (bias + normalize + cast to bf16; no scale) ----
         for (int r = 0; r < m_size; ++r) {
           const scalar_t* bias_row = bias_h + static_cast<size_t>(m + r) * bias_strideM;
-          softmax_row_to_bf16<scalar_t>(
+          softmax_row_to_bf16<scalar_t, /*HAS_SCALE=*/false>(
               logits_fp32 + static_cast<size_t>(r) * N_pad,
               softmax_bf16 + static_cast<size_t>(r) * N_pad,
               bias_row,
               N,
               N_pad,
-              sm_scale);
+              /*sm_scale=*/1.f);  // unused when HAS_SCALE=false
         }
 
         // ---- softmax @ V -> v_prime [m_size, K] ----
