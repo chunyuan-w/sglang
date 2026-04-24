@@ -477,10 +477,6 @@ void fused_attention_core_impl(
       return p;
     };
 
-    // Gather buffers for this head's K/V (strided read from qkvg then packed).
-    scalar_t* K_contig = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * N * K));
-    scalar_t* V_contig = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * N * K));
-
     // VNNI-packed K and V, reused across all M-blocks of this (bs, head).
     scalar_t* K_vnni = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * N_pad * K));
     scalar_t* V_vnni = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * N_pad * K));
@@ -490,7 +486,6 @@ void fused_attention_core_impl(
     float* logits_fp32 = reinterpret_cast<float*>(bump(sizeof(float) * BLOCK_M * N_pad));
     scalar_t* softmax_bf16 = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * BLOCK_M * N_pad));
     float* v_prime = reinterpret_cast<float*>(bump(sizeof(float) * BLOCK_M * K));
-    scalar_t* Q_block = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * BLOCK_M * K));
     (void)base0;  // silence unused warning; base tracks offsets via closure
 
     // Zero the packed-K/V tail regions once per thread: pack_vnni{,2} write only
@@ -510,28 +505,21 @@ void fused_attention_core_impl(
       const size_t V_off = static_cast<size_t>(2 * D) + static_cast<size_t>(head_id) * K;
       const size_t G_off = static_cast<size_t>(3 * D) + static_cast<size_t>(head_id) * K;
 
-      // Gather this head's K/V into contiguous scratch once per (bs, head).
-      for (int n = 0; n < N; ++n) {
-        const scalar_t* src_k = qkvg_bs + static_cast<size_t>(n) * QKVG_STRIDE + K_off;
-        const scalar_t* src_v = qkvg_bs + static_cast<size_t>(n) * QKVG_STRIDE + V_off;
-        std::memcpy(K_contig + static_cast<size_t>(n) * K, src_k, sizeof(scalar_t) * K);
-        std::memcpy(V_contig + static_cast<size_t>(n) * K, src_v, sizeof(scalar_t) * K);
-      }
-
-      // Pack K into [K/2, N_pad, 2] and V into [N_pad/2, K, 2] once per (bs, h).
+      // Pack K/V directly from qkvg with strided reads (ld_src = QKVG_STRIDE
+      // skips over the interleaved Q/V/G or Q/K/G slots between rows).
       pack_vnni<scalar_t>(
           /* dst */ K_vnni,
-          /* src */ K_contig,
+          /* src */ qkvg_bs + K_off,
           /* N */ N,
           /* K */ K,
-          /* ld_src */ K,
+          /* ld_src */ QKVG_STRIDE,
           /* ld_dst */ N_pad);
       pack_vnni2<scalar_t>(
           /* dst */ V_vnni,
-          /* src */ V_contig,
+          /* src */ qkvg_bs + V_off,
           /* K */ N,
           /* N */ K,
-          /* ld_src */ K,
+          /* ld_src */ QKVG_STRIDE,
           /* ld_dst */ K);
 
       const scalar_t* bias_h = bias + static_cast<size_t>(head_id) * bias_strideH;
@@ -539,18 +527,14 @@ void fused_attention_core_impl(
       for (int m = 0; m < N; m += BLOCK_M) {
         int m_size = std::min(BLOCK_M, N - m);
 
-        // Gather Q block to a contig buffer for brgemm.
-        for (int r = 0; r < m_size; ++r) {
-          const scalar_t* src_q = qkvg_bs + static_cast<size_t>(m + r) * QKVG_STRIDE + Q_off;
-          std::memcpy(Q_block + static_cast<size_t>(r) * K, src_q, sizeof(scalar_t) * K);
-        }
-
         // ---- Q @ K^T -> logits_fp32 [m_size, N_pad] ----
+        // Read Q directly from qkvg with strided lda (no gather needed).
+        const scalar_t* Q_ptr = qkvg_bs + static_cast<size_t>(m) * QKVG_STRIDE + Q_off;
         at::native::cpublas::brgemm(
             /* M */ m_size, /* N */ N_pad, /* K */ K,
-            /* lda */ K, /* ldb */ N_pad, /* ldc */ N_pad,
+            /* lda */ QKVG_STRIDE, /* ldb */ N_pad, /* ldc */ N_pad,
             /* add_C */ false,
-            Q_block,
+            Q_ptr,
             K_vnni,
             logits_fp32);
 
@@ -637,10 +621,6 @@ void fused_attention_concat_proj_core_impl(
     // from by all H heads (stage B).
     scalar_t* qkvg_row = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * N * 4 * D));
 
-    // Gather buffers for this head's K/V (strided read from qkvg_row, packed).
-    scalar_t* K_contig = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * N * K));
-    scalar_t* V_contig = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * N * K));
-
     // VNNI-packed K and V, reused across all M-blocks of this (bs, head).
     scalar_t* K_vnni = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * N_pad * K));
     scalar_t* V_vnni = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * N_pad * K));
@@ -649,7 +629,6 @@ void fused_attention_concat_proj_core_impl(
     float* logits_fp32 = reinterpret_cast<float*>(bump(sizeof(float) * BLOCK_M * N_pad));
     scalar_t* softmax_bf16 = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * BLOCK_M * N_pad));
     float* v_prime = reinterpret_cast<float*>(bump(sizeof(float) * BLOCK_M * K));
-    scalar_t* Q_block = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * BLOCK_M * K));
 
     // Zero the [N, N_pad) padding tails once per thread (see v2 core).
     std::memset(K_vnni, 0, sizeof(scalar_t) * N_pad * K);
@@ -679,27 +658,20 @@ void fused_attention_concat_proj_core_impl(
         const size_t V_off = static_cast<size_t>(2 * D) + static_cast<size_t>(head_id) * K;
         const size_t G_off = static_cast<size_t>(3 * D) + static_cast<size_t>(head_id) * K;
 
-        // Gather this head's K/V into contiguous scratch.
-        for (int n = 0; n < N; ++n) {
-          const scalar_t* src_k = qkvg_row + static_cast<size_t>(n) * QKVG_STRIDE + K_off;
-          const scalar_t* src_v = qkvg_row + static_cast<size_t>(n) * QKVG_STRIDE + V_off;
-          std::memcpy(K_contig + static_cast<size_t>(n) * K, src_k, sizeof(scalar_t) * K);
-          std::memcpy(V_contig + static_cast<size_t>(n) * K, src_v, sizeof(scalar_t) * K);
-        }
-
+        // Pack K/V directly from qkvg_row with strided reads.
         pack_vnni<scalar_t>(
             /* dst */ K_vnni,
-            /* src */ K_contig,
+            /* src */ qkvg_row + K_off,
             /* N */ N,
             /* K */ K,
-            /* ld_src */ K,
+            /* ld_src */ QKVG_STRIDE,
             /* ld_dst */ N_pad);
         pack_vnni2<scalar_t>(
             /* dst */ V_vnni,
-            /* src */ V_contig,
+            /* src */ qkvg_row + V_off,
             /* K */ N,
             /* N */ K,
-            /* ld_src */ K,
+            /* ld_src */ QKVG_STRIDE,
             /* ld_dst */ K);
 
         const scalar_t* bias_h = bias + static_cast<size_t>(head_id) * bias_strideH;
@@ -707,18 +679,14 @@ void fused_attention_concat_proj_core_impl(
         for (int m = 0; m < N; m += BLOCK_M) {
           int m_size = std::min(BLOCK_M, N - m);
 
-          // Gather Q block from qkvg_row.
-          for (int r = 0; r < m_size; ++r) {
-            const scalar_t* src_q = qkvg_row + static_cast<size_t>(m + r) * QKVG_STRIDE + Q_off;
-            std::memcpy(Q_block + static_cast<size_t>(r) * K, src_q, sizeof(scalar_t) * K);
-          }
-
           // Q @ K^T -> logits_fp32 [m_size, N_pad]
+          // Read Q directly from qkvg_row with strided lda (no gather needed).
+          const scalar_t* Q_ptr = qkvg_row + static_cast<size_t>(m) * QKVG_STRIDE + Q_off;
           at::native::cpublas::brgemm(
               /* M */ m_size, /* N */ N_pad, /* K */ K,
-              /* lda */ K, /* ldb */ N_pad, /* ldc */ N_pad,
+              /* lda */ QKVG_STRIDE, /* ldb */ N_pad, /* ldc */ N_pad,
               /* add_C */ false,
-              Q_block,
+              Q_ptr,
               K_vnni,
               logits_fp32);
 
@@ -1120,14 +1088,11 @@ at::Tensor fused_grid_attention_v2(
 
   const int num_threads = at::get_num_threads();
   const int per_thread_bytes =
-      /* K_contig     */ sizeof(uint16_t) * N * K +
-      /* V_contig     */ sizeof(uint16_t) * N * K +
       /* K_vnni       */ sizeof(uint16_t) * N_pad * K +
       /* V_vnni       */ sizeof(uint16_t) * N_pad * K +
       /* logits_fp32  */ sizeof(float) * BLOCK_M * N_pad +
       /* softmax_bf16 */ sizeof(uint16_t) * BLOCK_M * N_pad +
       /* v_prime      */ sizeof(float) * BLOCK_M * K +
-      /* Q_block      */ sizeof(uint16_t) * BLOCK_M * K +
       /* alignment padding */ 64 * 10;
   auto buffer = at::empty({num_threads, per_thread_bytes}, pair.options().dtype(at::kChar));
   auto t_buf_alloc = prof ? clock::now() : clock::time_point{};
@@ -1247,14 +1212,11 @@ at::Tensor fused_grid_attention_v4(
 
   const int num_threads = at::get_num_threads();
   const int per_thread_bytes =
-      /* K_contig     */ sizeof(uint16_t) * N * K +
-      /* V_contig     */ sizeof(uint16_t) * N * K +
       /* K_vnni       */ sizeof(uint16_t) * N_pad * K +
       /* V_vnni       */ sizeof(uint16_t) * N_pad * K +
       /* logits_fp32  */ sizeof(float) * BLOCK_M * N_pad +
       /* softmax_bf16 */ sizeof(uint16_t) * BLOCK_M * N_pad +
       /* v_prime      */ sizeof(float) * BLOCK_M * K +
-      /* Q_block      */ sizeof(uint16_t) * BLOCK_M * K +
       /* alignment padding */ 64 * 10;
   auto buffer = at::empty({num_threads, per_thread_bytes}, pair.options().dtype(at::kChar));
 
@@ -1347,14 +1309,11 @@ at::Tensor fused_grid_attention_v5(
   const int num_threads = at::get_num_threads();
   const int per_thread_bytes =
       /* qkvg_row     */ sizeof(uint16_t) * N * 4 * D +
-      /* K_contig     */ sizeof(uint16_t) * N * K +
-      /* V_contig     */ sizeof(uint16_t) * N * K +
       /* K_vnni       */ sizeof(uint16_t) * N_pad * K +
       /* V_vnni       */ sizeof(uint16_t) * N_pad * K +
       /* logits_fp32  */ sizeof(float) * BLOCK_M * N_pad +
       /* softmax_bf16 */ sizeof(uint16_t) * BLOCK_M * N_pad +
       /* v_prime      */ sizeof(float) * BLOCK_M * K +
-      /* Q_block      */ sizeof(uint16_t) * BLOCK_M * K +
       /* alignment padding */ 64 * 10;
   auto buffer = at::empty({num_threads, per_thread_bytes}, pair.options().dtype(at::kChar));
 
