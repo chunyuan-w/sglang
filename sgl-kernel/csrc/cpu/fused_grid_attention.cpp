@@ -1150,11 +1150,14 @@ at::Tensor fused_grid_attention_v2(
   auto t_attn = prof ? clock::now() : clock::time_point{};
 
   // ----- Stage C: final output projection -----
+  // Write back into `pair` in place (TPP trick, same as v3).  The Python
+  // wrapper always feeds a fresh pair (post-LayerNorm), so clobbering it is
+  // safe.  Removes one 5.5 GB at::empty/munmap cycle per call.
   auto gated_attn_2d = gated_attn.view({static_cast<int64_t>(B) * N, D});
-  auto out_2d = at::empty({static_cast<int64_t>(B) * N, D}, pair.options());
+  auto pair_2d = pair.view({static_cast<int64_t>(B) * N, D});
   auto t_out_alloc = prof ? clock::now() : clock::time_point{};
 
-  weight_packed_linear_out(out_2d, gated_attn_2d, output_weight, /*bias=*/std::nullopt, /*is_vnni=*/true);
+  weight_packed_linear_out(pair_2d, gated_attn_2d, output_weight, /*bias=*/std::nullopt, /*is_vnni=*/true);
   auto t_out_gemm = prof ? clock::now() : clock::time_point{};
 
   if (prof) {
@@ -1163,10 +1166,10 @@ at::Tensor fused_grid_attention_v2(
     };
     // Stage A split into qkvg-alloc (~22 GB at N=4655) vs gemm,
     // Stage B split into gated_attn-alloc (~5.5 GB) / per-thread scratch / attn core,
-    // Stage C split into output-alloc (~5.5 GB) vs output gemm.
+    // Stage C: out_proj writes back into pair (no alloc).
     std::fprintf(
         stderr,
-        "[v2] qkvg_alloc=%7.2f qkvg_gemm=%7.2f gated_alloc=%7.2f buf_alloc=%6.2f attn=%8.2f out_alloc=%7.2f out_gemm=%7.2f total=%8.2f ms\n",
+        "[v2] qkvg_alloc=%7.2f qkvg_gemm=%7.2f gated_alloc=%7.2f buf_alloc=%6.2f attn=%8.2f out_view=%7.2f out_gemm=%7.2f total=%8.2f ms\n",
         ms(t_start, t_qkvg_alloc),
         ms(t_qkvg_alloc, t_qkvg_gemm),
         ms(t_qkvg_gemm, t_gated_alloc),
@@ -1178,7 +1181,7 @@ at::Tensor fused_grid_attention_v2(
     std::fflush(stderr);
   }
 
-  return out_2d.view({B, N, D});
+  return pair;
 }
 
 // v4: B-tiled v2.  Keeps v2's single concat-QKVG GEMM but processes the outer
