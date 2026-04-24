@@ -1152,9 +1152,9 @@ at::Tensor fused_grid_attention_v2(
   // ----- Stage C: final output projection -----
   // Write back into `pair` in place (TPP trick, same as v3).  The Python
   // wrapper always feeds a fresh pair (post-LayerNorm), so clobbering it is
-  // safe.  Removes one 5.5 GB at::empty/munmap cycle per call.
+  // safe.  Removes one 5.5 GB at::empty/munmap cycle per call.  Reuses
+  // `pair_2d` declared above for Stage A.
   auto gated_attn_2d = gated_attn.view({static_cast<int64_t>(B) * N, D});
-  auto pair_2d = pair.view({static_cast<int64_t>(B) * N, D});
   auto t_out_alloc = prof ? clock::now() : clock::time_point{};
 
   weight_packed_linear_out(pair_2d, gated_attn_2d, output_weight, /*bias=*/std::nullopt, /*is_vnni=*/true);
