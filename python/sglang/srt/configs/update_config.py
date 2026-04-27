@@ -101,6 +101,34 @@ def adjust_config_with_unaligned_cpu_tp(
     # MQA models (num_kv_heads == 1) replicate the single KV head across TP ranks,
     # so kv-head padding is not applicable — only attention-head padding is.
     is_mqa = total_kv_heads == 1
+
+    # Grouped-MQA models (e.g. DeepSeek-V4) carry an additional `o_groups` dim
+    # that must also divide tp_size; the heads-per-group ratio must remain
+    # integer, so pad `o_groups` and `num_attention_heads` together.
+    o_groups = getattr(model_config.hf_config, "o_groups", None)
+    if (
+        is_mqa
+        and isinstance(o_groups, int)
+        and o_groups > 0
+        and model_config.num_attention_heads % o_groups == 0
+        and (
+            o_groups % tp_size != 0
+            or model_config.num_attention_heads % tp_size != 0
+        )
+    ):
+        model_config.hf_config.original_o_groups = o_groups
+        model_config.hf_text_config.original_o_groups = o_groups
+
+        heads_per_group = model_config.num_attention_heads // o_groups
+        new_o_groups = ((o_groups + tp_size - 1) // tp_size) * tp_size
+        new_num_attention_heads = heads_per_group * new_o_groups
+
+        model_config.hf_config.o_groups = new_o_groups
+        model_config.hf_text_config.o_groups = new_o_groups
+        model_config.num_attention_heads = new_num_attention_heads
+        model_config.hf_config.num_attention_heads = new_num_attention_heads
+        model_config.hf_text_config.num_attention_heads = new_num_attention_heads
+
     needs_attn_pad = model_config.num_attention_heads % tp_size != 0
     needs_kv_pad = not is_mqa and total_kv_heads % tp_size != 0
 
