@@ -97,10 +97,14 @@ def adjust_config_with_unaligned_cpu_tp(
         model_config.get_total_num_kv_heads()
     )
 
-    if (
-        model_config.num_attention_heads % tp_size != 0
-        or model_config.get_total_num_kv_heads() % tp_size != 0
-    ):
+    total_kv_heads = model_config.get_total_num_kv_heads()
+    # MQA models (num_kv_heads == 1) replicate the single KV head across TP ranks,
+    # so kv-head padding is not applicable — only attention-head padding is.
+    is_mqa = total_kv_heads == 1
+    needs_attn_pad = model_config.num_attention_heads % tp_size != 0
+    needs_kv_pad = not is_mqa and total_kv_heads % tp_size != 0
+
+    if needs_attn_pad or needs_kv_pad:
         # Compute the head_dim using the model_config.num_attention_heads before padding
         if not hasattr(model_config.hf_config, "head_dim"):
             model_config.hf_config.head_dim = (
@@ -114,10 +118,6 @@ def adjust_config_with_unaligned_cpu_tp(
                 + model_config.hf_config.qk_rope_head_dim
             )
 
-        query_heads_per_kv = (
-            model_config.num_attention_heads // model_config.get_total_num_kv_heads()
-        )
-        total_kv_heads = model_config.get_total_num_kv_heads()
         from sglang.srt.layers.vocab_parallel_embedding import pad_vocab_size
 
         head_dim = (
@@ -126,13 +126,22 @@ def adjust_config_with_unaligned_cpu_tp(
             else model_config.hf_config.head_dim
         )
         pad_size = get_num_heads_padding_size(tp_size, weight_block_size, head_dim)
-        num_key_value_heads = pad_vocab_size(total_kv_heads, pad_size)
 
-        model_config.num_key_value_heads = num_key_value_heads
-        model_config.hf_config.num_key_value_heads = num_key_value_heads
-        model_config.hf_text_config.num_key_value_heads = num_key_value_heads
+        if is_mqa:
+            # Keep num_key_value_heads == 1 (replicated). Pad attention heads only.
+            num_attention_heads = pad_vocab_size(
+                model_config.num_attention_heads, pad_size
+            )
+        else:
+            query_heads_per_kv = model_config.num_attention_heads // total_kv_heads
+            num_key_value_heads = pad_vocab_size(total_kv_heads, pad_size)
 
-        num_attention_heads = num_key_value_heads * query_heads_per_kv
+            model_config.num_key_value_heads = num_key_value_heads
+            model_config.hf_config.num_key_value_heads = num_key_value_heads
+            model_config.hf_text_config.num_key_value_heads = num_key_value_heads
+
+            num_attention_heads = num_key_value_heads * query_heads_per_kv
+
         model_config.num_attention_heads = num_attention_heads
         model_config.hf_config.num_attention_heads = num_attention_heads
         model_config.hf_text_config.num_attention_heads = num_attention_heads
