@@ -556,6 +556,8 @@ class MQALayer(nn.Module):
                 narrow_padded_param_and_loaded_weight,
             )
 
+            # for attn_sink, we can set padded place to any finite value. just leverage
+            # the pad to zero path for simplicity
             param_view, loaded_view = narrow_padded_param_and_loaded_weight(
                 param.data,
                 loaded_weight,
