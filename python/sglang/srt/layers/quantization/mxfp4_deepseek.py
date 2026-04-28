@@ -220,6 +220,10 @@ class DeepSeekMxfp4MoEMethod:
     def process_weights_after_loading(self, layer: Module) -> None:
         from sglang.srt.layers.quantization.utils import reorder_w1w3_to_w3w1
 
+        if layer.w13_weight.device.type == "cpu":
+            self._process_weights_cpu(layer)
+            return
+
         self._fp8.process_weights_after_loading(layer)
 
         if getattr(layer, "_mega_moe_weights_built", False):
@@ -322,6 +326,88 @@ class DeepSeekMxfp4MoEMethod:
             self._register_static_scale_ones(layer)
         torch.cuda.empty_cache()
 
+    def _apply_cpu(self, layer: Module, hidden_states, topk_output):
+        """CPU MXFP4 dispatch via sgl_kernel.fused_experts_cpu. Mirrors the
+        CPU branch in Mxfp4MoEMethod.apply() but without bias (DSV4 has none)."""
+        from sglang.srt.layers.amx_utils import CPUQuantMethod
+        from sglang.srt.layers.moe.topk import apply_topk_weights_cpu
+
+        topk_weights, topk_ids, _ = topk_output
+        x, topk_weights = apply_topk_weights_cpu(
+            self.moe_runner_config.apply_router_weight_on_input,
+            topk_weights,
+            hidden_states,
+        )
+
+        # NOTE: 2604B submode needs swiglu-with-clamp activation. The CPU
+        # kernel currently enables swiglu only when both alpha and limit are
+        # provided (moe.cpp:1189), so 2604B is not yet supported here.
+        # Default `2604` mode uses silu_and_mul which is the kernel's default.
+        gemm1_clamp_limit = (
+            float(self.moe_runner_config.swiglu_limit)
+            if envs.SGLANG_DSV4_2604_SUBMODE.get() == "2604B"
+            and self.moe_runner_config.swiglu_limit is not None
+            else None
+        )
+
+        return torch.ops.sgl_kernel.fused_experts_cpu(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            topk_weights,
+            topk_ids.to(torch.int32),
+            False,  # inplace — keep False so hidden_states isn't clobbered
+            CPUQuantMethod.MXFP4,
+            layer.w13_weight_scale_inv,
+            layer.w2_weight_scale_inv,
+            None,  # w1_zp
+            None,  # w2_zp
+            None,  # block_size
+            None,  # w1_bias
+            None,  # w2_bias
+            None,  # gemm1_alpha
+            gemm1_clamp_limit,
+            True,  # is_vnni — pre-packed in _process_weights_cpu
+        )
+
+    def _process_weights_cpu(self, layer: Module) -> None:
+        """CPU MXFP4 weight prep: keep row-major, convert dtypes to uint8,
+        and VNNI-pack via the sgl-kernel CPU helpers. No TRT-LLM shuffle."""
+        kernel = torch.ops.sgl_kernel
+
+        w13 = layer.w13_weight.data
+        w2 = layer.w2_weight.data
+        w13_scale = layer.w13_weight_scale_inv.data
+        w2_scale = layer.w2_weight_scale_inv.data
+
+        # Weights are int8-storage of packed FP4 (two values/byte). The CPU
+        # kernel checks scalar_type == kByte, so we view as uint8 (bit-equivalent).
+        w13 = w13.view(torch.uint8) if w13.dtype != torch.uint8 else w13
+        w2 = w2.view(torch.uint8) if w2.dtype != torch.uint8 else w2
+
+        # Scales are loaded as float32 from the checkpoint (E8M0 expressed as
+        # float). Convert to E8M0 (1 byte) then view as uint8 for the kernel.
+        if w13_scale.dtype == torch.float32:
+            w13_scale = w13_scale.to(torch.float8_e8m0fnu)
+            w2_scale = w2_scale.to(torch.float8_e8m0fnu)
+        w13_scale = w13_scale.view(torch.uint8)
+        w2_scale = w2_scale.view(torch.uint8)
+
+        # VNNI-pack so the kernel can consume with is_vnni=True (avoids
+        # per-call repack inside fused_experts_cpu).
+        w13 = kernel.convert_weight_packed(w13)
+        w2 = kernel.convert_weight_packed(w2)
+        w13_scale = kernel.convert_scale_packed(w13_scale)
+        w2_scale = kernel.convert_scale_packed(w2_scale)
+
+        layer.w13_weight = Parameter(w13, requires_grad=False)
+        layer.w2_weight = Parameter(w2, requires_grad=False)
+        layer.w13_weight_scale_inv = Parameter(w13_scale, requires_grad=False)
+        layer.w2_weight_scale_inv = Parameter(w2_scale, requires_grad=False)
+
+        # Tell the apply() path to dispatch via fused_experts_cpu.
+        layer.use_intel_amx_backend = True
+
     def _register_static_scale_ones(self, layer: Module) -> None:
         device = layer.w13_weight.device
         for name in (
@@ -342,9 +428,15 @@ class DeepSeekMxfp4MoEMethod:
     ) -> CombineInput:
         from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
         from sglang.srt.layers.moe.topk import TopKOutputChecker
+        from sglang.srt.utils import use_intel_amx_backend
 
         hidden_states = dispatch_output.hidden_states
         topk_output = dispatch_output.topk_output
+
+        if use_intel_amx_backend(layer):
+            return StandardCombineInput(
+                hidden_states=self._apply_cpu(layer, hidden_states, topk_output)
+            )
 
         w13 = layer.w13_weight
         w2 = layer.w2_weight

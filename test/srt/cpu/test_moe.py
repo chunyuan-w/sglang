@@ -362,6 +362,60 @@ class TestFusedExperts(CustomTestCase):
         atol = rtol = precision[torch_output.dtype]
         torch.testing.assert_close(torch_output, fused_output, atol=atol, rtol=rtol)
 
+    # DeepSeek-V4-Flash routed-expert shape (H=4096 hidden, I=2048 moe_intermediate,
+    # 256 experts but reduced for test speed, top-6 routing). DSV4 has no bias and
+    # uses silu_and_mul activation in the default `2604` mode (no swiglu clamp).
+    @parametrize(M=[1, 16], N=[2048], K=[4096], E=[8], topk=[6])
+    def test_mxfp4_moe_dsv4_shape(self, M, N, K, E, topk):
+        dtype = torch.bfloat16
+
+        a = torch.randn(M, K, dtype=dtype) / 10
+
+        w1_bf16 = torch.randn((E, 2 * N, K), dtype=dtype) / 10
+        w1q, w1s = MXFP4QuantizeUtil.quantize(w1_bf16)
+        w1s = w1s.reshape(E, 2 * N, K // 32)
+        w1dq = MXFP4QuantizeUtil.dequantize(w1q, dtype, w1s)
+
+        w2_bf16 = torch.randn((E, K, N), dtype=dtype) / 10
+        w2q, w2s = MXFP4QuantizeUtil.quantize(w2_bf16)
+        w2s = w2s.reshape(E, K, N // 32)
+        w2dq = MXFP4QuantizeUtil.dequantize(w2q, dtype, w2s)
+
+        score = torch.randn((M, E), dtype=dtype)
+        score = torch.softmax(score, dim=-1, dtype=torch.float32)
+        topk_weight, topk_ids = torch.topk(score, topk)
+
+        w1 = kernel.convert_weight_packed(w1q)
+        w2 = kernel.convert_weight_packed(w2q)
+        w1s = kernel.convert_scale_packed(w1s)
+        w2s = kernel.convert_scale_packed(w2s)
+
+        ref_out = native_fp8_fused_moe(
+            a, w1dq.float(), w2dq.float(), topk_weight, topk_ids, topk
+        )
+        out = kernel.fused_experts_cpu(
+            a,
+            w1,
+            w2,
+            topk_weight,
+            topk_ids.to(torch.int32),
+            False,  # inplace
+            CPUQuantMethod.MXFP4,
+            w1s,
+            w2s,
+            None,  # w1_zp
+            None,  # w2_zp
+            None,  # block_size
+            None,  # w1_bias  (DSV4 has no bias)
+            None,  # w2_bias
+            None,  # gemm1_alpha
+            None,  # gemm1_clamp_limit (None for `2604`; `2604B` will need this — TODO)
+            True,  # is_vnni — pre-packed above
+        )
+
+        atol = rtol = precision[dtype]
+        torch.testing.assert_close(ref_out.bfloat16(), out, atol=atol, rtol=rtol)
+
     @parametrize(M=[1, 6], N=[512], K=[256], E=[8], topk=[4])
     def test_int4_moe(self, M, N, K, E, topk, group_size=128):
         dtype = torch.bfloat16
