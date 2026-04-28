@@ -365,30 +365,60 @@ class TestFusedExperts(CustomTestCase):
     # DeepSeek-V4-Flash routed-expert shape (H=4096 hidden, I=2048 moe_intermediate,
     # 256 experts but reduced for test speed, top-6 routing). DSV4 has no bias and
     # uses silu_and_mul activation in the default `2604` mode (no swiglu clamp).
+    #
+    # This test mirrors the real create_weights → _process_weights_cpu path in
+    # DeepSeekMxfp4MoEMethod: weights are stored as int8 (packed FP4) and scales
+    # as float32 (E8M0 values), then _process_weights_cpu view-casts them to
+    # uint8 and float8_e8m0fnu→uint8 before VNNI packing.
     @parametrize(M=[1, 16], N=[2048], K=[4096], E=[8], topk=[6])
     def test_mxfp4_moe_dsv4_shape(self, M, N, K, E, topk):
         dtype = torch.bfloat16
+        fp4_block_k = 32
 
         a = torch.randn(M, K, dtype=dtype) / 10
 
+        # --- quantize to get ground-truth uint8 weights & uint8 E8M0 scales ---
         w1_bf16 = torch.randn((E, 2 * N, K), dtype=dtype) / 10
-        w1q, w1s = MXFP4QuantizeUtil.quantize(w1_bf16)
-        w1s = w1s.reshape(E, 2 * N, K // 32)
-        w1dq = MXFP4QuantizeUtil.dequantize(w1q, dtype, w1s)
+        w1q_u8, w1s_u8 = MXFP4QuantizeUtil.quantize(w1_bf16)
+        w1s_u8 = w1s_u8.reshape(E, 2 * N, K // fp4_block_k)
+        w1dq = MXFP4QuantizeUtil.dequantize(w1q_u8, dtype, w1s_u8)
 
         w2_bf16 = torch.randn((E, K, N), dtype=dtype) / 10
-        w2q, w2s = MXFP4QuantizeUtil.quantize(w2_bf16)
-        w2s = w2s.reshape(E, K, N // 32)
-        w2dq = MXFP4QuantizeUtil.dequantize(w2q, dtype, w2s)
+        w2q_u8, w2s_u8 = MXFP4QuantizeUtil.quantize(w2_bf16)
+        w2s_u8 = w2s_u8.reshape(E, K, N // fp4_block_k)
+        w2dq = MXFP4QuantizeUtil.dequantize(w2q_u8, dtype, w2s_u8)
 
-        score = torch.randn((M, E), dtype=dtype)
-        score = torch.softmax(score, dim=-1, dtype=torch.float32)
-        topk_weight, topk_ids = torch.topk(score, topk)
+        # --- simulate create_weights storage dtypes ---
+        # Weights: int8 (packed FP4, two nibbles per byte — bit-equivalent to uint8)
+        w1_int8 = w1q_u8.view(torch.int8)   # shape (E, 2*N, K//2)
+        w2_int8 = w2q_u8.view(torch.int8)   # shape (E, K, N//2)
+        # Scales: float32 (E8M0 biased exponent stored as float power-of-2)
+        w1s_f32 = w1s_u8.view(torch.float8_e8m0fnu).float()  # (E, 2*N, K//32)
+        w2s_f32 = w2s_u8.view(torch.float8_e8m0fnu).float()  # (E, K, N//32)
 
+        # --- _process_weights_cpu dtype view-casts ---
+        # int8 → uint8
+        w1q = w1_int8.view(torch.uint8)
+        w2q = w2_int8.view(torch.uint8)
+        # float32 → float8_e8m0fnu → uint8
+        w1s = w1s_f32.to(torch.float8_e8m0fnu).view(torch.uint8)
+        w2s = w2s_f32.to(torch.float8_e8m0fnu).view(torch.uint8)
+
+        # Verify round-trip: the view-casted bytes must match the originals
+        torch.testing.assert_close(w1q, w1q_u8)
+        torch.testing.assert_close(w2q, w2q_u8)
+        torch.testing.assert_close(w1s, w1s_u8)
+        torch.testing.assert_close(w2s, w2s_u8)
+
+        # --- VNNI packing (same as _process_weights_cpu) ---
         w1 = kernel.convert_weight_packed(w1q)
         w2 = kernel.convert_weight_packed(w2q)
         w1s = kernel.convert_scale_packed(w1s)
         w2s = kernel.convert_scale_packed(w2s)
+
+        score = torch.randn((M, E), dtype=dtype)
+        score = torch.softmax(score, dim=-1, dtype=torch.float32)
+        topk_weight, topk_ids = torch.topk(score, topk)
 
         ref_out = native_fp8_fused_moe(
             a, w1dq.float(), w2dq.float(), topk_weight, topk_ids, topk
