@@ -13,6 +13,7 @@ torch.manual_seed(1234)
 from utils import (
     BLOCK_K,
     BLOCK_N,
+    ClampedSiluAndMul,
     MXFP4QuantizeUtil,
     factor_for_scale,
     fp8_max,
@@ -367,50 +368,61 @@ class TestFusedExperts(CustomTestCase):
     # uses silu_and_mul activation in the default `2604` mode (no swiglu clamp).
     #
     # This test mirrors the real create_weights → _process_weights_cpu path in
-    # DeepSeekMxfp4MoEMethod: weights are stored as int8 (packed FP4) and scales
-    # as float32 (E8M0 values), then _process_weights_cpu view-casts them to
-    # uint8 and float8_e8m0fnu→uint8 before VNNI packing.
-    @parametrize(M=[1, 16], N=[2048], K=[4096], E=[8], topk=[6])
-    def test_mxfp4_moe_dsv4_shape(self, M, N, K, E, topk):
+    # DeepSeekMxfp4MoEMethod: weights start as int8 (packed FP4) and scales as
+    # float32 (as allocated by create_weights), then _process_weights_cpu
+    # view-casts int8→uint8 and float32→float8_e8m0fnu→uint8 before VNNI packing.
+    @parametrize(M=[1, 16], N=[256], K=[512], E=[8], topk=[6], limit=[None, 10.0])
+    def test_mxfp4_moe_dsv4_shape(self, M, N, K, E, topk, limit):
         dtype = torch.bfloat16
         fp4_block_k = 32
 
         a = torch.randn(M, K, dtype=dtype) / 10
 
-        # --- quantize to get ground-truth uint8 weights & uint8 E8M0 scales ---
+        # --- Step 1: generate realistic FP4 weights via quantization, then
+        # re-express them in the same storage format as create_weights (int8
+        # for packed FP4, float32 for E8M0 scales). ---
         w1_bf16 = torch.randn((E, 2 * N, K), dtype=dtype) / 10
-        w1q_u8, w1s_u8 = MXFP4QuantizeUtil.quantize(w1_bf16)
-        w1s_u8 = w1s_u8.reshape(E, 2 * N, K // fp4_block_k)
-        w1dq = MXFP4QuantizeUtil.dequantize(w1q_u8, dtype, w1s_u8)
+        w1q_uint8, w1s_raw = MXFP4QuantizeUtil.quantize(w1_bf16)
+        w1s_uint8 = w1s_raw.reshape(E, 2 * N, K // fp4_block_k)
 
         w2_bf16 = torch.randn((E, K, N), dtype=dtype) / 10
-        w2q_u8, w2s_u8 = MXFP4QuantizeUtil.quantize(w2_bf16)
-        w2s_u8 = w2s_u8.reshape(E, K, N // fp4_block_k)
-        w2dq = MXFP4QuantizeUtil.dequantize(w2q_u8, dtype, w2s_u8)
+        w2q_uint8, w2s_raw = MXFP4QuantizeUtil.quantize(w2_bf16)
+        w2s_uint8 = w2s_raw.reshape(E, K, N // fp4_block_k)
 
-        # --- simulate create_weights storage dtypes ---
-        # Weights: int8 (packed FP4, two nibbles per byte — bit-equivalent to uint8)
-        w1_int8 = w1q_u8.view(torch.int8)   # shape (E, 2*N, K//2)
-        w2_int8 = w2q_u8.view(torch.int8)   # shape (E, K, N//2)
-        # Scales: float32 (E8M0 biased exponent stored as float power-of-2)
-        w1s_f32 = w1s_u8.view(torch.float8_e8m0fnu).float()  # (E, 2*N, K//32)
-        w2s_f32 = w2s_u8.view(torch.float8_e8m0fnu).float()  # (E, K, N//32)
+        # Simulate checkpoint storage: packed FP4 as int8, E8M0 as float32
+        w1_weight = w1q_uint8.view(torch.int8)   # create_weights dtype
+        w2_weight = w2q_uint8.view(torch.int8)
+        w1_scale = torch.exp2(w1s_uint8.float() - 127)  # float32 form
+        w2_scale = torch.exp2(w2s_uint8.float() - 127)
 
-        # --- _process_weights_cpu dtype view-casts ---
-        # int8 → uint8
-        w1q = w1_int8.view(torch.uint8)
-        w2q = w2_int8.view(torch.uint8)
+        # --- Step 2: build reference uint8 weights & scales via independent math ---
+        # int8 → uint8 equivalent without .view(): mask to unsigned range
+        w1q_ref = (w1_weight.to(torch.int16) & 0xFF).to(torch.uint8)
+        w2q_ref = (w2_weight.to(torch.int16) & 0xFF).to(torch.uint8)
+        # float32 → E8M0 uint8 equivalent without .to(float8_e8m0fnu):
+        # since scales are exact powers of 2, biased_exp = log2(scale) + 127
+        w1s_ref = (torch.log2(w1_scale) + 127).to(torch.uint8)
+        w2s_ref = (torch.log2(w2_scale) + 127).to(torch.uint8)
+
+        # Dequantize from the independently-derived uint8 for the golden reference
+        w1dq = MXFP4QuantizeUtil.dequantize(w1q_ref, dtype, w1s_ref)
+        w2dq = MXFP4QuantizeUtil.dequantize(w2q_ref, dtype, w2s_ref)
+
+        # --- Step 3: _process_weights_cpu dtype conversions (code under test) ---
+        # int8 → uint8 (bit-equivalent reinterpret)
+        w1q = w1_weight.view(torch.uint8)
+        w2q = w2_weight.view(torch.uint8)
         # float32 → float8_e8m0fnu → uint8
-        w1s = w1s_f32.to(torch.float8_e8m0fnu).view(torch.uint8)
-        w2s = w2s_f32.to(torch.float8_e8m0fnu).view(torch.uint8)
+        w1s = w1_scale.to(torch.float8_e8m0fnu).view(torch.uint8)
+        w2s = w2_scale.to(torch.float8_e8m0fnu).view(torch.uint8)
 
-        # Verify round-trip: the view-casted bytes must match the originals
-        torch.testing.assert_close(w1q, w1q_u8)
-        torch.testing.assert_close(w2q, w2q_u8)
-        torch.testing.assert_close(w1s, w1s_u8)
-        torch.testing.assert_close(w2s, w2s_u8)
+        # Verify the _process_weights_cpu conversions match the independent reference
+        torch.testing.assert_close(w1q, w1q_ref)
+        torch.testing.assert_close(w2q, w2q_ref)
+        torch.testing.assert_close(w1s, w1s_ref)
+        torch.testing.assert_close(w2s, w2s_ref)
 
-        # --- VNNI packing (same as _process_weights_cpu) ---
+        # --- Step 4: VNNI packing (same as _process_weights_cpu) ---
         w1 = kernel.convert_weight_packed(w1q)
         w2 = kernel.convert_weight_packed(w2q)
         w1s = kernel.convert_scale_packed(w1s)
@@ -420,9 +432,31 @@ class TestFusedExperts(CustomTestCase):
         score = torch.softmax(score, dim=-1, dtype=torch.float32)
         topk_weight, topk_ids = torch.topk(score, topk)
 
-        ref_out = native_fp8_fused_moe(
-            a, w1dq.float(), w2dq.float(), topk_weight, topk_ids, topk
+        # --- Step 5: compute reference output ---
+        # limit=None → 2604 mode (plain silu_and_mul)
+        # limit=float → 2604B mode (clamped_silu_and_mul, no alpha)
+        w1f, w2f = w1dq.float(), w2dq.float()
+        B, D = a.shape
+        a_rep = a.view(B, -1, D).repeat(1, topk, 1).reshape(-1, D).float()
+        ref = torch.zeros(B * topk, w2f.shape[1], dtype=torch.float32)
+        tw = topk_weight.view(-1)
+        ti = topk_ids.view(-1)
+        for i in range(w1f.shape[0]):
+            mask = ti == i
+            if mask.sum():
+                ic0 = torch.matmul(a_rep[mask], w1f[i].transpose(0, 1))
+                if limit is not None:
+                    ic1 = ClampedSiluAndMul(ic0, limit)
+                else:
+                    from utils import SiluAndMul
+                    ic1 = SiluAndMul(ic0)
+                ref[mask] = torch.matmul(ic1, w2f[i].transpose(0, 1))
+        ref_out = (
+            (ref.view(B, -1, w2f.shape[1]) * tw.view(B, -1, 1).to(ref.dtype))
+            .sum(dim=1)
+            .to(a_rep.dtype)
         )
+
         out = kernel.fused_experts_cpu(
             a,
             w1,
@@ -438,8 +472,8 @@ class TestFusedExperts(CustomTestCase):
             None,  # block_size
             None,  # w1_bias  (DSV4 has no bias)
             None,  # w2_bias
-            None,  # gemm1_alpha
-            None,  # gemm1_clamp_limit (None for `2604`; `2604B` will need this — TODO)
+            None,  # gemm1_alpha  (2604B has no alpha, only limit)
+            limit,  # gemm1_clamp_limit: None for 2604, float for 2604B
             True,  # is_vnni — pre-packed above
         )
 

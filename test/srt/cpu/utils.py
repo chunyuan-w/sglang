@@ -39,6 +39,14 @@ def GeluAndMul(x: torch.Tensor, approximate="tanh") -> torch.Tensor:
     return F.gelu(x[..., :d], approximate=approximate) * x[..., d:]
 
 
+def ClampedSiluAndMul(x: torch.Tensor, limit: float) -> torch.Tensor:
+    """DSV4-2604B activation: clamp gate upper, clamp up symmetric, silu(gate)*up."""
+    d = x.shape[-1] // 2
+    gate = x[..., :d].clamp(max=limit)
+    up = x[..., d:].clamp(min=-limit, max=limit)
+    return F.silu(gate) * up
+
+
 def per_token_quant_int8(x):
     x = x.float()
     absmax = x.abs().max(dim=-1).values

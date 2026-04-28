@@ -339,10 +339,10 @@ class DeepSeekMxfp4MoEMethod:
             hidden_states,
         )
 
-        # NOTE: 2604B submode needs swiglu-with-clamp activation. The CPU
-        # kernel currently enables swiglu only when both alpha and limit are
-        # provided (moe.cpp:1189), so 2604B is not yet supported here.
-        # Default `2604` mode uses silu_and_mul which is the kernel's default.
+        # 2604B submode uses clamped_silu_and_mul activation. The CPU kernel
+        # selects this when limit is provided without alpha (moe.cpp act_func
+        # logic: limit-only → clamped_silu_and_mul).
+        # Default `2604` mode uses silu_and_mul (limit=None, alpha=None).
         gemm1_clamp_limit = (
             float(self.moe_runner_config.swiglu_limit)
             if envs.SGLANG_DSV4_2604_SUBMODE.get() == "2604B"

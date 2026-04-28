@@ -159,6 +159,50 @@ inline void silu_and_mul(
 }
 
 template <typename scalar_t, int BLOCK_N>
+inline void clamped_silu_and_mul(
+    scalar_t* __restrict__ output,
+    const float* __restrict__ input0,  // gate (x)
+    const float* __restrict__ input1,  // up (y)
+    int64_t m_size,
+    int64_t N,
+    const float limit) {
+  using bVec = at::vec::Vectorized<scalar_t>;
+  using fVec = at::vec::Vectorized<float>;
+
+  const fVec one = fVec(1.f);
+  const fVec limit_v = fVec(limit);
+  const fVec nlimit_v = fVec(-limit);
+
+  // no remainder
+  for (int64_t m = 0; m < m_size; ++m) {
+    scalar_t* __restrict__ out = output + m * N;
+    const float* __restrict__ x = input0 + m * BLOCK_N;
+    const float* __restrict__ y = input1 + m * BLOCK_N;
+
+    for (int64_t d = 0; d < BLOCK_N; d += bVec::size()) {
+      fVec x0 = fVec::loadu(x + d);
+      fVec x1 = fVec::loadu(x + d + fVec::size());
+      fVec y0 = fVec::loadu(y + d);
+      fVec y1 = fVec::loadu(y + d + fVec::size());
+      // gate clamped at upper bound; up clamped symmetrically
+      x0 = at::vec::minimum(x0, limit_v);
+      x1 = at::vec::minimum(x1, limit_v);
+      y0 = at::vec::minimum(limit_v, at::vec::maximum(nlimit_v, y0));
+      y1 = at::vec::minimum(limit_v, at::vec::maximum(nlimit_v, y1));
+      // silu(gate) * up
+      x0 = x0 / (one + x0.neg().exp_u20());
+      x1 = x1 / (one + x1.neg().exp_u20());
+      x0 = x0 * y0;
+      x1 = x1 * y1;
+      // convert
+      bVec out_vec = convert_from_float_ext<scalar_t>(x0, x1);
+      out_vec.store(out + d);
+    }
+  }
+}
+
+
+template <typename scalar_t, int BLOCK_N>
 inline void clamp_sigmoid_and_mul(
     scalar_t* __restrict__ output,
     const float* __restrict__ input0,
@@ -640,6 +684,9 @@ void fused_experts_kernel_impl(
       const int64_t offset = offsets[mb];
       if (act_func == CPUAcTMethod::silu_and_mul && use_brgemm) {
         silu_and_mul<scalar_t, BLOCK_N>(ic1 + offset * N + nb * BLOCK_N, C0, C1, m_size, N);
+      } else if (act_func == CPUAcTMethod::clamped_silu_and_mul && use_brgemm) {
+        clamped_silu_and_mul<scalar_t, BLOCK_N>(
+            ic1 + offset * N + nb * BLOCK_N, C0, C1, m_size, N, limit);
       } else if (act_func == CPUAcTMethod::swiglu) {
         clamp_sigmoid_and_mul<scalar_t, BLOCK_N>(ic1 + offset * N, C0, m_size, N, alpha, limit, 0 + nb * BLOCK_N / 2);
         clamp_sigmoid_and_mul<scalar_t, BLOCK_N>(
@@ -1146,7 +1193,12 @@ at::Tensor fused_experts_cpu(
       scalar_t* __restrict__ intermediate_cache0 = (scalar_t*)((void*)(C_tmp + num_threads * 2 * BLOCK_M * BLOCK_N));
       scalar_t* __restrict__ B_tmp = (scalar_t*)((void*)(intermediate_cache0 + M * topk * 2 * N));
       bool with_bias = w1_bias.has_value();
-      auto act_func = alpha.has_value() && limit.has_value() ? CPUAcTMethod::swiglu : CPUAcTMethod::silu_and_mul;
+      // limit + alpha ⇒ gpt-oss swiglu (with +1 linear bias).
+      // limit only    ⇒ DSV4-2604B clamped silu_and_mul (no +1 bias).
+      // neither       ⇒ plain silu_and_mul.
+      auto act_func = limit.has_value()
+          ? (alpha.has_value() ? CPUAcTMethod::swiglu : CPUAcTMethod::clamped_silu_and_mul)
+          : CPUAcTMethod::silu_and_mul;
 
       CHECK_MOE_SCALES_FP8(1, 2);
       fused_experts_fp_kernel_impl<scalar_t, at::Float8_e4m3fn, float, false>(
@@ -1186,7 +1238,12 @@ at::Tensor fused_experts_cpu(
       scalar_t* __restrict__ intermediate_cache0 = (scalar_t*)((void*)(C_tmp + num_threads * 2 * BLOCK_M * BLOCK_N));
       scalar_t* __restrict__ B_tmp = (scalar_t*)((void*)(intermediate_cache0 + M * topk * 2 * N));
       bool with_bias = w1_bias.has_value();
-      auto act_func = alpha.has_value() && limit.has_value() ? CPUAcTMethod::swiglu : CPUAcTMethod::silu_and_mul;
+      // limit + alpha ⇒ gpt-oss swiglu (with +1 linear bias).
+      // limit only    ⇒ DSV4-2604B clamped silu_and_mul (no +1 bias).
+      // neither       ⇒ plain silu_and_mul.
+      auto act_func = limit.has_value()
+          ? (alpha.has_value() ? CPUAcTMethod::swiglu : CPUAcTMethod::clamped_silu_and_mul)
+          : CPUAcTMethod::silu_and_mul;
 
       // mxfp4 supports only group size of 32 (2^5)
       constexpr int64_t group_size = 32;
@@ -1271,7 +1328,12 @@ at::Tensor fused_experts_cpu(
       scalar_t* __restrict__ A_tmp = intermediate_cache2 + M * topk * K;
       float* __restrict__ C_tmp = (float*)((void*)(A_tmp + num_threads * BLOCK_M * K));
       bool with_bias = w1_bias.has_value();
-      auto act_func = alpha.has_value() && limit.has_value() ? CPUAcTMethod::swiglu : CPUAcTMethod::silu_and_mul;
+      // limit + alpha ⇒ gpt-oss swiglu (with +1 linear bias).
+      // limit only    ⇒ DSV4-2604B clamped silu_and_mul (no +1 bias).
+      // neither       ⇒ plain silu_and_mul.
+      auto act_func = limit.has_value()
+          ? (alpha.has_value() ? CPUAcTMethod::swiglu : CPUAcTMethod::clamped_silu_and_mul)
+          : CPUAcTMethod::silu_and_mul;
 
       fused_experts_kernel_impl<scalar_t>(
           out_hidden_states.data_ptr<scalar_t>(),
