@@ -192,8 +192,10 @@ class Fp8Config(QuantizationConfig):
             if (
                 envs.SGLANG_DSV4_MODE.get() == "2604"
                 and envs.SGLANG_DSV4_FP4_EXPERTS.get()
-                and get_moe_runner_backend().is_flashinfer_mxfp4()
-                or (_is_cpu and _is_cpu_amx_available)
+                and (
+                    get_moe_runner_backend().is_flashinfer_mxfp4()
+                    or (_is_cpu and _is_cpu_amx_available)
+                )
             ):
                 from sglang.srt.layers.quantization.mxfp4_deepseek import (
                     DeepSeekMxfp4MoEMethod,
