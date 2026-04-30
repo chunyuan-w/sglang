@@ -49,6 +49,13 @@ _USE_OFFICIAL_SHUFFLE = get_bool_env_var(
     "SGLANG_MXFP4_USE_OFFICIAL_SHUFFLE", default="true"
 )
 
+# Debug toggle: replace the AMX sgl-kernel CPU MoE with a pure-torch
+# dequant->bf16 reference (see mxfp4_native_cpu.py). Used to bisect
+# whether wrong-sentence outputs come from the FP4 quant kernel itself.
+_USE_NATIVE_MXFP4_CPU = get_bool_env_var(
+    "SGLANG_NATIVE_MXFP4_MOE_CPU", default="false"
+)
+
 _is_cpu = is_cpu()
 _is_cpu_amx_available = cpu_has_amx_support()
 
@@ -224,7 +231,11 @@ class DeepSeekMxfp4MoEMethod:
     def process_weights_after_loading(self, layer: Module) -> None:
         from sglang.srt.layers.quantization.utils import reorder_w1w3_to_w3w1
 
-        if _is_cpu and _is_cpu_amx_available:      
+        if _is_cpu and _USE_NATIVE_MXFP4_CPU:
+            self._process_weights_cpu_native(layer)
+            return
+
+        if _is_cpu and _is_cpu_amx_available:
             self._process_weights_cpu(layer)
             return
 
@@ -356,6 +367,20 @@ class DeepSeekMxfp4MoEMethod:
         ):
             deepseek_v4_moe_code_path_checker.observed += 1
 
+        if getattr(layer, "_native_mxfp4_cpu", False):
+            from sglang.srt.layers.quantization.mxfp4_native_cpu import (
+                native_fused_experts_bf16_cpu,
+            )
+
+            return native_fused_experts_bf16_cpu(
+                hidden_states=x,
+                w13=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids.to(torch.int32),
+                gemm1_clamp_limit=gemm1_clamp_limit,
+            )
+
         return torch.ops.sgl_kernel.fused_experts_cpu(
             x,
             layer.w13_weight,
@@ -375,6 +400,35 @@ class DeepSeekMxfp4MoEMethod:
             gemm1_clamp_limit,
             True,  # is_vnni
         )
+
+    def _process_weights_cpu_native(self, layer: Module) -> None:
+        # Dequantize FP4 -> BF16 once here so the native forward is plain BF16
+        # matmul. Drops the FP4 packed weights and block scales from the layer.
+        from sglang.srt.layers.quantization.mxfp4_native_cpu import (
+            dequantize_mxfp4,
+        )
+
+        w13_packed = layer.w13_weight.data.view(torch.uint8)
+        w2_packed = layer.w2_weight.data.view(torch.uint8)
+        w13_scale = layer.w13_weight_scale_inv.data
+        w2_scale = layer.w2_weight_scale_inv.data
+
+        w13_bf16 = dequantize_mxfp4(w13_packed, w13_scale, torch.bfloat16).contiguous()
+        w2_bf16 = dequantize_mxfp4(w2_packed, w2_scale, torch.bfloat16).contiguous()
+
+        layer.w13_weight = Parameter(w13_bf16, requires_grad=False)
+        layer.w2_weight = Parameter(w2_bf16, requires_grad=False)
+        # Replace scale params with empty placeholders so loaders/refs don't
+        # hold on to the original FP4 scale tensors.
+        layer.w13_weight_scale_inv = Parameter(
+            torch.empty(0, dtype=torch.float32), requires_grad=False
+        )
+        layer.w2_weight_scale_inv = Parameter(
+            torch.empty(0, dtype=torch.float32), requires_grad=False
+        )
+
+        layer.use_intel_amx_backend = True
+        layer._native_mxfp4_cpu = True
 
     def _process_weights_cpu(self, layer: Module) -> None:
         kernel = torch.ops.sgl_kernel
