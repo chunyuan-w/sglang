@@ -1390,19 +1390,26 @@ class DeepseekV4DecoderLayer(nn.Module):
         if envs.SGLANG_DSV4_2604_SUBMODE.get() == "2604B":
             assert deepseek_v4_moe_code_path_checker.observed == 0
 
+        from sglang.srt.debug_utils.fingerprint import fp as _fp
+
+        _fp(f"L{self.layer_id:02d} layer_in", hidden_states)
+
         residual = hidden_states
         hidden_states, post, comb = self.hc_pre(
             hidden_states, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
         )
         hidden_states = self.input_layernorm(hidden_states)
+        _fp(f"L{self.layer_id:02d} pre_attn_norm", hidden_states)
 
         hidden_states = self.self_attn(
             x=hidden_states,
             positions=positions,
             forward_batch=forward_batch,
         )
+        _fp(f"L{self.layer_id:02d} attn_out", hidden_states)
 
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
+        _fp(f"L{self.layer_id:02d} post_attn_resid", hidden_states)
         residual = hidden_states
         hidden_states, post, comb = self.hc_pre(
             hidden_states, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
@@ -1446,6 +1453,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             input_ids=input_ids,
             input_ids_global=input_ids_global,
         )
+        _fp(f"L{self.layer_id:02d} mlp_out", hidden_states)
         # print(f"MoE layer {self.layer_id} done, observed={deepseek_v4_moe_code_path_checker.observed}", flush=True)
         if _use_tp_moe_gather:
             hidden_states, global_hidden_states = get_local_dp_buffer(), hidden_states
@@ -1457,6 +1465,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             hidden_states = torch.cat(gathered)
 
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
+        _fp(f"L{self.layer_id:02d} layer_out", hidden_states)
 
         if envs.SGLANG_DSV4_2604_SUBMODE.get() == "2604B":
             assert deepseek_v4_moe_code_path_checker.observed == 1
@@ -1569,6 +1578,10 @@ class DeepseekV4Model(nn.Module):
         hidden_states = self.embed_tokens(input_ids)
         hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)
 
+        from sglang.srt.debug_utils.fingerprint import fp as _fp
+        _fp("input_ids", input_ids)
+        _fp("embed_out", hidden_states)
+
         if get_attention_dp_size() > 1 and get_moe_a2a_backend().is_none():
             input_ids_global = torch.empty(
                 (_DpGatheredBufferWrapper._global_dp_buffer_len, 1),
@@ -1640,7 +1653,9 @@ class DeepseekV4Model(nn.Module):
         hidden_states = self.hc_head(
             hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base
         )
+        _fp("post_hc_head", hidden_states)
         hidden_states = self.norm(hidden_states)
+        _fp("final_norm", hidden_states)
 
         if pre_hc_head is not None:
             return hidden_states, pre_hc_head

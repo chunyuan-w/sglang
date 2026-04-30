@@ -501,6 +501,10 @@ class Envs:
     SGLANG_OPT_MXFP4_FUSE_RSF_SHARED_ADD = EnvBool(True)
     SGLANG_OPT_MXFP4_STATIC_SCALE_ONES = EnvBool(True)
     SGLANG_OPT_MXFP4_SKIP_DISPATCHER_MAPPING = EnvBool(True)
+    # Debug toggle: route DeepSeek MXFP4 MoE on CPU through a pure-torch
+    # dequant->bf16 reference (sglang/srt/layers/quantization/mxfp4_native_cpu.py)
+    # instead of the AMX sgl-kernel fused_experts_cpu path.
+    SGLANG_NATIVE_MXFP4_MOE_CPU = EnvBool(False)
     SGLANG_OPT_USE_JIT_INDEXER_METADATA = EnvBool(False)
     SGLANG_OPT_SWIGLU_CLAMP_FUSION = EnvBool(True)
     SGLANG_OPT_DG_PAGED_MQA_LOGITS_CHUNK_SIZE = EnvInt(-1)
