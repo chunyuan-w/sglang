@@ -162,6 +162,18 @@ def topk_transform_512_pytorch_vectorized(
     page_size: int,
     out_raw_indices: Optional[torch.Tensor] = None,
 ) -> None:
+    # CPU AMX path: dispatch to the C++ kernel which mirrors this function's
+    # semantics. Saves the per-step `aten::topk` torch hotspot in decode.
+    if scores.device.type == "cpu":
+        torch.ops.sgl_kernel.topk_transform_512_cpu(
+            scores,
+            seq_lens,
+            page_tables,
+            out_page_indices,
+            page_size,
+            out_raw_indices,
+        )
+        return
 
     TOPK = 512
     batch_size = scores.shape[0]
