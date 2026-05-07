@@ -258,6 +258,14 @@ at::Tensor shared_expert_cpu(
     const std::optional<std::vector<int64_t>> block_size,
     bool is_vnni);
 
+void topk_transform_512_cpu(
+    at::Tensor scores,
+    at::Tensor seq_lens,
+    at::Tensor page_tables,
+    at::Tensor out_page_indices,
+    int64_t page_size,
+    std::optional<at::Tensor> out_raw_indices);
+
 // weight absorption
 std::tuple<at::Tensor, at::Tensor, at::Tensor> qkv_proj_with_rope(
     at::Tensor& hidden_states,
@@ -551,6 +559,16 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
       "Tensor? "
       "w2_scale, int[]? block_size, bool is_vnni) -> Tensor");
   m.impl("shared_expert_cpu", torch::kCPU, &shared_expert_cpu);
+
+  // topk_transform_512: select top-K=512 indices per row from a [B, S]
+  // score matrix and translate them into (phys_page << page_bits) | offset
+  // using each batch's page_table. Mirrors
+  // python/sglang/srt/layers/attention/compressed/indexer.py:
+  // ``topk_transform_512_pytorch_vectorized``.
+  m.def(
+      "topk_transform_512_cpu(Tensor scores, Tensor seq_lens, Tensor page_tables, "
+      "Tensor(a!) out_page_indices, int page_size, Tensor(b!)? out_raw_indices) -> ()");
+  m.impl("topk_transform_512_cpu", torch::kCPU, &topk_transform_512_cpu);
 
   // causal conv1d
   m.def("causal_conv1d_weight_pack(Tensor weight) -> Tensor");
