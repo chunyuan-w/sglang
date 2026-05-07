@@ -157,6 +157,27 @@ def fp8_paged_mqa_logits_torch(
     return logits
 
 
+def fp8_paged_mqa_logits_cpu(
+    q_fp8: torch.Tensor,
+    kvcache_fp8: torch.Tensor,
+    weight: torch.Tensor,
+    seq_lens: torch.Tensor,
+    page_table: torch.Tensor,
+    deep_gemm_metadata: Any,
+    max_seq_len: int,
+    clean_logits: bool = True,
+) -> torch.Tensor:
+    return torch.ops.sgl_kernel.fp8_paged_mqa_logits_cpu(
+        q_fp8,
+        kvcache_fp8,
+        weight,
+        seq_lens,
+        page_table,
+        max_seq_len,
+        clean_logits,
+    )
+
+
 def topk_transform_512_pytorch_vectorized(
     scores: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -478,6 +499,8 @@ class C4IndexerBackend:
             )
         elif envs.SGLANG_FP8_PAGED_MQA_LOGITS_TORCH.get():
             fn = fp8_paged_mqa_logits_torch
+        elif _is_cpu_amx_available:
+            fn = fp8_paged_mqa_logits_cpu
         else:
             if envs.SGLANG_OPT_DG_PAGED_MQA_LOGITS_CHUNK_SIZE.get() != -1:
                 from sglang.srt.layers.deep_gemm_wrapper.paged_mqa_logits import (
