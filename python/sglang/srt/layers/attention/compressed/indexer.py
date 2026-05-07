@@ -17,7 +17,7 @@ from sglang.srt.layers.attention.indexer_topk_capturer import (
     get_global_indexer_capturer,
 )
 from sglang.srt.layers.attention.nsa.triton_kernel import act_quant
-from sglang.srt.utils import is_hip
+from sglang.srt.utils import cpu_has_amx_support, is_cpu, is_hip
 
 if TYPE_CHECKING:
     from sglang.srt.layers.attention.compressed.compressor import CompressorBackend
@@ -25,6 +25,9 @@ if TYPE_CHECKING:
     from sglang.srt.mem_cache.deepseekv4_memory_pool import DeepSeekV4TokenToKVPool
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
     from sglang.srt.models.deepseek_v4 import C4Indexer
+
+
+_is_cpu_amx_available = is_cpu() and cpu_has_amx_support()
 
 def act_quant_pytorch(
     x: torch.Tensor, block_size: int = 128, scale_fmt: Optional[str] = None
@@ -245,6 +248,24 @@ def topk_transform_512_pytorch_vectorized(
             valid_topk, raw_indices, torch.tensor(-1, device=device, dtype=torch.int32)
         )
         out_raw_indices.copy_(raw_indices)
+
+
+def topk_transform_512_cpu(
+    scores: torch.Tensor,
+    seq_lens: torch.Tensor,
+    page_tables: torch.Tensor,
+    out_page_indices: torch.Tensor,
+    page_size: int,
+    out_raw_indices: Optional[torch.Tensor] = None,
+) -> None:
+    torch.ops.sgl_kernel.topk_transform_512_cpu(
+        scores,
+        seq_lens,
+        page_tables,
+        out_page_indices,
+        page_size,
+        out_raw_indices,
+    )
 
 
 @triton.jit
@@ -513,6 +534,15 @@ class C4IndexerBackend:
                 core_metadata.c4_sparse_page_indices,
                 indexer_metadata.c4_page_size,
                 indexer_metadata.topk_metadata,
+            )
+        elif _is_cpu_amx_available:
+            topk_transform_512_cpu(
+                logits,
+                indexer_metadata.c4_seq_lens,
+                core_metadata.page_table,
+                core_metadata.c4_sparse_page_indices,
+                indexer_metadata.c4_page_size,
+                raw_indices,
             )
         else:
             topk_transform_512(
