@@ -105,6 +105,8 @@ void topk_transform_512_cpu(
     int64_t page_size,
     const std::optional<at::Tensor>& out_raw_indices);
 
+at::Tensor hadamard_transform_cpu(at::Tensor& x, double scale);
+
 at::Tensor fp8_paged_mqa_logits_cpu(
     at::Tensor& q_fp8,
     at::Tensor& kvcache_fp8,
@@ -457,6 +459,10 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
       "topk_transform_512_cpu(Tensor scores, Tensor seq_lens, Tensor page_tables, Tensor(a!) out_page_indices, "
       "int page_size, Tensor(a!)? out_raw_indices) -> ()");
   m.impl("topk_transform_512_cpu", torch::kCPU, &topk_transform_512_cpu);
+
+    // Hadamard transform
+    m.def("hadamard_transform_cpu(Tensor x, float scale) -> Tensor");
+    m.impl("hadamard_transform_cpu", torch::kCPU, &hadamard_transform_cpu);
 
   // DeepSeek V4 compressed attention FP8 paged MQA logits
   m.def(

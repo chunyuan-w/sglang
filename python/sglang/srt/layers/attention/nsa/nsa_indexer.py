@@ -19,6 +19,7 @@ from sglang.srt.utils import (
     is_npu,
     is_xpu,
     is_cpu,
+    cpu_has_amx_support,
 )
 
 global _use_multi_stream
@@ -28,6 +29,7 @@ _is_sm103 = _is_cuda and get_device_sm() == 103
 _is_npu = is_npu()
 _is_xpu = is_xpu()
 _is_cpu = is_cpu()
+_is_cpu_amx_available = _is_cpu and cpu_has_amx_support()
 _is_fp8_fnuz = is_fp8_fnuz()
 if _is_cuda:
     try:
@@ -146,9 +148,17 @@ def _torch_hadamard_transform(x: torch.Tensor, scale: float) -> torch.Tensor:
     return (out.view(*leading, n) * scale).to(x.dtype)
 
 
+def _cpu_hadamard_transform(x: torch.Tensor, scale: float) -> torch.Tensor:
+    import sgl_kernel  # noqa: F401
+
+    return torch.ops.sgl_kernel.hadamard_transform_cpu(x, scale)
+
+
 def rotate_activation(x: torch.Tensor) -> torch.Tensor:
     if _is_hip or _is_sm103:
         from fast_hadamard_transform import hadamard_transform
+    elif _is_cpu_amx_available:
+        hadamard_transform = _cpu_hadamard_transform
     elif _is_xpu or _is_cpu:
         hadamard_transform = _torch_hadamard_transform
     else:
