@@ -95,7 +95,13 @@ def act_quant_pytorch(
     return y, s
 
 
-act_quant = act_quant_pytorch
+def act_quant_cpu(
+    x: torch.Tensor, block_size: int = 128, scale_fmt: Optional[str] = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops.sgl_kernel.act_quant_cpu(x, block_size, scale_fmt)
+
+
+act_quant = act_quant_cpu if _is_cpu_amx_available else act_quant_pytorch
 
 if is_hip():
     FP8_DTYPE = torch.float8_e4m3fnuz

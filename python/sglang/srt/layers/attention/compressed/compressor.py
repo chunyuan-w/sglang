@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List, Literal, NamedTuple, Optional, Union
+from typing import TYPE_CHECKING, List, Literal, NamedTuple, Optional, Tuple, Union
 
 import torch
 
@@ -20,12 +20,16 @@ from sglang.srt.layers.attention.nsa.triton_kernel import act_quant
 from sglang.srt.layers.attention.nsa.utils import (
     assert_tensor_identical_across_cp_ranks,
 )
+from sglang.srt.utils import cpu_has_amx_support, is_cpu
 
 if TYPE_CHECKING:
     from sglang.srt.layers.attention.compressed.metadata import DeepseekV4Metadata
     from sglang.srt.mem_cache.deepseekv4_memory_pool import DeepSeekV4TokenToKVPool
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch
     from sglang.srt.models.deepseek_v4 import Compressor, DeepseekRefRMSNorm
+
+
+_is_cpu_amx_available = is_cpu() and cpu_has_amx_support()
 
 
 def act_quant_pytorch(
@@ -94,7 +98,13 @@ def act_quant_pytorch(
     return y, s
 
 
-act_quant = act_quant_pytorch
+def act_quant_cpu(
+    x: torch.Tensor, block_size: int = 128, scale_fmt: Optional[str] = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops.sgl_kernel.act_quant_cpu(x, block_size, scale_fmt)
+
+
+act_quant = act_quant_cpu if _is_cpu_amx_available else act_quant_pytorch
 
 class FusedCompressMetadata(NamedTuple):
     write_loc: torch.Tensor
