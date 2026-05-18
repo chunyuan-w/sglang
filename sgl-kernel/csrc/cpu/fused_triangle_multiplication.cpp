@@ -85,48 +85,53 @@ inline void cast_fp32_to_bf16_row(
 // mask + sigmoid_mul + split + transpose write in one pass.
 // ---------------------------------------------------------------------------
 
-// Stage A scatter.  Two perf-critical things happen here:
+// Fused Stage A: pre-einsum projection + mask + sigmoid_mul + scatter, all
+// per-(i, j_block) tile.  This is the xfold pre_einsum pattern adapted for
+// at::native::cpublas::brgemm; it eliminates the 22 GB `proj_gate` [M, 4C]
+// intermediate that the old two-step (weight_packed_linear_out + scatter)
+// path had to materialize.
 //
-//   1) Per row m=(i, j) we apply mask * sigmoid(gate) * proj to 2C bf16
-//      values.  Done with vectorized exp_u20() to avoid the scalar std::exp
-//      path that would otherwise be ~50 cycles/element on AF3 shapes.
+// Per task (i, j_block of BLOCK_J=32 cols):
+//   1) Brgemm-tile the [4C] output channels in BLOCK_N=32 chunks, writing
+//      directly into a per-thread fp32 Ctmp_full [BLOCK_J, 4C] (~64 KB).
+//      Brgemm signature is (M=BLOCK_J, N=BLOCK_N, K=C) with ldc = 4C so each
+//      call lands at the right channel offset within Ctmp_full.
+//   2) Per row r: mask_f = mask[i, j_block+r]; for each c in [0, C):
+//        a[c, i, j_block+r] = mask_f * sigmoid(gate[r, 2c])   * proj[r, 2c]
+//        b[c, i, j_block+r] = mask_f * sigmoid(gate[r, 2c+1]) * proj[r, 2c+1]
+//      Computed in fp32, stored to per-thread scratch_a / scratch_b in bf16.
+//   3) Bulk-copy each c's BLOCK_J-wide chunk into a_out / b_out so each
+//      cache line gets one full 64-byte write (no RFO amplification).
 //
-//   2) The result is split between a[c, i, j] and b[c, i, j] — i.e. 2C
-//      cache-line-spread bf16 stores per row.  We stage BLOCK_J=32 rows of
-//      a/b values in per-thread L1 scratch then bulk-memcpy each c's
-//      contig BLOCK_J chunk into a_out / b_out.  Each output cache line
-//      gets one full 64-byte write instead of 32 partial stores
-//      (which would all trigger RFOs).
-//
-//   a/b are allocated [C, N, N_pad] with N_pad = round_up(N, TILE_K=32) so
-//   the custom Stage B brgemm sees an AMX-aligned K.  This scatter writes
-//   every (i, j) position in [0, N) and zeros the per-row tail [N, N_pad)
-//   so the caller can allocate via at::empty (no pre-zero needed).
+// a/b are allocated [C, N, N_pad] with N_pad = round_up(N, TILE_K=32) so
+// Stage B's brgemm sees an AMX-aligned K.  This kernel writes every (i, j)
+// in [0, N) and zeros the per-row tail [N, N_pad); caller uses at::empty.
 template <typename scalar_t>
-void tm_pre_einsum_scatter_impl(
+void tm_pre_einsum_fused_impl(
     scalar_t* __restrict__ a_out,                        // [C, N, N_pad]
     scalar_t* __restrict__ b_out,                        // [C, N, N_pad]
-    const scalar_t* __restrict__ proj_gate,              // [M=N*N, 4C]
-    const scalar_t* __restrict__ mask,                   // [N, N]
+    const scalar_t* __restrict__ pair_normed,            // [N, N, C]  contig
+    const scalar_t* __restrict__ mask,                   // [N, N]      contig
+    const scalar_t* __restrict__ proj_gate_weight,       // packed [4C, C]
     int N,
     int N_pad,
     int C,
     void* __restrict__ buffer,
     int buffer_size_per_thread) {
   constexpr int BLOCK_J = 32;
-  const int64_t row_stride = static_cast<int64_t>(N_pad);
+  constexpr int BLOCK_N = 32;                            // 2 * TILE_N
+  const int64_t row_stride   = static_cast<int64_t>(N_pad);
   const int64_t plane_stride = static_cast<int64_t>(N) * row_stride;
   const int N_tail = N_pad - N;                          // 0..31
-  const int64_t four_C = 4 * static_cast<int64_t>(C);
-  const int twoC = 2 * C;
+  const int twoC  = 2 * C;
+  const int fourC = 4 * C;
+  const int NB    = (fourC + BLOCK_N - 1) / BLOCK_N;     // total proj+gate tiles
 
-  using bVec = at::vec::Vectorized<scalar_t>;
-  using fVec = at::vec::Vectorized<float>;
-  constexpr int kVecSize = bVec::size();
-  const fVec one(1.f);
-
-  parallel_for(N, [&](int begin, int end) {
-    int tid = get_thread_num();
+#if defined(_OPENMP)
+  #pragma omp parallel
+#endif
+  {
+    const int tid = get_thread_num();
     char* base = reinterpret_cast<char*>(buffer)
                + static_cast<size_t>(tid) * buffer_size_per_thread;
     auto bump = [&](size_t nbytes) {
@@ -135,66 +140,89 @@ void tm_pre_einsum_scatter_impl(
       return p;
     };
 
+    // Per-thread fp32 brgemm Ctmp [BLOCK_J, 4C] — holds proj (first 2C cols)
+    // and gate (next 2C cols) as the packed weight produces.
+    float* Ctmp_full =
+        reinterpret_cast<float*>(bump(sizeof(float) * BLOCK_J * fourC));
     // [C, BLOCK_J] L1 tiles for the per-c contig chunks that get bulk-copied
     // into a_out / b_out at the end of each j-block.
     scalar_t* scratch_a =
         reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * C * BLOCK_J));
     scalar_t* scratch_b =
         reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * C * BLOCK_J));
-    // [2C] tiny row tile holding mask * sigmoid(gate) * proj for one row,
-    // interleaved as the GEMM produced it (a0, b0, a1, b1, ...).
+    // [2C] interleaved (a0, b0, a1, b1, ...) row tile in bf16 — the vectorized
+    // mask*sigmoid(gate)*proj writes here, then a scalar de-interleave splits
+    // even/odd indices into scratch_a / scratch_b.
     scalar_t* row_tile =
         reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * twoC));
 
-    for (int i = begin; i < end; ++i) {
+    using bVec = at::vec::Vectorized<scalar_t>;
+    using fVec = at::vec::Vectorized<float>;
+    constexpr int kVecSize = bVec::size();  // 32 bf16 per AVX-512 vec
+    const fVec one(1.f);
+
+#if defined(_OPENMP)
+    #pragma omp for schedule(static)
+#endif
+    for (int i = 0; i < N; ++i) {
       for (int jb = 0; jb < N; jb += BLOCK_J) {
-        int jb_size = std::min(BLOCK_J, N - jb);
+        const int jb_size = std::min(BLOCK_J, N - jb);
+        const scalar_t* pn_tile = pair_normed
+            + (static_cast<int64_t>(i) * N + jb) * C;     // [jb_size, C] contig
 
-        // Phase 1: build the [C, jb_size] scratch tiles for a and b.
-        for (int jl = 0; jl < jb_size; ++jl) {
-          int64_t j = jb + jl;
-          int64_t m = static_cast<int64_t>(i) * N + j;
-          const scalar_t* proj_row = proj_gate + m * four_C;     // [0 .. 2C)
-          const scalar_t* gate_row = proj_row + twoC;            // [2C .. 4C)
-          const float mask_f = static_cast<float>(mask[m]);
+        // ----- Phase 1a: brgemm-tile the full [4C] output into Ctmp_full.
+        for (int nb_start = 0; nb_start < fourC; nb_start += BLOCK_N) {
+          at::native::cpublas::brgemm(
+              /*M*/ jb_size, /*N*/ BLOCK_N, /*K*/ C,
+              /*lda*/ C, /*ldb*/ BLOCK_N, /*ldc*/ fourC,
+              /*add_C*/ false,
+              pn_tile,
+              proj_gate_weight + static_cast<int64_t>(nb_start) * C,
+              Ctmp_full + nb_start);
+        }
+        (void)NB;  // NB derived for clarity only
+
+        // ----- Phase 1b: apply mask * sigmoid(gate) * proj per row and
+        //                de-interleave into scratch_a / scratch_b.
+        // Vectorized AVX-512 exp_u20 (~5 cycles/elem) — scalar std::exp would
+        // be ~50 cycles/elem × 2C × jb_size × N²/BLOCK_J ≈ 5 B calls/run.
+        for (int r = 0; r < jb_size; ++r) {
+          const float mask_f =
+              static_cast<float>(mask[static_cast<int64_t>(i) * N + jb + r]);
           const fVec mask_v(mask_f);
+          const float* proj_row = Ctmp_full + static_cast<int64_t>(r) * fourC;
+          const float* gate_row = proj_row + twoC;
 
-          // Vectorized: row_tile[d] = mask * sigmoid(gate_row[d]) * proj_row[d]
           int d = 0;
           for (; d <= twoC - kVecSize; d += kVecSize) {
-            bVec p_bv = bVec::loadu(proj_row + d);
-            bVec g_bv = bVec::loadu(gate_row + d);
-            fVec p0, p1, g0, g1;
-            std::tie(p0, p1) = at::vec::convert_to_float(p_bv);
-            std::tie(g0, g1) = at::vec::convert_to_float(g_bv);
+            fVec p0 = fVec::loadu(proj_row + d);
+            fVec p1 = fVec::loadu(proj_row + d + fVec::size());
+            fVec g0 = fVec::loadu(gate_row + d);
+            fVec g1 = fVec::loadu(gate_row + d + fVec::size());
             fVec s0 = one / (one + g0.neg().exp_u20());
             fVec s1 = one / (one + g1.neg().exp_u20());
             fVec r0 = mask_v * s0 * p0;
             fVec r1 = mask_v * s1 * p1;
-            bVec out = convert_from_float_ext<scalar_t>(r0, r1);
-            out.store(row_tile + d);
+            bVec out_vec = convert_from_float_ext<scalar_t>(r0, r1);
+            out_vec.store(row_tile + d);
           }
           for (; d < twoC; ++d) {
-            float g = static_cast<float>(gate_row[d]);
-            float p = static_cast<float>(proj_row[d]);
+            float p = proj_row[d];
+            float g = gate_row[d];
             float sg = 1.f / (1.f + std::exp(-g));
             row_tile[d] = static_cast<scalar_t>(mask_f * sg * p);
           }
 
-          // De-interleave row_tile[2c]   → scratch_a[c, jl]
-          //                row_tile[2c+1] → scratch_b[c, jl]
-          // Scalar; happens entirely in L1 (scratch_a/b ~16 KB total).
-          // TODO(perf-stage-a): replace with an AVX-512 deinterleave (mm512
-          // permute + 2 stores) once the rest is validated.
+          // De-interleave row_tile[2c]   → scratch_a[c, r]
+          //                row_tile[2c+1] → scratch_b[c, r]
+          // Scalar; happens entirely in L1 (scratch_a/b ~16 KB combined).
           for (int c = 0; c < C; ++c) {
-            scratch_a[c * BLOCK_J + jl] = row_tile[2 * c];
-            scratch_b[c * BLOCK_J + jl] = row_tile[2 * c + 1];
+            scratch_a[c * BLOCK_J + r] = row_tile[2 * c];
+            scratch_b[c * BLOCK_J + r] = row_tile[2 * c + 1];
           }
         }
 
-        // Phase 2: bulk-copy each c's jb_size-element chunk into a_out / b_out.
-        // For full BLOCK_J=32 bf16 this is 64 bytes per memcpy — one coalesced
-        // cache-line write, no RFO amplification.
+        // ----- Phase 2: bulk-copy each c's jb_size-element chunk into a_out / b_out.
         const size_t chunk_bytes =
             static_cast<size_t>(jb_size) * sizeof(scalar_t);
         for (int c = 0; c < C; ++c) {
@@ -211,10 +239,8 @@ void tm_pre_einsum_scatter_impl(
         }
       }
 
-      // Tail-zero pass: zero a_out[c, i, N..N_pad) and b_out[c, i, N..N_pad)
-      // so the K-padded brgemm in Stage B sees 0 contributions in the tail.
-      // Tiny (~17 elems × 128 c × 2 sides ≈ 4 KB/row), runs in parallel with
-      // the i-loop above.
+      // ----- Tail-zero: zero a_out[c, i, N..N_pad) / b_out[c, i, N..N_pad).
+      // Stage B's K-padded brgemm reads these as 0 contributions.
       if (N_tail > 0) {
         const size_t tail_bytes =
             static_cast<size_t>(N_tail) * sizeof(scalar_t);
@@ -232,7 +258,9 @@ void tm_pre_einsum_scatter_impl(
         }
       }
     }
-  });
+
+    at::native::cpublas::brgemm_release();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -538,56 +566,55 @@ at::Tensor fused_triangle_multiplication(
   auto t_start = prof ? clock::now() : clock::time_point{};
 
   const int64_t M = static_cast<int64_t>(N) * N;
-  const int64_t four_C = 4 * static_cast<int64_t>(C);
 
-  // ----- Stage A: concat (proj | gate) GEMM, pair_normed streamed once. -----
+  // ----- Stage A: fused projection + mask + sigmoid_mul + scatter. -----
+  // proj_gate is NOT materialized as a full [M, 4C] tensor (~22 GB at N=4655);
+  // it's computed per-(i, j_block) tile inside tm_pre_einsum_fused_impl and
+  // immediately consumed.  This matches xfold's pre_einsum and is what makes
+  // the kernel allocator-pattern-stable on multi-socket targets (the 22 GB
+  // intermediate was the dominant per-call transient driving the alternating
+  // fast/slow runs we observed).
   auto pair_normed_2d = pair_normed.view({M, static_cast<int64_t>(C)});
-  auto proj_gate = at::empty({M, four_C}, pair_normed.options());
   auto t_proj_gate_alloc = prof ? clock::now() : clock::time_point{};
-
-  weight_packed_linear_out(
-      proj_gate, pair_normed_2d, proj_gate_weight, /*bias=*/std::nullopt, /*is_vnni=*/true);
-  auto t_proj_gate_gemm = prof ? clock::now() : clock::time_point{};
+  auto t_proj_gate_gemm  = t_proj_gate_alloc;          // folded into stageA
 
   // a, b each [C, N, N_pad] with N_pad = round_up(N, TILE_K=32) — Stage B's
-  // brgemm needs AMX-aligned K.  Stage A scatter writes every (i, j) in
-  // [0, N) and zeros the [N, N_pad) tail per row, so at::empty is safe
-  // (no separate memset / at::zeros).
+  // brgemm needs AMX-aligned K.  Stage A writes every (i, j) in [0, N) and
+  // zeros the [N, N_pad) tail per row, so at::empty is safe (no pre-fill).
   const int N_pad = div_up(N, TILE_K) * TILE_K;
   const int num_threads = at::get_num_threads();
   auto a_tensor = at::empty({C, N, N_pad}, pair_normed.options());
   auto b_tensor = at::empty({C, N, N_pad}, pair_normed.options());
   auto t_ab_alloc = prof ? clock::now() : clock::time_point{};
 
-  // Per-thread L1 scratch for Stage A's tiled scatter.
-  //   scratch_a / scratch_b : [C, BLOCK_J=32] bf16 (~8 KB each)
-  //   row_tile              : [2C] bf16 (~256 bytes)
-  // Sized to comfortably fit in L1 across all C values supported by AF3.
+  // Per-thread scratch for the fused stage A:
+  //   Ctmp_full : [BLOCK_J=32, 4C] fp32  (32*512*4 = 64 KB at C=128)
+  //   scratch_a / scratch_b : [C, BLOCK_J] bf16  (~8 KB each)
+  //   row_tile  : [2C] bf16  (~512 bytes)
   constexpr int BLOCK_J_A = 32;
   const int per_thread_bytes_a =
+      /* Ctmp_full */ sizeof(float)    * BLOCK_J_A * (4 * C) +
       /* scratch_a */ sizeof(uint16_t) * C * BLOCK_J_A +
       /* scratch_b */ sizeof(uint16_t) * C * BLOCK_J_A +
       /* row_tile  */ sizeof(uint16_t) * 2 * C +
-      /* alignment */ 64 * 3;
+      /* alignment */ 64 * 4;
   auto buffer_a = at::empty(
       {num_threads, per_thread_bytes_a}, pair_normed.options().dtype(at::kChar));
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(
-      pair_normed.scalar_type(), "tm_pre_einsum_scatter_impl", [&] {
-        tm_pre_einsum_scatter_impl<scalar_t>(
+      pair_normed.scalar_type(), "tm_pre_einsum_fused_impl", [&] {
+        tm_pre_einsum_fused_impl<scalar_t>(
             a_tensor.data_ptr<scalar_t>(),
             b_tensor.data_ptr<scalar_t>(),
-            proj_gate.data_ptr<scalar_t>(),
+            pair_normed.data_ptr<scalar_t>(),
             mask.data_ptr<scalar_t>(),
+            proj_gate_weight.data_ptr<scalar_t>(),
             N,
             N_pad,
             C,
             buffer_a.data_ptr(),
             per_thread_bytes_a);
       });
-  // proj_gate not needed anymore.  Drop the reference so the [M, 4C] blob
-  // (~11 GB at N=4655) can be freed before Stage B's output tensor allocates.
-  proj_gate = at::Tensor();
   auto t_stage_a = prof ? clock::now() : clock::time_point{};
 
   // ----- Stage B: custom per-c brgemm with j-strip parallelism. -----
@@ -635,65 +662,35 @@ at::Tensor fused_triangle_multiplication(
       /*eps=*/1e-5);
   auto t_center_norm = prof ? clock::now() : clock::time_point{};
 
-  // ----- Stage C: out_proj GEMM + gating GEMM + (sigmoid_mul + residual). -----
-  // NOTE: tried fusing the gate GEMM into a per-tile sigmoid_mul_add kernel
-  // (saved gate_buf intermediate, ~50ms in its own timer) but it shifted
-  // the allocator/page-fault pattern and pushed Stage B + center_norm out
-  // by ~500 ms total.  tm_fused_gate_sigmoid_mul_add_impl is kept above for
-  // when we have stable buffer pools; the path below is the stable variant.
+  // ----- Stage C: out_proj GEMM + fused (gating GEMM | sigmoid_mul | residual). -----
+  // The gate GEMM is folded into the per-tile fused kernel so we don't
+  // materialize a [M, C] gate intermediate (~5.5 GB at N=4655).  Combined
+  // with the fused Stage A above, total per-call transient drops from
+  // ~55 GB to ~17 GB (matching xfold), which is the size at which the
+  // allocator stops alternating slot assignments on multi-socket targets.
   auto pair_orig_2d = pair_orig.view({M, static_cast<int64_t>(C)});
   auto out_proj_buf = at::empty({M, static_cast<int64_t>(C)}, pair_normed.options());
   weight_packed_linear_out(
       out_proj_buf, einsum_out_2d, out_proj_weight,
       /*bias=*/std::nullopt, /*is_vnni=*/true);
   auto t_out_proj_gemm = prof ? clock::now() : clock::time_point{};
-  // einsum_out no longer needed
+  // einsum_out no longer needed.
   einsum_out = at::Tensor();
 
-  auto gate_buf = at::empty({M, static_cast<int64_t>(C)}, pair_normed.options());
-  weight_packed_linear_out(
-      gate_buf, pair_normed_2d, gating_weight,
-      /*bias=*/std::nullopt, /*is_vnni=*/true);
-  auto t_gate_gemm = prof ? clock::now() : clock::time_point{};
-
-  // sigmoid(gate_buf) * out_proj_buf + pair_orig (in place over pair_orig).
+  // Fused per-tile: brgemm(pair_normed, gating_w) -> sigmoid -> mul out_proj_buf
+  // -> add into pair_orig (all in place).
   AT_DISPATCH_REDUCED_FLOATING_TYPES(
-      pair_normed.scalar_type(), "tm_post_einsum_tail_impl", [&] {
-        at::parallel_for(0, M, /*grain_size=*/256, [&](int64_t mb, int64_t me) {
-          for (int64_t m = mb; m < me; ++m) {
-            using bVec = at::vec::Vectorized<scalar_t>;
-            using fVec = at::vec::Vectorized<float>;
-            constexpr int kVecSize = bVec::size();
-            const fVec one(1.f);
-            scalar_t* po = pair_orig_2d.data_ptr<scalar_t>() + m * C;
-            const scalar_t* gb = gate_buf.data_ptr<scalar_t>() + m * C;
-            const scalar_t* op = out_proj_buf.data_ptr<scalar_t>() + m * C;
-            int d = 0;
-            for (; d <= C - kVecSize; d += kVecSize) {
-              bVec g_bv = bVec::loadu(gb + d);
-              bVec p_bv = bVec::loadu(op + d);
-              bVec o_bv = bVec::loadu(po + d);
-              fVec g0, g1, p0, p1, o0, o1;
-              std::tie(g0, g1) = at::vec::convert_to_float(g_bv);
-              std::tie(p0, p1) = at::vec::convert_to_float(p_bv);
-              std::tie(o0, o1) = at::vec::convert_to_float(o_bv);
-              fVec s0 = one / (one + g0.neg().exp_u20());
-              fVec s1 = one / (one + g1.neg().exp_u20());
-              fVec r0 = o0 + s0 * p0;
-              fVec r1 = o1 + s1 * p1;
-              bVec out_vec = convert_from_float_ext<scalar_t>(r0, r1);
-              out_vec.store(po + d);
-            }
-            for (; d < C; ++d) {
-              float g = static_cast<float>(gb[d]);
-              float p = static_cast<float>(op[d]);
-              float sg = 1.f / (1.f + std::exp(-g));
-              po[d] = static_cast<scalar_t>(static_cast<float>(po[d]) + sg * p);
-            }
-          }
-        });
+      pair_normed.scalar_type(), "tm_fused_gate_sigmoid_mul_add_impl", [&] {
+        tm_fused_gate_sigmoid_mul_add_impl<scalar_t>(
+            pair_orig_2d.data_ptr<scalar_t>(),
+            pair_normed_2d.data_ptr<scalar_t>(),
+            gating_weight.data_ptr<scalar_t>(),
+            out_proj_buf.data_ptr<scalar_t>(),
+            M,
+            C);
       });
-  auto t_stage_c = prof ? clock::now() : clock::time_point{};
+  auto t_gate_gemm = prof ? clock::now() : clock::time_point{};
+  auto t_stage_c = t_gate_gemm;
 
   if (prof) {
     auto ms = [](clock::time_point a, clock::time_point b) {
@@ -701,18 +698,14 @@ at::Tensor fused_triangle_multiplication(
     };
     std::fprintf(
         stderr,
-        "[tm] proj_gate_alloc=%6.2f proj_gate_gemm=%7.2f ab_alloc=%6.2f stageA=%7.2f "
-        "stageB=%8.2f center_norm=%7.2f out_proj_gemm=%7.2f gate_gemm=%7.2f "
-        "stageC_tail=%7.2f total=%8.2f ms\n",
-        ms(t_start,           t_proj_gate_alloc),
-        ms(t_proj_gate_alloc, t_proj_gate_gemm),
+        "[tm] ab_alloc=%6.2f stageA=%7.2f stageB=%8.2f center_norm=%7.2f "
+        "out_proj_gemm=%7.2f gate_fused_tail=%7.2f total=%8.2f ms\n",
         ms(t_proj_gate_gemm,  t_ab_alloc),
         ms(t_ab_alloc,        t_stage_a),
         ms(t_stage_a,         t_stage_b),
         ms(t_stage_b,         t_center_norm),
         ms(t_center_norm,     t_out_proj_gemm),
         ms(t_out_proj_gemm,   t_gate_gemm),
-        ms(t_gate_gemm,       t_stage_c),
         ms(t_start,           t_stage_c));
     std::fflush(stderr);
   }
