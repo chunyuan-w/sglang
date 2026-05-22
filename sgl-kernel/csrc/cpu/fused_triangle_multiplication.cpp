@@ -460,6 +460,13 @@ void tm_einsum_incoming_impl(
       scalar_t*       out_c = einsum_out + static_cast<int64_t>(c) * plane_out;
 
       // ----- Phase 1: pre-pack a[c]'s strided cols into a_vnni_global. -----
+      // Note on padding: Stage A only pads the *trailing* (j_src) axis of a/b
+      // up to N_pad; the leading (i_src) axis stays size N.  For incoming the
+      // contraction axis k maps to the leading dim, so we must pack only the
+      // first N K-rows and leave [N, N_pad) zero — reading past row N would
+      // walk into the next channel's plane.  Always zero the chunk first;
+      // then pass K=N (pack_vnni2 zero-fills the odd-K tail slot of its last
+      // row-pair, and rows >= N stay zero from the memset).
 #if defined(_OPENMP)
       #pragma omp for schedule(static)
 #endif
@@ -467,17 +474,12 @@ void tm_einsum_incoming_impl(
         const int n_start = nb * BLOCK_N;
         const int n_size  = std::min(BLOCK_N, N - n_start);
         scalar_t* vnni_chunk_ptr = a_vnni_global + nb * vnni_chunk;
-        // Zero the chunk first when the col-strip is partial — brgemm only
-        // reads the first n_size cols, but pack_vnni2 leaves the untouched
-        // cols undefined.  Matches outgoing's pack pattern.
-        if (n_size < BLOCK_N) {
-          std::memset(vnni_chunk_ptr, 0,
-                      sizeof(scalar_t) * static_cast<size_t>(vnni_chunk));
-        }
+        std::memset(vnni_chunk_ptr, 0,
+                    sizeof(scalar_t) * static_cast<size_t>(vnni_chunk));
         pack_vnni2<scalar_t>(
             /*dst*/ vnni_chunk_ptr,
             /*src*/ a_c + n_start,
-            /*K*/ N_pad,
+            /*K*/ N,
             /*N*/ n_size,
             /*ld_src*/ N_pad,
             /*ld_dst*/ BLOCK_N);
@@ -492,18 +494,23 @@ void tm_einsum_incoming_impl(
         const int m_start = mb * BLOCK_M;
         const int m_size  = std::min(BLOCK_M, N - m_start);
 
-        // Build A_scratch[m, k] = b_c[k, m_start + m].  Outer k loop walks
-        // b_c's rows (cache lines at row_stride = N_pad bytes), inner m loop
-        // scatters one bf16 per output cache line of A_scratch.  After 32
-        // outer iters each A_scratch cache line is fully populated and lives
-        // in L1/L2 for the inner brgemm loop.  K rows in [N, N_pad) are
-        // zero in b (Stage A's tail-zero), so A_scratch's K-tail is zero
-        // too — no extra zeroing needed.
-        for (int k = 0; k < N_pad; ++k) {
+        // Build A_scratch[m, k] = b_c[k, m_start + m] for k in [0, N), and
+        // zero the K-tail [N, N_pad).  Stage A's tail-zero only applies to
+        // the trailing j_src dim, not to b's leading i_src dim — that dim
+        // has size N, so reading rows in [N, N_pad) would walk past b_c's
+        // plane.  Zero K-tail lets brgemm's K=N_pad reduction see the
+        // padding rows as zero contributions.
+        for (int k = 0; k < N; ++k) {
           const scalar_t* src =
               b_c + static_cast<int64_t>(k) * N_pad + m_start;
           for (int m = 0; m < m_size; ++m) {
             A_scratch[m * N_pad + k] = src[m];
+          }
+        }
+        if (N_pad > N) {
+          for (int m = 0; m < m_size; ++m) {
+            std::memset(A_scratch + m * N_pad + N, 0,
+                        sizeof(scalar_t) * static_cast<size_t>(N_pad - N));
           }
         }
 
