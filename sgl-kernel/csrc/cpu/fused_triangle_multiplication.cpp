@@ -263,186 +263,6 @@ void tm_pre_einsum_fused_impl(
   }
 }
 
-// ---------------------------------------------------------------------------
-// Stage A (incoming variant): same Stage A math, but writes a/b transposed
-// so the K dim ends up trailing in storage for the incoming equation
-// (ckj,cki->cij).  Concretely:
-//
-//   outgoing layout: a_out[c, i_src, j_src]   (K = j_src trailing, padded)
-//   incoming layout: a_out[c, j_src, i_src]   (K = i_src trailing, padded)
-//
-// With this layout, Stage B is reused unchanged — the wrapper just calls it
-// with the a/b pointers swapped, which turns its
-//     out[c, m, n] = sum_k A_arg[c, m, k] * B_arg[c, n, k]
-// into the incoming equation
-//     out[c, i, j] = sum_k a[c, k, j] * b[c, k, i]   (m=i, n=j).
-//
-// Implementation:
-//   Outer parallelism is 2D over (ib_block × jb_block) of size BLOCK_I ×
-//   BLOCK_J = 32 × 32 (BLOCK_I = TILE_K, so the rightmost ib block's tail
-//   [N, N_pad) is exactly the rest of one cache line).  Per tile, the inner
-//   `ii` loop walks the BLOCK_I source rows of pair_normed and de-interleaves
-//   into a per-thread tile buffer in [C, BLOCK_J, BLOCK_I] layout.  The
-//   de-interleave writes are scattered across cache lines (one bf16 per ii
-//   per (c, r) cell), but the tile fits in L2 and across the BLOCK_I ii
-//   iters the same lines are re-touched, so most writes hit L1/L2.  After
-//   the tile completes, each (c, r) slot holds one cache line ready to
-//   bulk-memcpy into a_out[c, j_start+r, i_start..].  The rightmost ib
-//   tile extends the memcpy with a memset for the i_src tail [N, N_pad),
-//   exactly mirroring the outgoing kernel's per-row tail zero.
-// ---------------------------------------------------------------------------
-
-template <typename scalar_t>
-void tm_pre_einsum_fused_incoming_impl(
-    scalar_t* __restrict__ a_out,                        // [C, N, N_pad]  (j_src, i_src)
-    scalar_t* __restrict__ b_out,                        // [C, N, N_pad]
-    const scalar_t* __restrict__ pair_normed,            // [N, N, C]  contig
-    const scalar_t* __restrict__ mask,                   // [N, N]      contig
-    const scalar_t* __restrict__ proj_gate_weight,       // packed [4C, C]
-    int N,
-    int N_pad,
-    int C,
-    void* __restrict__ buffer,
-    int buffer_size_per_thread) {
-  constexpr int BLOCK_I = 32;                            // = TILE_K, aligns tail to one cache line
-  constexpr int BLOCK_J = 32;
-  constexpr int BLOCK_N = 32;                            // proj/gate sub-tile width
-  const int64_t row_stride   = static_cast<int64_t>(N_pad);
-  const int64_t plane_stride = static_cast<int64_t>(N) * row_stride;
-  const int twoC  = 2 * C;
-  const int fourC = 4 * C;
-  const int N_tail = N_pad - N;                          // 0..BLOCK_I-1
-
-  const int NI = div_up(N, BLOCK_I);
-  const int NJ = div_up(N, BLOCK_J);
-
-  parallel_2d(NI, NJ, [&](int begin_ib, int end_ib, int begin_jb, int end_jb) {
-    const int tid = get_thread_num();
-    char* base = reinterpret_cast<char*>(buffer)
-               + static_cast<size_t>(tid) * buffer_size_per_thread;
-    auto bump = [&](size_t nbytes) {
-      void* p = base;
-      base += (nbytes + 63) & ~size_t{63};
-      return p;
-    };
-
-    // Per-thread fp32 brgemm Ctmp [BLOCK_J, 4C] — same as outgoing.
-    float* Ctmp_full =
-        reinterpret_cast<float*>(bump(sizeof(float) * BLOCK_J * fourC));
-    // Interleaved (a0, b0, a1, b1, ...) row tile in bf16 — same as outgoing.
-    scalar_t* row_tile =
-        reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * twoC));
-    // Per-tile [C, BLOCK_J, BLOCK_I] accumulator for the transposed write.
-    // ~256 KB each — fits in L2 (1.25–2 MB on SKX/SPR).  Larger than the
-    // outgoing scratch_a/b ([C, BLOCK_J] = 16 KB each) but unavoidable: the
-    // i_src dim must be contiguous for the bulk-memcpy, and accumulating
-    // across BLOCK_I inner iters is what amortizes the cache-line fills.
-    scalar_t* tile_a =
-        reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * C * BLOCK_J * BLOCK_I));
-    scalar_t* tile_b =
-        reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * C * BLOCK_J * BLOCK_I));
-
-    using bVec = at::vec::Vectorized<scalar_t>;
-    using fVec = at::vec::Vectorized<float>;
-    constexpr int kVecSize = bVec::size();
-    const fVec one(1.f);
-
-    for (int ib = begin_ib; ib < end_ib; ++ib) {
-      const int i_start = ib * BLOCK_I;
-      const int ib_size = std::min(BLOCK_I, N - i_start);
-      // The rightmost ib block has i_start + BLOCK_I == N_pad exactly
-      // (because BLOCK_I = TILE_K and N_pad = div_up(N, TILE_K) * TILE_K).
-      // Extending the bulk-memcpy with a memset for the [N, N_pad) tail
-      // mirrors the outgoing kernel's `tail_bytes` pass.
-      const bool is_rightmost_ib = (i_start + BLOCK_I) == N_pad;
-      const size_t valid_bytes = static_cast<size_t>(ib_size) * sizeof(scalar_t);
-      const size_t tail_bytes  = is_rightmost_ib
-          ? static_cast<size_t>(N_tail) * sizeof(scalar_t)
-          : 0;
-
-      for (int jb = begin_jb; jb < end_jb; ++jb) {
-        const int j_start = jb * BLOCK_J;
-        const int jb_size = std::min(BLOCK_J, N - j_start);
-
-        // ----- Per inner ii: brgemm + vec sigmoid_mul + scatter into tile_a/b.
-        for (int ii = 0; ii < ib_size; ++ii) {
-          const int i_src = i_start + ii;
-          const scalar_t* pn_tile = pair_normed
-              + (static_cast<int64_t>(i_src) * N + j_start) * C;     // [jb_size, C]
-
-          for (int nb_start = 0; nb_start < fourC; nb_start += BLOCK_N) {
-            at::native::cpublas::brgemm(
-                /*M*/ jb_size, /*N*/ BLOCK_N, /*K*/ C,
-                /*lda*/ C, /*ldb*/ BLOCK_N, /*ldc*/ fourC,
-                /*add_C*/ false,
-                pn_tile,
-                proj_gate_weight + static_cast<int64_t>(nb_start) * C,
-                Ctmp_full + nb_start);
-          }
-
-          for (int r = 0; r < jb_size; ++r) {
-            const float mask_f =
-                static_cast<float>(mask[static_cast<int64_t>(i_src) * N + j_start + r]);
-            const fVec mask_v(mask_f);
-            const float* proj_row = Ctmp_full + static_cast<int64_t>(r) * fourC;
-            const float* gate_row = proj_row + twoC;
-
-            int d = 0;
-            for (; d <= twoC - kVecSize; d += kVecSize) {
-              fVec p0 = fVec::loadu(proj_row + d);
-              fVec p1 = fVec::loadu(proj_row + d + fVec::size());
-              fVec g0 = fVec::loadu(gate_row + d);
-              fVec g1 = fVec::loadu(gate_row + d + fVec::size());
-              fVec s0 = one / (one + g0.neg().exp_u20());
-              fVec s1 = one / (one + g1.neg().exp_u20());
-              fVec r0 = mask_v * s0 * p0;
-              fVec r1 = mask_v * s1 * p1;
-              bVec out_vec = convert_from_float_ext<scalar_t>(r0, r1);
-              out_vec.store(row_tile + d);
-            }
-            for (; d < twoC; ++d) {
-              float p = proj_row[d];
-              float g = gate_row[d];
-              float sg = 1.f / (1.f + std::exp(-g));
-              row_tile[d] = static_cast<scalar_t>(mask_f * sg * p);
-            }
-
-            // De-interleave into tile_a/b[c, r, ii] — one bf16 per (c, r) per
-            // ii.  Writes are scattered across L2 cache lines, but BLOCK_I
-            // successive ii iters re-touch the same lines so after the first
-            // ii most writes are L1/L2 hits.
-            for (int c = 0; c < C; ++c) {
-              tile_a[(c * BLOCK_J + r) * BLOCK_I + ii] = row_tile[2 * c];
-              tile_b[(c * BLOCK_J + r) * BLOCK_I + ii] = row_tile[2 * c + 1];
-            }
-          }
-        }
-
-        // ----- Bulk-copy each (c, r) cache line into a_out / b_out, with the
-        // i_src tail [N, N_pad) zeroed on the rightmost ib block.
-        for (int c = 0; c < C; ++c) {
-          for (int r = 0; r < jb_size; ++r) {
-            scalar_t* a_dst = a_out
-                + static_cast<int64_t>(c) * plane_stride
-                + static_cast<int64_t>(j_start + r) * row_stride
-                + i_start;
-            scalar_t* b_dst = b_out
-                + static_cast<int64_t>(c) * plane_stride
-                + static_cast<int64_t>(j_start + r) * row_stride
-                + i_start;
-            std::memcpy(a_dst, tile_a + (c * BLOCK_J + r) * BLOCK_I, valid_bytes);
-            std::memcpy(b_dst, tile_b + (c * BLOCK_J + r) * BLOCK_I, valid_bytes);
-            if (tail_bytes > 0) {
-              std::memset(a_dst + ib_size, 0, tail_bytes);
-              std::memset(b_dst + ib_size, 0, tail_bytes);
-            }
-          }
-        }
-      }
-    }
-    at::native::cpublas::brgemm_release();
-  });
-}
 
 // ---------------------------------------------------------------------------
 // Stage B: einsum core, custom per-c brgemm with j-strip parallelism.
@@ -560,6 +380,155 @@ void tm_einsum_outgoing_impl(
       }
       // Implicit barrier at end of `omp for` so all threads finish this c
       // before a[c+1] is accessed.
+    }
+
+    at::native::cpublas::brgemm_release();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Stage B (incoming variant): same outgoing-layout a/b but compute the
+// transposed einsum
+//     out[c, i, j] = sum_k a[c, k, j] * b[c, k, i]    (ckj,cki->cij)
+// by reading b's and a's columns instead of rows.  Writing Stage A in
+// transposed layout would mean strided DRAM *writes* (~1–2 GB/s realized
+// because every (c, r) write is in a different DRAM row); reading instead
+// lets the hardware streamer prefetch the strided pattern, which is much
+// closer to streaming bandwidth.
+//
+// Per c:
+//   Phase 1 — pre-pack a[c]'s strided cols globally.  Each nb task uses
+//     pack_vnni2 to read `a_c + nb*BLOCK_N` with ld_src=N_pad (i.e., col-strip
+//     of BLOCK_N cols across all N_pad rows = a's contraction axis) and
+//     writes a [N_pad/2, BLOCK_N, 2] VNNI chunk into a_vnni_global[nb].
+//     Done once per c, shared across all mb tasks via L3.
+//   Phase 2 — parallel over mb.  Each task:
+//     · Builds A_scratch[m, k] = b_c[k * N_pad + m_start + m] for
+//       m ∈ [0, m_size), k ∈ [0, N_pad).  Strided cache-line reads from b
+//       (prefetcher-friendly); writes into the per-thread A_scratch
+//       ([BLOCK_M, N_pad] ≈ 300 KB, L2-resident through the inner nb loop).
+//     · Inner nb loop runs brgemm(A=A_scratch, B=a_vnni_chunk[nb], C=Ctmp)
+//       then casts/stores the BLOCK_M × n_size tile into einsum_out.
+//
+// Output stays in [C, N, N] CHW exactly like outgoing; the wrapper handles
+// the permute+contig.
+// ---------------------------------------------------------------------------
+
+template <typename scalar_t>
+void tm_einsum_incoming_impl(
+    scalar_t* __restrict__ einsum_out,                   // [C, N, N]
+    const scalar_t* __restrict__ a,                      // [C, N, N_pad]  outgoing-layout
+    const scalar_t* __restrict__ b,                      // [C, N, N_pad]
+    int N,
+    int N_pad,
+    int C,
+    void* __restrict__ buffer,                            // per-thread scratch
+    int buffer_size_per_thread,
+    scalar_t* __restrict__ a_vnni_global) {              // shared [NB * N_pad * BLOCK_N]
+  constexpr int BLOCK_N = 32;
+  constexpr int BLOCK_M = 32;
+  const int NB = div_up(N, BLOCK_N);
+  const int MB = div_up(N, BLOCK_M);
+
+  const int64_t plane_in   = static_cast<int64_t>(N) * N_pad;
+  const int64_t plane_out  = static_cast<int64_t>(N) * N;
+  const int64_t vnni_chunk = static_cast<int64_t>(N_pad) * BLOCK_N;
+
+#if defined(_OPENMP)
+  #pragma omp parallel
+#endif
+  {
+    const int tid = get_thread_num();
+    char* base = reinterpret_cast<char*>(buffer)
+               + static_cast<size_t>(tid) * buffer_size_per_thread;
+    auto bump = [&](size_t nbytes) {
+      void* p = base;
+      base += (nbytes + 63) & ~size_t{63};
+      return p;
+    };
+    // A_scratch: [BLOCK_M, N_pad] row-major.  Same byte footprint as
+    // outgoing's b_vnni (~300 KB) so the per-thread scratch budget is the
+    // same; we just use the budget for a different layout.
+    scalar_t* A_scratch =
+        reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * BLOCK_M * N_pad));
+    float* Ctmp =
+        reinterpret_cast<float*>(bump(sizeof(float) * BLOCK_M * BLOCK_N));
+
+    for (int c = 0; c < C; ++c) {
+      const scalar_t* a_c   = a + static_cast<int64_t>(c) * plane_in;
+      const scalar_t* b_c   = b + static_cast<int64_t>(c) * plane_in;
+      scalar_t*       out_c = einsum_out + static_cast<int64_t>(c) * plane_out;
+
+      // ----- Phase 1: pre-pack a[c]'s strided cols into a_vnni_global. -----
+#if defined(_OPENMP)
+      #pragma omp for schedule(static)
+#endif
+      for (int nb = 0; nb < NB; ++nb) {
+        const int n_start = nb * BLOCK_N;
+        const int n_size  = std::min(BLOCK_N, N - n_start);
+        scalar_t* vnni_chunk_ptr = a_vnni_global + nb * vnni_chunk;
+        // Zero the chunk first when the col-strip is partial — brgemm only
+        // reads the first n_size cols, but pack_vnni2 leaves the untouched
+        // cols undefined.  Matches outgoing's pack pattern.
+        if (n_size < BLOCK_N) {
+          std::memset(vnni_chunk_ptr, 0,
+                      sizeof(scalar_t) * static_cast<size_t>(vnni_chunk));
+        }
+        pack_vnni2<scalar_t>(
+            /*dst*/ vnni_chunk_ptr,
+            /*src*/ a_c + n_start,
+            /*K*/ N_pad,
+            /*N*/ n_size,
+            /*ld_src*/ N_pad,
+            /*ld_dst*/ BLOCK_N);
+      }
+      // implicit barrier — all a_vnni chunks ready before Phase 2.
+
+      // ----- Phase 2: parallel over mb.  Build A_scratch, then inner nb. ---
+#if defined(_OPENMP)
+      #pragma omp for schedule(static)
+#endif
+      for (int mb = 0; mb < MB; ++mb) {
+        const int m_start = mb * BLOCK_M;
+        const int m_size  = std::min(BLOCK_M, N - m_start);
+
+        // Build A_scratch[m, k] = b_c[k, m_start + m].  Outer k loop walks
+        // b_c's rows (cache lines at row_stride = N_pad bytes), inner m loop
+        // scatters one bf16 per output cache line of A_scratch.  After 32
+        // outer iters each A_scratch cache line is fully populated and lives
+        // in L1/L2 for the inner brgemm loop.  K rows in [N, N_pad) are
+        // zero in b (Stage A's tail-zero), so A_scratch's K-tail is zero
+        // too — no extra zeroing needed.
+        for (int k = 0; k < N_pad; ++k) {
+          const scalar_t* src =
+              b_c + static_cast<int64_t>(k) * N_pad + m_start;
+          for (int m = 0; m < m_size; ++m) {
+            A_scratch[m * N_pad + k] = src[m];
+          }
+        }
+
+        for (int nb = 0; nb < NB; ++nb) {
+          const int n_start = nb * BLOCK_N;
+          const int n_size  = std::min(BLOCK_N, N - n_start);
+          const scalar_t* vnni_chunk_ptr = a_vnni_global + nb * vnni_chunk;
+
+          at::native::cpublas::brgemm(
+              /*M*/ m_size, /*N*/ n_size, /*K*/ N_pad,
+              /*lda*/ N_pad, /*ldb*/ BLOCK_N, /*ldc*/ BLOCK_N,
+              /*add_C*/ false,
+              A_scratch,
+              vnni_chunk_ptr,
+              Ctmp);
+
+          for (int r = 0; r < m_size; ++r) {
+            cast_fp32_to_bf16_row<scalar_t>(
+                out_c + static_cast<int64_t>(m_start + r) * N + n_start,
+                Ctmp + static_cast<int64_t>(r) * BLOCK_N,
+                n_size);
+          }
+        }
+      }
+      // implicit barrier — all output tiles for this c done before next c.
     }
 
     at::native::cpublas::brgemm_release();
@@ -727,9 +696,11 @@ at::Tensor fused_triangle_multiplication(
   CHECK_DIM(3, pair_normed);
   CHECK_DIM(2, mask);
   TORCH_CHECK(is_vnni, "fused_triangle_multiplication currently requires pre-packed weights (is_vnni=True).");
-  // Incoming (ckj,cki->cij) is handled by writing a/b transposed in Stage A
-  // so the K dim is still trailing in storage; Stage B is then reused with
-  // the a/b pointers swapped.  See tm_pre_einsum_fused_incoming_impl.
+  // Both equations share Stage A (outgoing-layout a/b).  For incoming
+  // (ckj,cki->cij) Stage B switches to tm_einsum_incoming_impl, which builds
+  // its A_scratch and B_vnni by reading transposed strips of b and a — the
+  // strided reads are hardware-prefetcher-friendly, unlike a strided-write
+  // Stage A would be.
 
   const int N = static_cast<int>(pair_orig.size(0));
   const int N2 = static_cast<int>(pair_orig.size(1));
@@ -767,88 +738,91 @@ at::Tensor fused_triangle_multiplication(
   auto b_tensor = at::empty({C, N, N_pad}, pair_normed.options());
   auto t_ab_alloc = prof ? clock::now() : clock::time_point{};
 
-  // Per-thread scratch for the fused stage A.  The incoming variant carries
-  // a [C, BLOCK_J, BLOCK_I] tile (~256 KB each for a/b) instead of the
-  // outgoing variant's [C, BLOCK_J] de-interleave scratch (~8 KB each), so
-  // size the buffer for whichever path will run.
+  // Per-thread scratch for the fused stage A:
+  //   Ctmp_full : [BLOCK_J=32, 4C] fp32  (32*512*4 = 64 KB at C=128)
+  //   scratch_a / scratch_b : [C, BLOCK_J] bf16  (~8 KB each)
+  //   row_tile  : [2C] bf16  (~512 bytes)
+  // Both directions share the same Stage A: a/b are written in
+  // [C, i_src, j_src=N_pad-padded] outgoing-layout.  Incoming pays its cost
+  // in Stage B's transpose-on-read, which is DRAM-friendlier than the
+  // strided-write equivalent in Stage A.
   constexpr int BLOCK_J_A = 32;
-  constexpr int BLOCK_I_A = 32;
-  const int per_thread_bytes_a = outgoing
-      ? (/* Ctmp_full */ sizeof(float)    * BLOCK_J_A * (4 * C) +
-         /* scratch_a */ sizeof(uint16_t) * C * BLOCK_J_A +
-         /* scratch_b */ sizeof(uint16_t) * C * BLOCK_J_A +
-         /* row_tile  */ sizeof(uint16_t) * 2 * C +
-         /* alignment */ 64 * 4)
-      : (/* Ctmp_full */ sizeof(float)    * BLOCK_J_A * (4 * C) +
-         /* row_tile  */ sizeof(uint16_t) * 2 * C +
-         /* tile_a    */ sizeof(uint16_t) * C * BLOCK_J_A * BLOCK_I_A +
-         /* tile_b    */ sizeof(uint16_t) * C * BLOCK_J_A * BLOCK_I_A +
-         /* alignment */ 64 * 4);
+  const int per_thread_bytes_a =
+      /* Ctmp_full */ sizeof(float)    * BLOCK_J_A * (4 * C) +
+      /* scratch_a */ sizeof(uint16_t) * C * BLOCK_J_A +
+      /* scratch_b */ sizeof(uint16_t) * C * BLOCK_J_A +
+      /* row_tile  */ sizeof(uint16_t) * 2 * C +
+      /* alignment */ 64 * 4;
   auto buffer_a = at::empty(
       {num_threads, per_thread_bytes_a}, pair_normed.options().dtype(at::kChar));
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(
       pair_normed.scalar_type(), "tm_pre_einsum_fused_impl", [&] {
-        if (outgoing) {
-          tm_pre_einsum_fused_impl<scalar_t>(
-              a_tensor.data_ptr<scalar_t>(),
-              b_tensor.data_ptr<scalar_t>(),
-              pair_normed.data_ptr<scalar_t>(),
-              mask.data_ptr<scalar_t>(),
-              proj_gate_weight.data_ptr<scalar_t>(),
-              N,
-              N_pad,
-              C,
-              buffer_a.data_ptr(),
-              per_thread_bytes_a);
-        } else {
-          tm_pre_einsum_fused_incoming_impl<scalar_t>(
-              a_tensor.data_ptr<scalar_t>(),
-              b_tensor.data_ptr<scalar_t>(),
-              pair_normed.data_ptr<scalar_t>(),
-              mask.data_ptr<scalar_t>(),
-              proj_gate_weight.data_ptr<scalar_t>(),
-              N,
-              N_pad,
-              C,
-              buffer_a.data_ptr(),
-              per_thread_bytes_a);
-        }
+        tm_pre_einsum_fused_impl<scalar_t>(
+            a_tensor.data_ptr<scalar_t>(),
+            b_tensor.data_ptr<scalar_t>(),
+            pair_normed.data_ptr<scalar_t>(),
+            mask.data_ptr<scalar_t>(),
+            proj_gate_weight.data_ptr<scalar_t>(),
+            N,
+            N_pad,
+            C,
+            buffer_a.data_ptr(),
+            per_thread_bytes_a);
       });
   auto t_stage_a = prof ? clock::now() : clock::time_point{};
 
   // ----- Stage B: custom per-c brgemm with j-strip parallelism. -----
-  // Per-thread scratch: VNNI-packed 32-col strip of b (~300 KB) + Ctmp.
+  // Per-thread scratch: outgoing uses VNNI-packed 32-col strip of b
+  // (N_pad × BLOCK_N bf16 ≈ 300 KB); incoming uses A_scratch [BLOCK_M, N_pad]
+  // bf16 with the same byte footprint, so one sizing covers both.
   constexpr int BLOCK_N_B = 32;
   constexpr int BLOCK_M_B = 32;
   const int per_thread_bytes_b =
-      /* b_vnni */ sizeof(uint16_t) * N_pad * BLOCK_N_B +
-      /* Ctmp   */ sizeof(float)    * BLOCK_M_B * BLOCK_N_B +
-      /* align  */ 64 * 3;
+      /* b_vnni | A_scratch */ sizeof(uint16_t) * N_pad * BLOCK_N_B +
+      /* Ctmp               */ sizeof(float)    * BLOCK_M_B * BLOCK_N_B +
+      /* align              */ 64 * 3;
   auto buffer_b = at::empty(
       {num_threads, per_thread_bytes_b}, pair_normed.options().dtype(at::kChar));
 
   auto einsum_out_chw = at::empty({C, N, N}, pair_normed.options());
 
-  // For incoming, swap A/B pointers: Stage B computes
-  //   out[c, m, n] = sum_k A_arg[c, m, k] * B_arg[c, n, k]
-  // With (A=b_inc, B=a_inc) and incoming's transposed Stage A layout where
-  // a_inc[c, j_src, i_src] = (a value at pair[i_src, j_src]), this evaluates
-  // to sum_k a[c, k, n] * b[c, k, m] which equals the incoming einsum
-  // ckj,cki->cij at (i=m, j=n).
+  // For incoming, a separate shared VNNI scratch holds one c's worth of
+  // pre-packed a-cols (~22 MB at N=4655); rewritten per c, so the transient
+  // stays under L3 and well below the 22 GB threshold that triggered the
+  // bimodal allocator behavior the user's notes describe.
+  const int NB_B = div_up(N, BLOCK_N_B);
+  at::Tensor a_vnni_global;
+  if (!outgoing) {
+    a_vnni_global = at::empty(
+        {static_cast<int64_t>(NB_B) * N_pad * BLOCK_N_B},
+        pair_normed.options());
+  }
+
   AT_DISPATCH_REDUCED_FLOATING_TYPES(
-      pair_normed.scalar_type(), "tm_einsum_outgoing_impl", [&] {
-        tm_einsum_outgoing_impl<scalar_t>(
-            einsum_out_chw.data_ptr<scalar_t>(),
-            outgoing ? a_tensor.data_ptr<scalar_t>()
-                     : b_tensor.data_ptr<scalar_t>(),
-            outgoing ? b_tensor.data_ptr<scalar_t>()
-                     : a_tensor.data_ptr<scalar_t>(),
-            N,
-            N_pad,
-            C,
-            buffer_b.data_ptr(),
-            per_thread_bytes_b);
+      pair_normed.scalar_type(), "tm_einsum_impl", [&] {
+        if (outgoing) {
+          tm_einsum_outgoing_impl<scalar_t>(
+              einsum_out_chw.data_ptr<scalar_t>(),
+              a_tensor.data_ptr<scalar_t>(),
+              b_tensor.data_ptr<scalar_t>(),
+              N,
+              N_pad,
+              C,
+              buffer_b.data_ptr(),
+              per_thread_bytes_b);
+        } else {
+          tm_einsum_incoming_impl<scalar_t>(
+              einsum_out_chw.data_ptr<scalar_t>(),
+              a_tensor.data_ptr<scalar_t>(),
+              b_tensor.data_ptr<scalar_t>(),
+              N,
+              N_pad,
+              C,
+              buffer_b.data_ptr(),
+              per_thread_bytes_b,
+              a_vnni_global.data_ptr<scalar_t>());
+        }
       });
   // Drop a and b — Stage C doesn't need them.
   a_tensor = at::Tensor();
