@@ -173,7 +173,7 @@ at::Tensor fused_grid_attention_v5(
 at::Tensor fused_triangle_multiplication(
     at::Tensor& pair_orig,
     at::Tensor& pair_normed,
-    at::Tensor& mask,
+    const std::optional<at::Tensor>& mask,
     at::Tensor& proj_gate_weight,
     at::Tensor& center_norm_weight,
     const std::optional<at::Tensor>& center_norm_bias,
@@ -506,7 +506,7 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   // - pair_normed = left_norm(pair_orig) is computed in the Python wrapper
   // - center_norm is applied inside the kernel between Stages B and C
   m.def(
-      "fused_triangle_multiplication(Tensor(a!) pair_orig, Tensor pair_normed, Tensor mask, "
+      "fused_triangle_multiplication(Tensor(a!) pair_orig, Tensor pair_normed, Tensor? mask, "
       "Tensor proj_gate_weight, Tensor center_norm_weight, Tensor? center_norm_bias, "
       "Tensor out_proj_weight, Tensor gating_weight, bool outgoing, bool is_vnni) -> Tensor");
   m.impl("fused_triangle_multiplication", torch::kCPU, &fused_triangle_multiplication);

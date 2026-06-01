@@ -106,12 +106,12 @@ inline void cast_fp32_to_bf16_row(
 // a/b are allocated [C, N, N_pad] with N_pad = round_up(N, TILE_K=32) so
 // Stage B's brgemm sees an AMX-aligned K.  This kernel writes every (i, j)
 // in [0, N) and zeros the per-row tail [N, N_pad); caller uses at::empty.
-template <typename scalar_t>
+template <typename scalar_t, bool HAS_MASK>
 void tm_pre_einsum_fused_impl(
     scalar_t* __restrict__ a_out,                        // [C, N, N_pad]
     scalar_t* __restrict__ b_out,                        // [C, N, N_pad]
     const scalar_t* __restrict__ pair_normed,            // [N, N, C]  contig
-    const scalar_t* __restrict__ mask,                   // [N, N]      contig
+    const scalar_t* __restrict__ mask,                   // [N, N] contig; ignored when HAS_MASK==false
     const scalar_t* __restrict__ proj_gate_weight,       // packed [4C, C]
     int N,
     int N_pad,
@@ -187,9 +187,12 @@ void tm_pre_einsum_fused_impl(
         // Vectorized AVX-512 exp_u20 (~5 cycles/elem) — scalar std::exp would
         // be ~50 cycles/elem × 2C × jb_size × N²/BLOCK_J ≈ 5 B calls/run.
         for (int r = 0; r < jb_size; ++r) {
-          const float mask_f =
-              static_cast<float>(mask[static_cast<int64_t>(i) * N + jb + r]);
-          const fVec mask_v(mask_f);
+          // HAS_MASK==false => mask all-ones (e.g. pad_to_buckets=False): the
+          // [N, N] load and the mask multiply below are removed at compile time.
+          float mask_f = 1.0f;
+          if constexpr (HAS_MASK) {
+            mask_f = static_cast<float>(mask[static_cast<int64_t>(i) * N + jb + r]);
+          }
           const float* proj_row = Ctmp_full + static_cast<int64_t>(r) * fourC;
           const float* gate_row = proj_row + twoC;
 
@@ -201,8 +204,13 @@ void tm_pre_einsum_fused_impl(
             fVec g1 = fVec::loadu(gate_row + d + fVec::size());
             fVec s0 = one / (one + g0.neg().exp_u20());
             fVec s1 = one / (one + g1.neg().exp_u20());
-            fVec r0 = mask_v * s0 * p0;
-            fVec r1 = mask_v * s1 * p1;
+            fVec r0 = s0 * p0;
+            fVec r1 = s1 * p1;
+            if constexpr (HAS_MASK) {
+              const fVec mask_v(mask_f);  // loop-invariant; hoisted out of the d-loop
+              r0 = mask_v * r0;
+              r1 = mask_v * r1;
+            }
             bVec out_vec = convert_from_float_ext<scalar_t>(r0, r1);
             out_vec.store(row_tile + d);
           }
@@ -210,7 +218,11 @@ void tm_pre_einsum_fused_impl(
             float p = proj_row[d];
             float g = gate_row[d];
             float sg = 1.f / (1.f + std::exp(-g));
-            row_tile[d] = static_cast<scalar_t>(mask_f * sg * p);
+            float val = sg * p;
+            if constexpr (HAS_MASK) {
+              val *= mask_f;
+            }
+            row_tile[d] = static_cast<scalar_t>(val);
           }
 
           // De-interleave row_tile[2c]   → scratch_a[c, r]
@@ -679,7 +691,7 @@ void layernorm_cpu(
 at::Tensor fused_triangle_multiplication(
     at::Tensor& pair_orig,
     at::Tensor& pair_normed,
-    at::Tensor& mask,
+    const std::optional<at::Tensor>& mask,
     at::Tensor& proj_gate_weight,
     at::Tensor& center_norm_weight,
     const std::optional<at::Tensor>& center_norm_bias,
@@ -690,18 +702,16 @@ at::Tensor fused_triangle_multiplication(
   RECORD_FUNCTION(
       "sgl_kernel::fused_triangle_multiplication",
       std::vector<c10::IValue>(
-          {pair_orig, pair_normed, mask, proj_gate_weight, out_proj_weight, gating_weight, outgoing}));
+          {pair_orig, pair_normed, proj_gate_weight, out_proj_weight, gating_weight, outgoing}));
 
   CHECK_INPUT(pair_orig);
   CHECK_INPUT(pair_normed);
-  CHECK_INPUT(mask);
   CHECK_INPUT(proj_gate_weight);
   CHECK_INPUT(out_proj_weight);
   CHECK_INPUT(gating_weight);
   CHECK_INPUT(center_norm_weight);
   CHECK_DIM(3, pair_orig);
   CHECK_DIM(3, pair_normed);
-  CHECK_DIM(2, mask);
   TORCH_CHECK(is_vnni, "fused_triangle_multiplication currently requires pre-packed weights (is_vnni=True).");
   // Both equations share Stage A (outgoing-layout a/b).  For incoming
   // (ckj,cki->cij) Stage B switches to tm_einsum_incoming_impl, which builds
@@ -716,8 +726,15 @@ at::Tensor fused_triangle_multiplication(
   CHECK_EQ(pair_normed.size(0), N);
   CHECK_EQ(pair_normed.size(1), N);
   CHECK_EQ(pair_normed.size(2), C);
-  CHECK_EQ(mask.size(0), N);
-  CHECK_EQ(mask.size(1), N);
+  // mask is optional: a None mask means all-ones (no padding), so the kernel
+  // skips the [N, N] load and the mask multiply entirely (fast path).
+  if (mask.has_value()) {
+    const at::Tensor& mask_t = *mask;
+    CHECK_INPUT(mask_t);
+    CHECK_DIM(2, mask_t);
+    CHECK_EQ(mask_t.size(0), N);
+    CHECK_EQ(mask_t.size(1), N);
+  }
 
   using clock = std::chrono::high_resolution_clock;
   const bool prof = tm_profile_enabled();
@@ -765,17 +782,36 @@ at::Tensor fused_triangle_multiplication(
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(
       pair_normed.scalar_type(), "tm_pre_einsum_fused_impl", [&] {
-        tm_pre_einsum_fused_impl<scalar_t>(
-            a_tensor.data_ptr<scalar_t>(),
-            b_tensor.data_ptr<scalar_t>(),
-            pair_normed.data_ptr<scalar_t>(),
-            mask.data_ptr<scalar_t>(),
-            proj_gate_weight.data_ptr<scalar_t>(),
-            N,
-            N_pad,
-            C,
-            buffer_a.data_ptr(),
-            per_thread_bytes_a);
+        const scalar_t* mask_ptr =
+            mask.has_value() ? mask->data_ptr<scalar_t>() : nullptr;
+        // Select the mask / no-mask instantiation at runtime; the no-mask one
+        // (HAS_MASK=false) has the [N, N] load and the mask multiply removed at
+        // compile time.
+        if (mask_ptr) {
+          tm_pre_einsum_fused_impl<scalar_t, /*HAS_MASK=*/true>(
+              a_tensor.data_ptr<scalar_t>(),
+              b_tensor.data_ptr<scalar_t>(),
+              pair_normed.data_ptr<scalar_t>(),
+              mask_ptr,
+              proj_gate_weight.data_ptr<scalar_t>(),
+              N,
+              N_pad,
+              C,
+              buffer_a.data_ptr(),
+              per_thread_bytes_a);
+        } else {
+          tm_pre_einsum_fused_impl<scalar_t, /*HAS_MASK=*/false>(
+              a_tensor.data_ptr<scalar_t>(),
+              b_tensor.data_ptr<scalar_t>(),
+              pair_normed.data_ptr<scalar_t>(),
+              mask_ptr,
+              proj_gate_weight.data_ptr<scalar_t>(),
+              N,
+              N_pad,
+              C,
+              buffer_a.data_ptr(),
+              per_thread_bytes_a);
+        }
       });
   auto t_stage_a = prof ? clock::now() : clock::time_point{};
 
