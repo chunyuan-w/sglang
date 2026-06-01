@@ -209,6 +209,40 @@ inline void vec_sigmoid_and_mul(
   }
 }
 
+// silu(gate) * value, where `gate` and `value` are two fp32 GEMM tiles — the
+// two halves of a gated-linear-unit projection: out = silu(x@Wg) * (x@Wv).
+// silu(a) = a * sigmoid(a) = a / (1 + exp(-a)).
+template <typename scalar_t>
+inline void vec_silu_and_mul(
+    scalar_t* __restrict__ out,
+    const float* __restrict__ gate,
+    const float* __restrict__ value,
+    int SIZE) {
+  using bVec = at::vec::Vectorized<scalar_t>;
+  using fVec = at::vec::Vectorized<float>;
+  constexpr int kVecSize = bVec::size();
+  const fVec one(1.f);
+
+  int d = 0;
+  for (; d <= SIZE - kVecSize; d += kVecSize) {
+    fVec a0 = fVec::loadu(gate + d);
+    fVec a1 = fVec::loadu(gate + d + fVec::size());
+    fVec b0 = fVec::loadu(value + d);
+    fVec b1 = fVec::loadu(value + d + fVec::size());
+    fVec s0 = a0 / (one + a0.neg().exp_u20());
+    fVec s1 = a1 / (one + a1.neg().exp_u20());
+    bVec out_vec = convert_from_float_ext<scalar_t>(s0 * b0, s1 * b1);
+    out_vec.store(out + d);
+  }
+  // scalar tail
+  for (; d < SIZE; ++d) {
+    float a = gate[d];
+    float b = value[d];
+    float s = a / (1.f + std::exp(-a));
+    out[d] = static_cast<scalar_t>(s * b);
+  }
+}
+
 template <typename scalar_t, bool has_bias, int BLOCK_M, int BLOCK_N>
 struct tinygemm_kernel_nn {
   static inline void apply(
@@ -620,6 +654,77 @@ void weight_packed_linear_sigmoid_mul_kernel_impl(
 
     }); // parallel_2d
   });
+}
+
+// out = silu(x @ Wgᵀ) * (x @ Wvᵀ) — the AF3 Transition gated linear unit.
+//   mat1 : [M, K]                         bf16/fp16, row-major
+//   mat2 : packed [2N, K] = cat(Wg [N,K] | Wv [N,K]) over output channels
+//   out  : [M, N]
+// Wg occupies packed output channels [0, N); Wv occupies [N, 2N).  For bf16/
+// fp16 the packed per-output-channel row size equals K, so the value half
+// starts at flat offset N*K (same indexing convention the sigmoid_mul / plain
+// packed-linear kernels use: block nb_start lives at mat2 + nb_start*K).
+template <typename scalar_t>
+void weight_packed_linear_silu_mul_kernel_impl(
+    scalar_t* __restrict__ out,
+    const scalar_t* __restrict__ mat1,
+    const scalar_t* __restrict__ mat2,
+    int64_t M,
+    int64_t N,
+    int64_t K,
+    int64_t mat1_strideM,
+    int64_t out_strideM) {
+  constexpr int64_t BLOCK_M = block_size_m();
+  constexpr int64_t BLOCK_N = block_size_n();
+  const int64_t MB = div_up(M, BLOCK_M);
+  const int64_t NB = div_up(N, BLOCK_N);
+  const bool use_brgemm = true;
+
+  const int64_t value_off = N * K;  // packed offset to the Wv half
+
+  parallel_2d(MB, NB, [&](int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1) {
+    alignas(64) float Cgate[BLOCK_M * BLOCK_N];
+    alignas(64) float Cval[BLOCK_M * BLOCK_N];
+
+    loop_2d<scalar_t>(mb0, mb1, nb0, nb1, BLOCK_N * K, [&](int64_t mb, int64_t nb, int64_t nb_offset) {
+      int64_t mb_start = mb * BLOCK_M;
+      int64_t mb_size = std::min(M - mb_start, BLOCK_M);
+      int64_t nb_start = nb * BLOCK_N;
+      int64_t nb_size = std::min(N - nb_start, BLOCK_N);
+
+      // gate half: Cgate = x_tile @ Wg[nb_start : nb_start+nb_size]
+      tinygemm_kernel<scalar_t, /*has_bias*/ false>(
+          mat1 + mb_start * mat1_strideM,
+          mat2 + nb_start * K,
+          Cgate,
+          /*bias*/ nullptr,
+          mb_size, nb_size, K,
+          mat1_strideM, /*ldb*/ nb_size, /*ldc*/ BLOCK_N,
+          use_brgemm);
+      // value half: Cval = x_tile @ Wv[nb_start : nb_start+nb_size]
+      tinygemm_kernel<scalar_t, /*has_bias*/ false>(
+          mat1 + mb_start * mat1_strideM,
+          mat2 + value_off + nb_start * K,
+          Cval,
+          /*bias*/ nullptr,
+          mb_size, nb_size, K,
+          mat1_strideM, /*ldb*/ nb_size, /*ldc*/ BLOCK_N,
+          use_brgemm);
+
+      // out = silu(gate) * value, per row.
+      for (int64_t m = 0; m < mb_size; ++m) {
+        vec_silu_and_mul<scalar_t>(
+            out + (mb_start + m) * out_strideM + nb_start,
+            Cgate + m * BLOCK_N,
+            Cval + m * BLOCK_N,
+            nb_size);
+      }
+    }); // loop_2d
+
+    if (use_brgemm) {
+      at::native::cpublas::brgemm_release();
+    }
+  }); // parallel_2d
 }
 
 template <typename scalar_t>
@@ -1049,6 +1154,50 @@ weight_packed_linear_sigmoid_mul(at::Tensor& mat1, at::Tensor& mat2, const std::
         packed_w.data_ptr<scalar_t>(),
         bias_data,
         post_mul_mat.data_ptr<scalar_t>(),
+        M,
+        N,
+        K,
+        mat1_strideM,
+        out_strideM);
+  });
+
+  return out;
+}
+
+// Gated linear unit (AF3 Transition): out = silu(mat1 @ Wgᵀ) * (mat1 @ Wvᵀ).
+//   mat1 : [M, K]
+//   mat2 : [2N, K] = cat(Wg [N,K] | Wv [N,K]) over output channels
+//          (already convert_weight_packed'd when is_vnni=true)
+//   out  : [M, N]
+at::Tensor weight_packed_linear_silu_mul(at::Tensor& mat1, at::Tensor& mat2, bool is_vnni) {
+  RECORD_FUNCTION("sgl-kernel::weight_packed_linear_silu_mul", std::vector<c10::IValue>({mat1, mat2}));
+
+  auto packed_w = is_vnni ? mat2 : convert_weight_packed(mat2);
+
+  int64_t M = mat1.size(0);
+  int64_t K = mat1.size(1);
+  int64_t twoN = mat2.size(0);
+
+  CHECK_LAST_DIM_CONTIGUOUS_INPUT(mat1);
+  CHECK_INPUT(mat2);
+  CHECK_DIM(2, mat1);
+  CHECK_DIM(2, mat2);
+  TORCH_CHECK(twoN % 2 == 0, "weight_packed_linear_silu_mul: weight out features must be even, got ", twoN);
+
+  const int64_t N = twoN / 2;
+  // brgemm tiles output channels in block_size_n() (=32) chunks, and the value
+  // half must start on a tile boundary, so N must be a multiple of 32.
+  TORCH_CHECK(N % 32 == 0, "weight_packed_linear_silu_mul: half out features (", N, ") must be a multiple of 32");
+
+  auto out = at::empty({M, N}, mat1.options());
+  const int64_t mat1_strideM = mat1.stride(0);
+  const int64_t out_strideM = N;
+
+  AT_DISPATCH_REDUCED_FLOATING_TYPES(mat1.scalar_type(), "weight_packed_linear_silu_mul_kernel_impl", [&] {
+    weight_packed_linear_silu_mul_kernel_impl<scalar_t>(
+        out.data_ptr<scalar_t>(),
+        mat1.data_ptr<scalar_t>(),
+        packed_w.data_ptr<scalar_t>(),
         M,
         N,
         K,
