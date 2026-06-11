@@ -466,6 +466,19 @@ void tm_einsum_incoming_impl(
     float* Ctmp =
         reinterpret_cast<float*>(bump(sizeof(float) * BLOCK_M * BLOCK_N));
 
+    // One-time zero of a_vnni_global.  Per-c pack_vnni2 (K=N, n_size cols)
+    // overwrites exactly the [0,N) x [0,n_size) data region of each chunk;
+    // the K-tail rows [N, N_pad) and partial-col tail [n_size, BLOCK_N) are
+    // never written, so once zeroed they stay zero for every c.  Hoisting the
+    // memset out of the c-loop drops C-1 redundant full-buffer memsets
+    // (~24 MB x (C-1) of write traffic at N=3469).
+    #pragma omp for schedule(static)
+    for (int nb = 0; nb < NB; ++nb) {
+      std::memset(a_vnni_global + nb * vnni_chunk, 0,
+                  sizeof(scalar_t) * static_cast<size_t>(vnni_chunk));
+    }
+    // implicit barrier: all chunks zeroed before any c packs into them.
+
     for (int c = 0; c < C; ++c) {
       const scalar_t* a_c   = a + static_cast<int64_t>(c) * plane_in;
       const scalar_t* b_c   = b + static_cast<int64_t>(c) * plane_in;
@@ -486,8 +499,8 @@ void tm_einsum_incoming_impl(
         const int n_start = nb * BLOCK_N;
         const int n_size  = std::min(BLOCK_N, N - n_start);
         scalar_t* vnni_chunk_ptr = a_vnni_global + nb * vnni_chunk;
-        std::memset(vnni_chunk_ptr, 0,
-                    sizeof(scalar_t) * static_cast<size_t>(vnni_chunk));
+        // No memset here: a_vnni_global was zeroed once before the c-loop and
+        // pack_vnni2 rewrites only the data region, leaving the tail zero.
         pack_vnni2<scalar_t>(
             /*dst*/ vnni_chunk_ptr,
             /*src*/ a_c + n_start,
