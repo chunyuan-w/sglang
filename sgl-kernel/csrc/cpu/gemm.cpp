@@ -1,5 +1,7 @@
 #include "gemm.h"
 
+#include <cstdlib>
+
 #include "common.h"
 #include "vec.h"
 
@@ -664,6 +666,47 @@ void weight_packed_linear_sigmoid_mul_kernel_impl(
 // fp16 the packed per-output-channel row size equals K, so the value half
 // starts at flat offset N*K (same indexing convention the sigmoid_mul / plain
 // packed-linear kernels use: block nb_start lives at mat2 + nb_start*K).
+// The brgemm dispatch (at::native::cpublas::brgemm) carries a high fixed
+// per-call cost that contends across threads, so throughput is dominated by the
+// *number* of brgemm calls, not the FLOPs.  The AF3 Transition GLU is a very
+// tall/skinny GEMM (small K=128, huge M=N_tok²) where the default 32-row M tile
+// produces ~MB·NB·2 ≈ 10⁵ tiny calls.  Enlarging the M tile (the free row
+// dimension, which needs no change to the VNNI-packed weight layout) cuts the
+// call count proportionally and recovers most of the gap to the TPP kernel.
+//
+// BLOCK_M is chosen adaptively: as large as kGluMaxBlockM, but shrunk for small
+// M so the [MB, NB] grid still has enough tiles to fill the threads.  It can be
+// pinned via the GLU_BLOCK_M env var (for tuning / benchmarking).
+static constexpr int64_t kGluMaxBlockM = 1024;
+
+// Returns an explicit override from GLU_BLOCK_M, or 0 if unset (=> adaptive).
+inline int64_t glu_block_m_override() {
+  static const int64_t v = [] {
+    const char* e = std::getenv("GLU_BLOCK_M");
+    int64_t b = e ? std::atoll(e) : 0;
+    if (b < 0) b = 0;
+    if (b > kGluMaxBlockM) b = kGluMaxBlockM;
+    return b;
+  }();
+  return v;
+}
+
+inline int64_t glu_choose_block_m(int64_t M, int64_t NB) {
+  const int64_t ov = glu_block_m_override();
+  if (ov > 0) {
+    return std::min(ov, kGluMaxBlockM);
+  }
+  int64_t bm = kGluMaxBlockM;
+  // keep at least ~ (2 * nthreads) macro-tiles in the [MB, NB] grid when M
+  // allows, so threads aren't starved on small-M (e.g. single-rep) shapes.
+  const int64_t nth = at::get_num_threads();
+  const int64_t min_mb = std::max<int64_t>(1, div_up(2 * nth, std::max<int64_t>(1, NB)));
+  while (bm > block_size_m() && div_up(M, bm) < min_mb) {
+    bm >>= 1;
+  }
+  return std::max<int64_t>(bm, block_size_m());
+}
+
 template <typename scalar_t>
 void weight_packed_linear_silu_mul_kernel_impl(
     scalar_t* __restrict__ out,
@@ -674,17 +717,22 @@ void weight_packed_linear_silu_mul_kernel_impl(
     int64_t K,
     int64_t mat1_strideM,
     int64_t out_strideM) {
-  constexpr int64_t BLOCK_M = block_size_m();
   constexpr int64_t BLOCK_N = block_size_n();
-  const int64_t MB = div_up(M, BLOCK_M);
   const int64_t NB = div_up(N, BLOCK_N);
+  const int64_t BLOCK_M = glu_choose_block_m(M, NB);
+  const int64_t MB = div_up(M, BLOCK_M);
   const bool use_brgemm = true;
 
   const int64_t value_off = N * K;  // packed offset to the Wv half
 
   parallel_2d(MB, NB, [&](int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1) {
-    alignas(64) float Cgate[BLOCK_M * BLOCK_N];
-    alignas(64) float Cval[BLOCK_M * BLOCK_N];
+    // brgemm writes its fp32 accumulator with leading dim BLOCK_N, so each row
+    // of C is BLOCK_N wide regardless of BLOCK_M.  The scratch (max
+    // 1024*32*4 = 128 KB per buffer) is allocated once per thread and reused.
+    static thread_local std::vector<float> Cgate_buf(kGluMaxBlockM * BLOCK_N);
+    static thread_local std::vector<float> Cval_buf(kGluMaxBlockM * BLOCK_N);
+    float* __restrict__ Cgate = Cgate_buf.data();
+    float* __restrict__ Cval = Cval_buf.data();
 
     loop_2d<scalar_t>(mb0, mb1, nb0, nb1, BLOCK_N * K, [&](int64_t mb, int64_t nb, int64_t nb_offset) {
       int64_t mb_start = mb * BLOCK_M;
@@ -725,6 +773,120 @@ void weight_packed_linear_silu_mul_kernel_impl(
       at::native::cpublas::brgemm_release();
     }
   }); // parallel_2d
+}
+
+// Fused AF3 Transition: out = (silu(x @ Wgᵀ) * (x @ Wvᵀ)) @ W2ᵀ.
+//   mat1 : x  [M, Kin]                          (post-LayerNorm activation)
+//   w1   : packed [2N, Kin] = cat(Wg | Wv)      (transition1)
+//   w2   : packed [Kout, N]                     (transition2)
+//   out  : [M, Kout]
+//
+// The point of fusing transition1+transition2 is to NEVER materialize the wide
+// [M, N] gated intermediate `c` (N = 4·c_x; ≈22 GB at AF3 pair dims N_tok=4655).
+// Instead each M-tile builds its c-block [BLOCK_M, N] in L2, immediately consumes
+// it in the second GEMM, and only the narrow [BLOCK_M, Kout] output is written to
+// DRAM.  This removes the multi-GB allocation + write + re-read that both the
+// fresh-alloc sgl path and the TPP two-kernel path pay — statelessly (no caches).
+//
+// BLOCK_M is capped so the c-block (bf16) fits the L2 budget, and shrunk for
+// small M to keep enough M-tiles to fill the threads; GLU_FUSED_BLOCK_M overrides.
+static constexpr int64_t kFusedL2Budget = 768 * 1024;  // bytes reserved for the c-block
+static constexpr int64_t kFusedMaxBlockM = 1024;
+
+inline int64_t fused_block_m_override() {
+  static const int64_t v = [] {
+    const char* e = std::getenv("GLU_FUSED_BLOCK_M");
+    int64_t b = e ? std::atoll(e) : 0;
+    return b < 0 ? 0 : b;
+  }();
+  return v;
+}
+
+inline int64_t fused_choose_block_m(int64_t M, int64_t N) {
+  constexpr int64_t BN = block_size_n();
+  auto round_bn = [](int64_t x) {
+    x = (x / BN) * BN;
+    return x < BN ? BN : x;
+  };
+  // c-block is bf16/fp16 (2 bytes); keep BLOCK_M*N*2 within the L2 budget.
+  const int64_t cache_cap = round_bn(kFusedL2Budget / (N * 2));
+  int64_t bm = std::min<int64_t>(kFusedMaxBlockM, cache_cap);
+  const int64_t ov = fused_block_m_override();
+  if (ov > 0) {
+    return std::min<int64_t>(round_bn(ov), cache_cap);
+  }
+  const int64_t nth = at::get_num_threads();
+  if (div_up(M, bm) < nth) {  // small M: shrink so MB ≈ nthreads
+    bm = std::min<int64_t>(bm, round_bn(div_up(M, std::max<int64_t>(1, nth))));
+  }
+  return std::max<int64_t>(bm, BN);
+}
+
+template <typename scalar_t>
+void fused_transition_kernel_impl(
+    scalar_t* __restrict__ out,
+    const scalar_t* __restrict__ mat1,
+    const scalar_t* __restrict__ w1,
+    const scalar_t* __restrict__ w2,
+    int64_t M,
+    int64_t N,
+    int64_t Kin,
+    int64_t Kout,
+    int64_t mat1_strideM,
+    int64_t out_strideM) {
+  constexpr int64_t BLOCK_N = block_size_n();
+  const int64_t BLOCK_M = fused_choose_block_m(M, N);
+  const int64_t MB = div_up(M, BLOCK_M);
+  const int64_t NB1 = div_up(N, BLOCK_N);     // gate/value output blocks
+  const int64_t NB2 = div_up(Kout, BLOCK_N);  // transition2 output blocks
+  const int64_t value_off = N * Kin;          // packed offset to the Wv half of w1
+
+  at::parallel_for(0, MB, 0, [&](int64_t mb0, int64_t mb1) {
+    // c-block [BLOCK_M, N] (bf16) lives in L2; gate/val/out tiles are small fp32
+    // accumulators reused per output block.  All reused across M-tiles per thread.
+    static thread_local std::vector<scalar_t> Cbuf_v(kFusedL2Budget / sizeof(scalar_t));
+    static thread_local std::vector<float> gate_v(kFusedMaxBlockM * BLOCK_N);
+    static thread_local std::vector<float> val_v(kFusedMaxBlockM * BLOCK_N);
+    static thread_local std::vector<float> outc_v(kFusedMaxBlockM * BLOCK_N);
+    scalar_t* __restrict__ Cbuf = Cbuf_v.data();
+    float* __restrict__ gate = gate_v.data();
+    float* __restrict__ val = val_v.data();
+    float* __restrict__ outc = outc_v.data();
+
+    for (int64_t mb = mb0; mb < mb1; ++mb) {
+      const int64_t mb_start = mb * BLOCK_M;
+      const int64_t mb_size = std::min(M - mb_start, BLOCK_M);
+      const scalar_t* __restrict__ x_tile = mat1 + mb_start * mat1_strideM;
+
+      // Stage 1: build c-block = silu(x @ Wgᵀ) * (x @ Wvᵀ), tiled over N.
+      for (int64_t nb = 0; nb < NB1; ++nb) {
+        const int64_t nb_start = nb * BLOCK_N;
+        const int64_t nb_size = std::min(N - nb_start, BLOCK_N);
+        tinygemm_kernel<scalar_t, /*has_bias*/ false>(
+            x_tile, w1 + nb_start * Kin, gate, /*bias*/ nullptr,
+            mb_size, nb_size, Kin, mat1_strideM, /*ldb*/ nb_size, /*ldc*/ BLOCK_N, /*brg*/ true);
+        tinygemm_kernel<scalar_t, /*has_bias*/ false>(
+            x_tile, w1 + value_off + nb_start * Kin, val, /*bias*/ nullptr,
+            mb_size, nb_size, Kin, mat1_strideM, /*ldb*/ nb_size, /*ldc*/ BLOCK_N, /*brg*/ true);
+        for (int64_t m = 0; m < mb_size; ++m) {
+          vec_silu_and_mul<scalar_t>(Cbuf + m * N + nb_start, gate + m * BLOCK_N, val + m * BLOCK_N, nb_size);
+        }
+      }
+
+      // Stage 2: out = c-block @ W2ᵀ (contraction over N), tiled over Kout.
+      for (int64_t n2b = 0; n2b < NB2; ++n2b) {
+        const int64_t n2_start = n2b * BLOCK_N;
+        const int64_t n2_size = std::min(Kout - n2_start, BLOCK_N);
+        tinygemm_kernel<scalar_t, /*has_bias*/ false>(
+            Cbuf, w2 + n2_start * N, outc, /*bias*/ nullptr,
+            mb_size, n2_size, N, /*lda*/ N, /*ldb*/ n2_size, /*ldc*/ BLOCK_N, /*brg*/ true);
+        for (int64_t m = 0; m < mb_size; ++m) {
+          copy_stub<scalar_t>(out + (mb_start + m) * out_strideM + n2_start, outc + m * BLOCK_N, n2_size);
+        }
+      }
+    }
+    at::native::cpublas::brgemm_release();
+  });
 }
 
 template <typename scalar_t>
@@ -1203,6 +1365,58 @@ at::Tensor weight_packed_linear_silu_mul(at::Tensor& mat1, at::Tensor& mat2, boo
         K,
         mat1_strideM,
         out_strideM);
+  });
+
+  return out;
+}
+
+// Fused AF3 Transition: out = (silu(mat1 @ Wgᵀ) * (mat1 @ Wvᵀ)) @ W2ᵀ.
+//   mat1 : x  [M, Kin]
+//   w1   : [2N, Kin] = cat(Wg | Wv)  (transition1 weight; packed when is_vnni)
+//   w2   : [Kout, N]                 (transition2 weight; packed when is_vnni)
+//   out  : [M, Kout]
+// Avoids materializing the wide [M, N] gated intermediate; see kernel impl.
+at::Tensor fused_transition(at::Tensor& mat1, at::Tensor& w1, at::Tensor& w2, bool is_vnni) {
+  RECORD_FUNCTION("sgl-kernel::fused_transition", std::vector<c10::IValue>({mat1, w1, w2}));
+
+  auto pw1 = is_vnni ? w1 : convert_weight_packed(w1);
+  auto pw2 = is_vnni ? w2 : convert_weight_packed(w2);
+
+  CHECK_LAST_DIM_CONTIGUOUS_INPUT(mat1);
+  CHECK_INPUT(w1);
+  CHECK_INPUT(w2);
+  CHECK_DIM(2, mat1);
+  CHECK_DIM(2, w1);
+  CHECK_DIM(2, w2);
+
+  const int64_t M = mat1.size(0);
+  const int64_t Kin = mat1.size(1);
+  const int64_t twoN = w1.size(0);
+  const int64_t Kout = w2.size(0);
+  TORCH_CHECK(twoN % 2 == 0, "fused_transition: transition1 out features must be even, got ", twoN);
+  const int64_t N = twoN / 2;
+  // brgemm tiles output channels in block_size_n() (=32) chunks: the Wv half of
+  // w1 and the transition2 output must each start on a tile boundary.
+  TORCH_CHECK(N % 32 == 0, "fused_transition: 4*c_x (", N, ") must be a multiple of 32");
+  TORCH_CHECK(Kout % 32 == 0, "fused_transition: transition2 out features (", Kout, ") must be a multiple of 32");
+  if (!is_vnni) {
+    TORCH_CHECK(w2.size(1) == N, "fused_transition: transition2 in features (", w2.size(1), ") must equal 4*c_x (", N, ")");
+  }
+
+  auto out = at::empty({M, Kout}, mat1.options());
+
+  AT_DISPATCH_REDUCED_FLOATING_TYPES(mat1.scalar_type(), "fused_transition_kernel_impl", [&] {
+    fused_transition_kernel_impl<scalar_t>(
+        out.data_ptr<scalar_t>(),
+        mat1.data_ptr<scalar_t>(),
+        pw1.data_ptr<scalar_t>(),
+        pw2.data_ptr<scalar_t>(),
+        M,
+        N,
+        Kin,
+        Kout,
+        mat1.stride(0),
+        Kout);
   });
 
   return out;

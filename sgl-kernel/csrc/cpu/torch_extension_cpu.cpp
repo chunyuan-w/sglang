@@ -226,6 +226,8 @@ weight_packed_linear_sigmoid_mul(
 at::Tensor
 weight_packed_linear_silu_mul(at::Tensor& mat1, at::Tensor& mat2, bool is_vnni);
 
+at::Tensor fused_transition(at::Tensor& mat1, at::Tensor& w1, at::Tensor& w2, bool is_vnni);
+
 // igemm
 at::Tensor int8_scaled_mm_cpu(
     at::Tensor& mat1,
@@ -544,6 +546,9 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
 
   m.def("weight_packed_linear_silu_mul(Tensor mat1, Tensor mat2, bool is_vnni) -> Tensor");
   m.impl("weight_packed_linear_silu_mul", torch::kCPU, &weight_packed_linear_silu_mul);
+
+  m.def("fused_transition(Tensor mat1, Tensor w1, Tensor w2, bool is_vnni) -> Tensor");
+  m.impl("fused_transition", torch::kCPU, &fused_transition);
 
 
   // igemm
