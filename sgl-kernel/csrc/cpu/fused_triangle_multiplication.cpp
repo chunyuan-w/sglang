@@ -343,12 +343,6 @@ void tm_einsum_outgoing_impl(
       scalar_t*       out_c = einsum_out + static_cast<int64_t>(c) * plane_out;
 
 #if defined(_OPENMP)
-      // Keep the per-c barrier (no nowait): all threads work the same channel's
-      // a[c]/b[c] planes together, keeping them hot in shared L3.  A nowait here
-      // lets threads drift across channels and touch several 24 MB planes at
-      // once, and the L3 thrash outweighs the small load-imbalance win (measured
-      // ~6% slower at N=3469 on 40c).  Unlike incoming, outgoing already
-      // overlaps its pack with the brgemm, so there's no serialization to hide.
       #pragma omp for schedule(static)
 #endif
       for (int nb = 0; nb < NB; ++nb) {
@@ -396,8 +390,8 @@ void tm_einsum_outgoing_impl(
           }
         }
       }
-      // Implicit barrier at end of `omp for` keeps the team on one channel at a
-      // time (shared-L3 locality on a[c]/b[c]); see the nowait note above.
+      // Implicit barrier at end of `omp for` so all threads finish this c
+      // before a[c+1] is accessed.
     }
 
     at::native::cpublas::brgemm_release();
@@ -451,10 +445,6 @@ void tm_einsum_incoming_impl(
   const int64_t plane_in   = static_cast<int64_t>(N) * N_pad;
   const int64_t plane_out  = static_cast<int64_t>(N) * N;
   const int64_t vnni_chunk = static_cast<int64_t>(N_pad) * BLOCK_N;
-  // a_vnni_global is double-buffered (ping-pong on c%2) so Phase 2's brgemm can
-  // run `nowait`: a thread finishing channel c's brgemm starts packing channel
-  // c+1 into the OTHER buffer while stragglers still read channel c's buffer.
-  const int64_t buf_stride = static_cast<int64_t>(NB) * vnni_chunk;
 
 #if defined(_OPENMP)
   #pragma omp parallel
@@ -476,30 +466,25 @@ void tm_einsum_incoming_impl(
     float* Ctmp =
         reinterpret_cast<float*>(bump(sizeof(float) * BLOCK_M * BLOCK_N));
 
-    // One-time zero of BOTH a_vnni_global buffers.  Per-c pack_vnni2 (K=N,
-    // n_size cols) overwrites exactly the [0,N) x [0,n_size) data region of each
-    // chunk; the K-tail rows [N, N_pad) and partial-col tail [n_size, BLOCK_N)
-    // are never written, so once zeroed they stay zero for every c.  Hoisting
-    // the memset out of the c-loop drops C-1 redundant full-buffer memsets
+    // One-time zero of a_vnni_global.  Per-c pack_vnni2 (K=N, n_size cols)
+    // overwrites exactly the [0,N) x [0,n_size) data region of each chunk;
+    // the K-tail rows [N, N_pad) and partial-col tail [n_size, BLOCK_N) are
+    // never written, so once zeroed they stay zero for every c.  Hoisting the
+    // memset out of the c-loop drops C-1 redundant full-buffer memsets
     // (~24 MB x (C-1) of write traffic at N=3469).
     #pragma omp for schedule(static)
-    for (int nb = 0; nb < 2 * NB; ++nb) {
+    for (int nb = 0; nb < NB; ++nb) {
       std::memset(a_vnni_global + nb * vnni_chunk, 0,
                   sizeof(scalar_t) * static_cast<size_t>(vnni_chunk));
     }
-    // implicit barrier: both buffers zeroed before any c packs into them.
+    // implicit barrier: all chunks zeroed before any c packs into them.
 
     for (int c = 0; c < C; ++c) {
       const scalar_t* a_c   = a + static_cast<int64_t>(c) * plane_in;
       const scalar_t* b_c   = b + static_cast<int64_t>(c) * plane_in;
       scalar_t*       out_c = einsum_out + static_cast<int64_t>(c) * plane_out;
-      // Ping-pong buffer for this channel.  Phase 1 packs into a_vnni_cur and
-      // Phase 2 reads it; the next channel uses the other buffer, so Phase 2's
-      // nowait can't race the next Phase 1's writes.  The Phase 1 barrier two
-      // channels later (c+2 reuses this buffer) guarantees this Phase 2 is done.
-      scalar_t* a_vnni_cur = a_vnni_global + (c & 1) * buf_stride;
 
-      // ----- Phase 1: pre-pack a[c]'s strided cols into a_vnni_cur. -----
+      // ----- Phase 1: pre-pack a[c]'s strided cols into a_vnni_global. -----
       // Note on padding: Stage A only pads the *trailing* (j_src) axis of a/b
       // up to N_pad; the leading (i_src) axis stays size N.  For incoming the
       // contraction axis k maps to the leading dim, so we must pack only the
@@ -513,8 +498,8 @@ void tm_einsum_incoming_impl(
       for (int nb = 0; nb < NB; ++nb) {
         const int n_start = nb * BLOCK_N;
         const int n_size  = std::min(BLOCK_N, N - n_start);
-        scalar_t* vnni_chunk_ptr = a_vnni_cur + nb * vnni_chunk;
-        // No memset here: both buffers were zeroed once before the c-loop and
+        scalar_t* vnni_chunk_ptr = a_vnni_global + nb * vnni_chunk;
+        // No memset here: a_vnni_global was zeroed once before the c-loop and
         // pack_vnni2 rewrites only the data region, leaving the tail zero.
         pack_vnni2<scalar_t>(
             /*dst*/ vnni_chunk_ptr,
@@ -527,14 +512,8 @@ void tm_einsum_incoming_impl(
       // implicit barrier — all a_vnni chunks ready before Phase 2.
 
       // ----- Phase 2: parallel over mb.  Build A_scratch, then inner nb. ---
-      // nowait: a thread done with channel c's mb-tiles starts packing channel
-      // c+1 (into the other ping-pong buffer) instead of idling at a per-c
-      // barrier, overlapping this channel's brgemm tail with the next channel's
-      // pack and balancing the MB work across channels.  Correctness relies on
-      // the double buffer (see a_vnni_cur) — c+1 writes the other buffer, and
-      // c+2 (which reuses this buffer) is gated by c+1's Phase 1 barrier.
 #if defined(_OPENMP)
-      #pragma omp for schedule(static) nowait
+      #pragma omp for schedule(static)
 #endif
       for (int mb = 0; mb < MB; ++mb) {
         const int m_start = mb * BLOCK_M;
@@ -563,7 +542,7 @@ void tm_einsum_incoming_impl(
         for (int nb = 0; nb < NB; ++nb) {
           const int n_start = nb * BLOCK_N;
           const int n_size  = std::min(BLOCK_N, N - n_start);
-          const scalar_t* vnni_chunk_ptr = a_vnni_cur + nb * vnni_chunk;
+          const scalar_t* vnni_chunk_ptr = a_vnni_global + nb * vnni_chunk;
 
           at::native::cpublas::brgemm(
               /*M*/ m_size, /*N*/ n_size, /*K*/ N_pad,
@@ -867,14 +846,12 @@ at::Tensor fused_triangle_multiplication(
   // For incoming, a separate shared VNNI scratch holds one c's worth of
   // pre-packed a-cols (~22 MB at N=4655); rewritten per c, so the transient
   // stays under L3 and well below the 22 GB threshold that triggered the
-  // bimodal allocator behavior the user's notes describe.  Double-buffered (2x)
-  // so Phase 2 can run nowait (a thread packs channel c+1 into the other buffer
-  // while stragglers read channel c's); the extra ~22 MB is negligible.
+  // bimodal allocator behavior the user's notes describe.
   const int NB_B = div_up(N, BLOCK_N_B);
   at::Tensor a_vnni_global;
   if (!outgoing) {
     a_vnni_global = at::empty(
-        {2 * static_cast<int64_t>(NB_B) * N_pad * BLOCK_N_B},
+        {static_cast<int64_t>(NB_B) * N_pad * BLOCK_N_B},
         pair_normed.options());
   }
 
