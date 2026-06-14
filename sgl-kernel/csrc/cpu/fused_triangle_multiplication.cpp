@@ -48,6 +48,21 @@ inline bool tm_profile_enabled() {
   return enabled;
 }
 
+// Stage A's j-block = the projection brgemm's M extent.  Default 32 (the AMX
+// tile row count) — measured fastest under the production libtcmalloc.so; a
+// larger tile only "helped" under a debug-tcmalloc measurement artifact and is
+// actually a regression on the real allocator (it thrashes L2 with a bigger
+// Ctmp_full).  SGL_TM_BLOCK_J overrides for tuning only.
+inline int tm_block_j() {
+  static const int v = [] {
+    const char* s = std::getenv("SGL_TM_BLOCK_J");
+    int b = s ? std::atoi(s) : 32;
+    if (b < 32) b = 32;
+    return (b / 32) * 32;  // keep a multiple of 32
+  }();
+  return v;
+}
+
 // Vectorized fp32 -> bf16/fp16 row store.  Used by Stage B to write the
 // brgemm Ctmp tile into the output buffer.
 template <typename scalar_t>
@@ -117,8 +132,8 @@ void tm_pre_einsum_fused_impl(
     int N_pad,
     int C,
     void* __restrict__ buffer,
-    int buffer_size_per_thread) {
-  constexpr int BLOCK_J = 32;
+    int buffer_size_per_thread,
+    int BLOCK_J) {
   constexpr int BLOCK_N = 32;                            // 2 * TILE_N
   const int64_t row_stride   = static_cast<int64_t>(N_pad);
   const int64_t plane_stride = static_cast<int64_t>(N) * row_stride;
@@ -554,15 +569,14 @@ void tm_einsum_incoming_impl(
   }
 }
 
-// Sigmoid-mul-add helper for the fused stage C tail.  Reads gate values
-// from an fp32 brgemm Ctmp tile and out_proj from a bf16 buffer; writes
-// pair_orig in place:
-//   pair_orig[d] = bf16( fp32(pair_orig[d]) + sigmoid(gate_fp32[d]) * fp32(out_proj[d]) )
+// Sigmoid-mul-add helper for the fused stage C tail.  Both gate and out_proj
+// come from per-tile fp32 brgemm Ctmp tiles; writes pair_orig in place:
+//   pair_orig[d] = bf16( fp32(pair_orig[d]) + sigmoid(gate_fp32[d]) * out_proj_fp32[d] )
 template <typename scalar_t>
-inline void vec_sigmoid_mul_add_fp32gate(
+inline void vec_sigmoid_mul_add_fp32(
     scalar_t* __restrict__ pair_orig,
     const float* __restrict__ gate_fp32,
-    const scalar_t* __restrict__ out_proj,
+    const float* __restrict__ out_proj_fp32,
     int size) {
   using bVec = at::vec::Vectorized<scalar_t>;
   using fVec = at::vec::Vectorized<float>;
@@ -574,10 +588,10 @@ inline void vec_sigmoid_mul_add_fp32gate(
     fVec g1 = fVec::loadu(gate_fp32 + d + fVec::size());
     fVec s0 = one / (one + g0.neg().exp_u20());
     fVec s1 = one / (one + g1.neg().exp_u20());
-    bVec p_bv = bVec::loadu(out_proj  + d);
+    fVec p0 = fVec::loadu(out_proj_fp32 + d);
+    fVec p1 = fVec::loadu(out_proj_fp32 + d + fVec::size());
     bVec o_bv = bVec::loadu(pair_orig + d);
-    fVec p0, p1, o0, o1;
-    std::tie(p0, p1) = at::vec::convert_to_float(p_bv);
+    fVec o0, o1;
     std::tie(o0, o1) = at::vec::convert_to_float(o_bv);
     fVec r0 = o0 + s0 * p0;
     fVec r1 = o1 + s1 * p1;
@@ -586,27 +600,31 @@ inline void vec_sigmoid_mul_add_fp32gate(
   }
   for (; d < size; ++d) {
     float s = 1.f / (1.f + std::exp(-gate_fp32[d]));
-    float r = static_cast<float>(pair_orig[d]) + s * static_cast<float>(out_proj[d]);
+    float r = static_cast<float>(pair_orig[d]) + s * out_proj_fp32[d];
     pair_orig[d] = static_cast<scalar_t>(r);
   }
 }
 
 // ---------------------------------------------------------------------------
-// Stage C: post-einsum, fully fused per-tile.
+// Stage C: post-einsum, fully fused per-tile (out_proj GEMM + gate GEMM +
+// sigmoid-mul-add residual).
 //
 // Given:
 //   pair_orig    : [M, C]  (residual base; clobbered in place)
-//   out_proj_buf : [M, C]  (already = centered @ out_proj_w.T)
+//   centered     : [M, C]  (center_norm output; input for the out_proj GEMM)
 //   pair_normed  : [M, C]  (input for the gate GEMM)
 //   gating_w     : [C, C]  VNNI-packed
+//   out_proj_w   : [C, C]  VNNI-packed
 //
 // Computes per (m_tile, n_tile) of BLOCK_M × BLOCK_N output rows/cols:
-//   gate_tile_fp32 = pair_normed[m_tile] @ gating_w[n_tile].T   (brgemm into Ctmp)
-//   pair_orig[m_tile, n_tile] += sigmoid(gate_tile_fp32) * out_proj_buf[m_tile, n_tile]
+//   gate_tile = pair_normed[m_tile] @ gating_w[n_tile].T       (brgemm -> Cgate)
+//   op_tile   = centered[m_tile]    @ out_proj_w[n_tile].T     (brgemm -> Cop)
+//   pair_orig[m_tile, n_tile] += sigmoid(gate_tile) * op_tile
 //
-// No full-tensor [M, C] gate intermediate — Ctmp stays in registers/L1
-// per tile.  Saves the gate_buf allocation (~5.5 GB at N=4655) and one
-// memory-bandwidth pass over [M, C].
+// Both GEMM results stay in per-tile fp32 registers/L1 — no full-tensor [M, C]
+// gate OR out_proj intermediate is materialized.  Eliminates the out_proj_buf
+// allocation (~1.9 GB at N=2752, ~5.5 GB at N=4655) and a full write+read pass
+// over [M, C], on top of the gate_buf already saved by the per-tile gate.
 // ---------------------------------------------------------------------------
 
 template <typename scalar_t>
@@ -614,7 +632,8 @@ void tm_fused_gate_sigmoid_mul_add_impl(
     scalar_t* __restrict__ pair_orig,                    // [M, C]  in/out
     const scalar_t* __restrict__ pair_normed,            // [M, C]
     const scalar_t* __restrict__ gating_w,               // [C, C]  packed VNNI
-    const scalar_t* __restrict__ out_proj_buf,           // [M, C]
+    const scalar_t* __restrict__ centered,               // [M, C]
+    const scalar_t* __restrict__ out_proj_w,             // [C, C]  packed VNNI
     int64_t M,
     int C) {
   constexpr int BLOCK_M = 32;                            // 2 * TILE_M
@@ -624,7 +643,8 @@ void tm_fused_gate_sigmoid_mul_add_impl(
   const int64_t NB = div_up(C, BLOCK_N);
 
   parallel_2d(MB, NB, [&](int64_t mb0, int64_t mb1, int64_t nb0, int64_t nb1) {
-    alignas(64) float Ctmp[BLOCK_M * BLOCK_N];
+    alignas(64) float Cgate[BLOCK_M * BLOCK_N];
+    alignas(64) float Cop[BLOCK_M * BLOCK_N];
 
     for (int64_t mb = mb0; mb < mb1; ++mb) {
       const int64_t mb_start = mb * BLOCK_M;
@@ -633,24 +653,33 @@ void tm_fused_gate_sigmoid_mul_add_impl(
         const int64_t nb_start = nb * BLOCK_N;
         const int nb_size = static_cast<int>(std::min<int64_t>(C - nb_start, BLOCK_N));
 
-        // brgemm: Ctmp [mb_size, nb_size] = pair_normed[mb_block, :] @ gating_w[nb_block, :].T
+        // gate brgemm: Cgate [mb_size, nb_size] = pair_normed[mb_block] @ gating_w[nb_block].T
         // ldb = nb_size matches weight_packed_linear_kernel_impl convention
-        // (the packed weight is laid out [NB, K, BLOCK_N] with each nb-block
-        // contiguous in K-then-N order).
+        // (the packed weight is laid out [NB, K, BLOCK_N], K-then-N contiguous).
         at::native::cpublas::brgemm(
             /*M*/ mb_size, /*N*/ nb_size, /*K*/ K,
             /*lda*/ C, /*ldb*/ nb_size, /*ldc*/ BLOCK_N,
             /*add_C*/ false,
             pair_normed + mb_start * C,
             gating_w + nb_start * K,
-            Ctmp);
+            Cgate);
 
-        // Fused sigmoid(Ctmp) * out_proj_buf + pair_orig, row by row.
+        // out_proj brgemm: Cop [mb_size, nb_size] = centered[mb_block] @ out_proj_w[nb_block].T
+        // (same packed-weight convention as the gate).
+        at::native::cpublas::brgemm(
+            /*M*/ mb_size, /*N*/ nb_size, /*K*/ K,
+            /*lda*/ C, /*ldb*/ nb_size, /*ldc*/ BLOCK_N,
+            /*add_C*/ false,
+            centered + mb_start * C,
+            out_proj_w + nb_start * K,
+            Cop);
+
+        // Fused sigmoid(Cgate) * Cop + pair_orig, row by row.
         for (int r = 0; r < mb_size; ++r) {
-          vec_sigmoid_mul_add_fp32gate<scalar_t>(
+          vec_sigmoid_mul_add_fp32<scalar_t>(
               pair_orig + (mb_start + r) * C + nb_start,
-              Ctmp + static_cast<int64_t>(r) * BLOCK_N,
-              out_proj_buf + (mb_start + r) * C + nb_start,
+              Cgate + static_cast<int64_t>(r) * BLOCK_N,
+              Cop + static_cast<int64_t>(r) * BLOCK_N,
               nb_size);
         }
       }
@@ -770,7 +799,9 @@ at::Tensor fused_triangle_multiplication(
   // [C, i_src, j_src=N_pad-padded] outgoing-layout.  Incoming pays its cost
   // in Stage B's transpose-on-read, which is DRAM-friendlier than the
   // strided-write equivalent in Stage A.
-  constexpr int BLOCK_J_A = 32;
+  // Cap the j-block by N (rounded to 32) so small-N shapes don't over-allocate
+  // the per-thread Stage-A scratch.
+  const int BLOCK_J_A = std::min<int>(tm_block_j(), div_up(N, 32) * 32);
   const int per_thread_bytes_a =
       /* Ctmp_full */ sizeof(float)    * BLOCK_J_A * (4 * C) +
       /* scratch_a */ sizeof(uint16_t) * C * BLOCK_J_A +
@@ -798,7 +829,8 @@ at::Tensor fused_triangle_multiplication(
               N_pad,
               C,
               buffer_a.data_ptr(),
-              per_thread_bytes_a);
+              per_thread_bytes_a,
+              BLOCK_J_A);
         } else {
           tm_pre_einsum_fused_impl<scalar_t, /*HAS_MASK=*/false>(
               a_tensor.data_ptr<scalar_t>(),
@@ -810,7 +842,8 @@ at::Tensor fused_triangle_multiplication(
               N_pad,
               C,
               buffer_a.data_ptr(),
-              per_thread_bytes_a);
+              per_thread_bytes_a,
+              BLOCK_J_A);
         }
       });
   auto t_stage_a = prof ? clock::now() : clock::time_point{};
@@ -887,33 +920,31 @@ at::Tensor fused_triangle_multiplication(
       /*eps=*/1e-5);
   auto t_center_norm = prof ? clock::now() : clock::time_point{};
 
-  // ----- Stage C: out_proj GEMM + fused (gating GEMM | sigmoid_mul | residual). -----
-  // The gate GEMM is folded into the per-tile fused kernel so we don't
-  // materialize a [M, C] gate intermediate (~5.5 GB at N=4655).  Combined
-  // with the fused Stage A above, total per-call transient drops from
-  // ~55 GB to ~17 GB (matching xfold), which is the size at which the
-  // allocator stops alternating slot assignments on multi-socket targets.
+  // ----- Stage C: out_proj GEMM + gating GEMM + sigmoid_mul + residual, all
+  // fused per-tile. -----
+  // Both the out_proj and the gate GEMM are folded into the per-tile fused
+  // kernel so we never materialize a [M, C] out_proj OR gate intermediate
+  // (~1.9 GB each at N=2752, ~5.5 GB each at N=4655).  The centered einsum
+  // (`einsum_out_2d`) stays live as the out_proj GEMM input and is read
+  // tile-by-tile.  Removing these fresh per-call buffers cuts the cold
+  // first-touch faults that dominate when the allocator is churned between
+  // calls (the production E2E path, where GSA evicts TM's pages).
   auto pair_orig_2d = pair_orig.view({M, static_cast<int64_t>(C)});
-  auto out_proj_buf = at::empty({M, static_cast<int64_t>(C)}, pair_normed.options());
-  weight_packed_linear_out(
-      out_proj_buf, einsum_out_2d, out_proj_weight,
-      /*bias=*/std::nullopt, /*is_vnni=*/true);
-  auto t_out_proj_gemm = prof ? clock::now() : clock::time_point{};
-  // einsum_out no longer needed.
-  einsum_out = at::Tensor();
+  auto t_out_proj_gemm = prof ? clock::now() : clock::time_point{};  // folded into the tail
 
-  // Fused per-tile: brgemm(pair_normed, gating_w) -> sigmoid -> mul out_proj_buf
-  // -> add into pair_orig (all in place).
   AT_DISPATCH_REDUCED_FLOATING_TYPES(
       pair_normed.scalar_type(), "tm_fused_gate_sigmoid_mul_add_impl", [&] {
         tm_fused_gate_sigmoid_mul_add_impl<scalar_t>(
             pair_orig_2d.data_ptr<scalar_t>(),
             pair_normed_2d.data_ptr<scalar_t>(),
             gating_weight.data_ptr<scalar_t>(),
-            out_proj_buf.data_ptr<scalar_t>(),
+            einsum_out_2d.data_ptr<scalar_t>(),
+            out_proj_weight.data_ptr<scalar_t>(),
             M,
             C);
       });
+  // einsum_out (centered) no longer needed.
+  einsum_out = at::Tensor();
   auto t_gate_gemm = prof ? clock::now() : clock::time_point{};
   auto t_stage_c = t_gate_gemm;
 
