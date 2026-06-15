@@ -753,13 +753,12 @@ at::Tensor fused_triangle_multiplication(
   auto t_proj_gate_alloc = prof ? clock::now() : clock::time_point{};
   auto t_proj_gate_gemm  = t_proj_gate_alloc;          // folded into stageA
 
-  // a, b each [C, N, N_pad] with N_pad = round_up(N, TILE_K=32) — Stage B's
-  // brgemm needs AMX-aligned K.  Stage A writes every (i, j) in [0, N) and
-  // zeros the [N, N_pad) tail per row, so at::empty is safe (no pre-fill).
-  const int N_pad = div_up(N, TILE_K) * TILE_K;
+  // a, b each [C, N, N] contiguous — bmm-ready.  at::bmm contracts the full N
+  // axis, so no AMX K-padding (N_pad) is needed.  Stage A writes every (i, j)
+  // in [0, N) with no tail.
   const int num_threads = at::get_num_threads();
-  auto a_tensor = at::empty({C, N, N_pad}, pair_normed.options());
-  auto b_tensor = at::empty({C, N, N_pad}, pair_normed.options());
+  auto a_tensor = at::empty({C, N, N}, pair_normed.options());
+  auto b_tensor = at::empty({C, N, N}, pair_normed.options());
   auto t_ab_alloc = prof ? clock::now() : clock::time_point{};
 
   // Per-thread scratch for the fused stage A:
@@ -795,7 +794,7 @@ at::Tensor fused_triangle_multiplication(
               mask_ptr,
               proj_gate_weight.data_ptr<scalar_t>(),
               N,
-              N_pad,
+              N,  // N_pad == N: a/b are [C, N, N], no AMX K-padding for bmm
               C,
               buffer_a.data_ptr(),
               per_thread_bytes_a);
@@ -807,7 +806,7 @@ at::Tensor fused_triangle_multiplication(
               mask_ptr,
               proj_gate_weight.data_ptr<scalar_t>(),
               N,
-              N_pad,
+              N,  // N_pad == N: a/b are [C, N, N], no AMX K-padding for bmm
               C,
               buffer_a.data_ptr(),
               per_thread_bytes_a);
@@ -815,58 +814,16 @@ at::Tensor fused_triangle_multiplication(
       });
   auto t_stage_a = prof ? clock::now() : clock::time_point{};
 
-  // ----- Stage B: custom per-c brgemm with j-strip parallelism. -----
-  // Per-thread scratch: outgoing uses VNNI-packed 32-col strip of b
-  // (N_pad × BLOCK_N bf16 ≈ 300 KB); incoming uses A_scratch [BLOCK_M, N_pad]
-  // bf16 with the same byte footprint, so one sizing covers both.
-  constexpr int BLOCK_N_B = 32;
-  constexpr int BLOCK_M_B = 32;
-  const int per_thread_bytes_b =
-      /* b_vnni | A_scratch */ sizeof(uint16_t) * N_pad * BLOCK_N_B +
-      /* Ctmp               */ sizeof(float)    * BLOCK_M_B * BLOCK_N_B +
-      /* align              */ 64 * 3;
-  auto buffer_b = at::empty(
-      {num_threads, per_thread_bytes_b}, pair_normed.options().dtype(at::kChar));
-
-  auto einsum_out_chw = at::empty({C, N, N}, pair_normed.options());
-
-  // For incoming, a separate shared VNNI scratch holds one c's worth of
-  // pre-packed a-cols (~22 MB at N=4655); rewritten per c, so the transient
-  // stays under L3 and well below the 22 GB threshold that triggered the
-  // bimodal allocator behavior the user's notes describe.
-  const int NB_B = div_up(N, BLOCK_N_B);
-  at::Tensor a_vnni_global;
-  if (!outgoing) {
-    a_vnni_global = at::empty(
-        {static_cast<int64_t>(NB_B) * N_pad * BLOCK_N_B},
-        pair_normed.options());
-  }
-
-  AT_DISPATCH_REDUCED_FLOATING_TYPES(
-      pair_normed.scalar_type(), "tm_einsum_impl", [&] {
-        if (outgoing) {
-          tm_einsum_outgoing_impl<scalar_t>(
-              einsum_out_chw.data_ptr<scalar_t>(),
-              a_tensor.data_ptr<scalar_t>(),
-              b_tensor.data_ptr<scalar_t>(),
-              N,
-              N_pad,
-              C,
-              buffer_b.data_ptr(),
-              per_thread_bytes_b);
-        } else {
-          tm_einsum_incoming_impl<scalar_t>(
-              einsum_out_chw.data_ptr<scalar_t>(),
-              a_tensor.data_ptr<scalar_t>(),
-              b_tensor.data_ptr<scalar_t>(),
-              N,
-              N_pad,
-              C,
-              buffer_b.data_ptr(),
-              per_thread_bytes_b,
-              a_vnni_global.data_ptr<scalar_t>());
-        }
-      });
+  // ----- Stage B: einsum via at::bmm over batch = C. -----
+  // a, b are [C, N, N]; the 2nd axis Stage A wrote is the einsum's contracted
+  // k axis.
+  //   outgoing  cik,cjk->cij :  out[c,i,j] = Σ_k a[c,i,k] b[c,j,k] = bmm(a, bᵀ)
+  //   incoming  ckj,cki->cij :  out[c,i,j] = Σ_k a[c,k,j] b[c,k,i] = bmm(bᵀ, a)
+  // The transposed operand is transpose-contiguous, so cpublas bmm sets
+  // transa/transb and does NOT copy it.  Output einsum_out_chw is [C, N, N].
+  at::Tensor einsum_out_chw = outgoing
+      ? at::bmm(a_tensor, b_tensor.transpose(1, 2))
+      : at::bmm(b_tensor.transpose(1, 2), a_tensor);
   // Drop a and b — Stage C doesn't need them.
   a_tensor = at::Tensor();
   b_tensor = at::Tensor();
