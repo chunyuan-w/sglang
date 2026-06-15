@@ -900,17 +900,22 @@ at::Tensor fused_triangle_multiplication(
               a_vnni_global.data_ptr<scalar_t>());
         }
       });
-  // Drop a and b — Stage C doesn't need them.
-  a_tensor = at::Tensor();
+  // Drop b — Stage C doesn't need it.  KEEP a_tensor alive: we reuse its
+  // storage for the NHC einsum result below.
   b_tensor = at::Tensor();
   auto t_stage_b = prof ? clock::now() : clock::time_point{};
 
-  // Permute [C, N, N] → [N, N, C] for center_norm.  bmm leaves the result
-  // CHW-contiguous; the contig pass here is the same shape transpose that
-  // the eager bench pays.
-  // TODO(perf): replace with an in-kernel CHW->NHC transpose that fuses with
-  // center_norm; saves ~5.5 GB of bf16 write traffic at N=4655.
-  auto einsum_out = einsum_out_chw.permute({1, 2, 0}).contiguous();
+  // Transpose [C, N, N] → [N, N, C] for center_norm, writing into a_tensor's
+  // storage (numel C*N*N_pad >= N*N*C) instead of a fresh .contiguous() buffer.
+  // a_tensor's pages were already faulted in during Stage A, so this writes
+  // *warm* memory rather than cold-faulting a new ~1.9 GB (N=2752) / ~5.5 GB
+  // (N=4655) per-call allocation — mirrors the TPP kernel's out-buffer reuse
+  // and removes one of the cold first-touches that dominate under the
+  // inter-kernel allocator churn of the production E2E path.
+  auto einsum_out = a_tensor.flatten()
+                        .narrow(0, 0, M * static_cast<int64_t>(C))
+                        .view({N, N, static_cast<int64_t>(C)});
+  einsum_out.copy_(einsum_out_chw.permute({1, 2, 0}));
   einsum_out_chw = at::Tensor();
   auto einsum_out_2d = einsum_out.view({M, static_cast<int64_t>(C)});
   layernorm_cpu(
@@ -943,8 +948,9 @@ at::Tensor fused_triangle_multiplication(
             M,
             C);
       });
-  // einsum_out (centered) no longer needed.
+  // einsum_out (centered, a view into a_tensor's storage) no longer needed.
   einsum_out = at::Tensor();
+  a_tensor = at::Tensor();
   auto t_gate_gemm = prof ? clock::now() : clock::time_point{};
   auto t_stage_c = t_gate_gemm;
 
