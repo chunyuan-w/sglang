@@ -122,6 +122,42 @@ mkdir -p "$(dirname "${LOG_FILE}")"
 echo "Running AlphaFold on single node for ${INPUT_JSON_PATH}, NCORES=${NCORES}, RANK=${RANK}, grid_self_attention_impl=${AF3_GRID_SELF_ATTENTION_IMPL}, self_attention_impl=${AF3_SELF_ATTENTION_IMPL}, triangle_multiplication_impl=${AF3_TRIANGLE_MULTIPLICATION_IMPL}, gated_linear_unit_impl=${AF3_GATED_LINEAR_UNIT_IMPL}, run_data_pipeline=${RUN_DATA_PIPELINE}, run_inference=${RUN_INFERENCE}, pad_to_buckets=${PAD_TO_BUCKETS}, output_dir=${OUTPUT_DIR}, log_file=${LOG_FILE}, match_op_bench_runtime=${MATCH_OP_BENCH_RUNTIME}, numactl_args=${NUMACTL_ARGS[*]}, python_launcher=${PYTHON_LAUNCHER[*]}, ld_preload=${LD_PRELOAD:-}"
 export JAX_PLATFORMS=cpu
 export LD_PRELOAD=/usr/local/lib/libiomp5.so:/usr/lib/x86_64-linux-gnu/libtcmalloc.so.4
+
+# ===================== PERF DIAG (remove after debugging) =====================
+# Dumps everything the torch xeon launcher banner does NOT show, so the fast
+# (original) vs slow (new) runs can be compared. Tee'd to LOG_FILE so it is
+# captured in the log file (the script's plain echoes go to the terminal only).
+{
+  echo "===================== RUN_PT211 PERF DIAG START ====================="
+  echo "[diag] timestamp            : $(date '+%Y-%m-%d %H:%M:%S')"
+  echo "[diag] this script          : ${BASH_SOURCE[0]}"
+  echo "[diag] SCRIPT_DIR           : ${SCRIPT_DIR}"
+  echo "[diag] sourced env.sh       : ${SCRIPT_DIR}/env.sh"
+  echo "[diag] cwd (pwd)            : $(pwd)"
+  echo "[diag] whoami               : $(whoami)"
+  echo "[diag] python               : $(command -v python 2>/dev/null) ($(python --version 2>&1))"
+  echo "[diag] python3              : $(command -v python3 2>/dev/null)"
+  echo "[diag] CONDA_PREFIX         : ${CONDA_PREFIX:-<unset>}"
+  echo "[diag] CONDA_DEFAULT_ENV    : ${CONDA_DEFAULT_ENV:-<unset>}"
+  echo "[diag] NCORES               : ${NCORES}"
+  echo "[diag] NUMA_NODE            : ${NUMA_NODE}"
+  echo "[diag] MATCH_OP_BENCH_RUNTIME: ${MATCH_OP_BENCH_RUNTIME}"
+  echo "[diag] PHYS_CORES           : ${PHYS_CORES:-<unset>}"
+  echo "[diag] NUMACTL_ARGS (outer) : ${NUMACTL_ARGS[*]}"
+  echo "[diag] PYTHON_LAUNCHER      : ${PYTHON_LAUNCHER[*]}"
+  echo "[diag] nproc                : $(nproc)"
+  echo "[diag] AF3_GRID_SELF_ATTENTION_IMPL     : ${AF3_GRID_SELF_ATTENTION_IMPL}"
+  echo "[diag] AF3_SELF_ATTENTION_IMPL          : ${AF3_SELF_ATTENTION_IMPL}"
+  echo "[diag] AF3_TRIANGLE_MULTIPLICATION_IMPL : ${AF3_TRIANGLE_MULTIPLICATION_IMPL}"
+  echo "[diag] AF3_GATED_LINEAR_UNIT_IMPL       : ${AF3_GATED_LINEAR_UNIT_IMPL}"
+  echo "[diag] --- threading / allocator / lib env (sorted) ---"
+  env | grep -E '^(OMP_|KMP_|GOMP_|MKL_|DNNL_|IPEX_|TORCH|ATEN|LD_PRELOAD|LD_LIBRARY_PATH|MALLOC|TCMALLOC|JEMALLOC|NUMA|PYTHONPATH|VECLIB|OPENBLAS|GOTO|JAX_)' | sort
+  echo "[diag] --- full content of the sourced env.sh ---"
+  cat "${SCRIPT_DIR}/env.sh" 2>/dev/null || echo "[diag] (could not read ${SCRIPT_DIR}/env.sh)"
+  echo "===================== RUN_PT211 PERF DIAG END ======================="
+} 2>&1 | tee -a "${LOG_FILE}"
+# =============================================================================
+
 time numactl "${NUMACTL_ARGS[@]}" "${PYTHON_LAUNCHER[@]}" run_alphafold.py \
     --db_dir=${DB_DIR} \
     --jackhmmer_n_cpu=${NCORES} \
