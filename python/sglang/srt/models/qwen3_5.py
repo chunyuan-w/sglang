@@ -1469,8 +1469,10 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLM):
 
         is_fused_expert = False
         fused_expert_params_mapping = [
-            ("experts.w13_weight", "experts.gate_up_proj", 0, "w1"),
-            ("experts.w2_weight", "experts.down_proj", 0, "w2"),
+            ("experts.w13_weight", "experts.gate_up_proj.weight", 0, "w1"),
+            ("experts.w2_weight", "experts.down_proj.weight", 0, "w2"),
+            ("experts.w13_qweight", "experts.gate_up_proj.qweight", 0, "w1"),
+            ("experts.w2_qweight", "experts.down_proj.qweight", 0, "w2"),
         ]
 
         num_experts = self.config.num_experts
@@ -1594,6 +1596,10 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLM):
                             and name_mapped not in params_dict
                         ):
                             continue
+                        if name_mapped not in params_dict and name_mapped.endswith("_weight"):
+                            alt_name_mapped = name_mapped[:-len("_weight")] + "_qweight"
+                            if alt_name_mapped in params_dict:
+                                name_mapped = alt_name_mapped
                         param = params_dict[name_mapped]
                         # We should ask the weight loader to return success or
                         # not here since otherwise we may skip experts with
@@ -1893,8 +1899,10 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
 
         is_fused_expert = False
         fused_expert_params_mapping = [
-            ("experts.w13_weight", "experts.gate_up_proj", 0, "w1"),
-            ("experts.w2_weight", "experts.down_proj", 0, "w2"),
+            ("experts.w13_weight", "experts.gate_up_proj.weight", 0, "w1"),
+            ("experts.w2_weight", "experts.down_proj.weight", 0, "w2"),
+            ("experts.w13_qweight", "experts.gate_up_proj.qweight", 0, "w1"),
+            ("experts.w2_qweight", "experts.down_proj.qweight", 0, "w2"),
         ]
 
         if self.enable_shared_expert_fusion:
@@ -2114,6 +2122,10 @@ class Qwen3_5MoeForConditionalGeneration(Qwen3VLForConditionalGeneration):
                             and name_mapped not in params_dict
                         ):
                             continue
+                        if name_mapped not in params_dict and name_mapped.endswith("_weight"):
+                            alt_name_mapped = name_mapped[:-len("_weight")] + "_qweight"
+                            if alt_name_mapped in params_dict:
+                                name_mapped = alt_name_mapped
                         param = params_dict[name_mapped]
                         # We should ask the weight loader to return success or
                         # not here since otherwise we may skip experts with
