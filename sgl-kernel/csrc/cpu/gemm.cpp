@@ -966,61 +966,6 @@ void weight_packed_linear_kernel_impl(
 
 }  // anonymous namespace
 
-// Serial tile loop over a packed-linear GEMM.  Unlike the parallel impl above,
-// this does NO internal parallel_2d, so it's safe to call from inside an outer
-// at::parallel_for without nested parallelism.  Used by fused_grid_attention_v5
-// where each outer thread owns one b and fills a per-thread qkvg_row scratch.
-template <typename scalar_t>
-void weight_packed_linear_serial_impl(
-    scalar_t* __restrict__ out,
-    const scalar_t* __restrict__ mat1,
-    const scalar_t* __restrict__ mat2_packed,
-    int64_t M,
-    int64_t N,
-    int64_t K,
-    int64_t mat1_strideM,
-    int64_t out_strideM) {
-  constexpr int64_t BLOCK_M = block_size_m();
-  constexpr int64_t BLOCK_N = block_size_n();
-  const int64_t MB = div_up(M, BLOCK_M);
-  const int64_t NB = div_up(N, BLOCK_N);
-
-  const bool use_brgemm = can_use_brgemm<scalar_t>(M);
-
-  alignas(64) float Ctmp[BLOCK_M * BLOCK_N];
-  loop_2d<scalar_t>(0, MB, 0, NB, BLOCK_N * K, [&](int64_t mb, int64_t nb, int64_t nb_offset) {
-    int64_t mb_start = mb * BLOCK_M;
-    int64_t mb_size = std::min(M - mb_start, BLOCK_M);
-    int64_t nb_start = nb * BLOCK_N;
-    int64_t nb_size = std::min(N - nb_start, BLOCK_N);
-
-    tinygemm_kernel<scalar_t, /*has_bias=*/false>(
-        /*   A */ mat1 + mb_start * mat1_strideM,
-        /*   B */ mat2_packed + nb_start * K,
-        /*   C */ out + mb_start * out_strideM + nb_start,
-        /* Ctmp*/ Ctmp,
-        /* bias*/ nullptr,
-        /*   M */ mb_size,
-        /*   N */ nb_size,
-        /*   K */ K,
-        /* lda */ mat1_strideM,
-        /* ldb */ nb_size,
-        /* ldc */ out_strideM,
-        /* brg */ use_brgemm);
-  });
-
-  if (use_brgemm) {
-    at::native::cpublas::brgemm_release();
-  }
-}
-
-template void weight_packed_linear_serial_impl<at::BFloat16>(
-    at::BFloat16*, const at::BFloat16*, const at::BFloat16*,
-    int64_t, int64_t, int64_t, int64_t, int64_t);
-template void weight_packed_linear_serial_impl<at::Half>(
-    at::Half*, const at::Half*, const at::Half*,
-    int64_t, int64_t, int64_t, int64_t, int64_t);
-
 // tinygemm interface
 template <typename scalar_t>
 void tinygemm_kernel(
@@ -1122,8 +1067,8 @@ at::Tensor convert_weight_packed(at::Tensor& weight) {
 }
 
 // Variant of weight_packed_linear that writes into a caller-provided `out`
-// tensor instead of allocating a fresh one.  Used by fused_grid_attention_v2
-// to keep the [B,N,4D] qkvg (~22 GB at N=4655, bf16) persistent across calls.
+// tensor instead of allocating a fresh one.  Used by fused_grid_attention for
+// the [B,N,4D] qkvg stage-A output and the in-place stage-C out_proj.
 void weight_packed_linear_out(
     at::Tensor& out,
     at::Tensor& mat1,

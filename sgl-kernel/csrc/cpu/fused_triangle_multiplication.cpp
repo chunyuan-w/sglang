@@ -38,8 +38,9 @@
 
 namespace {
 
-// SGL_TM_PROFILE=1 to dump per-stage timing.  Same idiom as v2's
-// SGL_V2_PROFILE; reading the env once at first use keeps the fast path free.
+// SGL_TM_PROFILE=1 to dump per-stage timing.  Same idiom as
+// fused_grid_attention's SGL_FGA_PROFILE; reading the env once at first use
+// keeps the fast path free.
 inline bool tm_profile_enabled() {
   static const bool enabled = [] {
     const char* s = std::getenv("SGL_TM_PROFILE");
