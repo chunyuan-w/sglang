@@ -1,7 +1,7 @@
 /*****************************************************************************************
  * Fused grid self-attention kernel for sglang CPU backend.
  *
- * Stage-split fusion (the surviving design after benchmarking several variants):
+ * Stage-split fusion:
  *   - Stage A: one concat QKV+gating projection (weight_packed_linear) over the
  *     whole [B*N, D] pair, so the pair is streamed once and Q/K/V/gating land in
  *     a single [B, N, 4*D] buffer.
@@ -10,7 +10,7 @@
  *     softmax @ V; multiply by sigmoid(gate) and store interleaved across heads
  *     into a [B, N, H*K] buffer.
  *   - Stage C: the final output projection as a standard weight_packed_linear,
- *     written back into `pair` in place (matching how TPP splits its loops).
+ *     written back into `pair` in place.
  *
  * Weight layout assumption:
  *   Q/K/V/gating weights are packed via convert_weight_packed on the full
@@ -20,7 +20,7 @@
  *   K=32).  Other K values trip a runtime check.
  ****************************************************************************************/
 #include "common.h"
-#include "flash_attn.h"  // also transitively includes vec_pack.h (no header guard)
+#include "flash_attn.h"
 #include "gemm.h"
 
 #include <chrono>
@@ -198,7 +198,7 @@ void fused_attention_core_impl(
     scalar_t* V_vnni = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * N_pad * K));
 
     // Non-flash scratch: full [BLOCK_M, N_pad] logits + bf16 softmax for the
-    // attn @ V brgemm.  For N=4655 this is ~600KB + ~300KB, inside GNR's 2MB L2.
+    // attn @ V brgemm.
     float* logits_fp32 = reinterpret_cast<float*>(bump(sizeof(float) * BLOCK_M * N_pad));
     scalar_t* softmax_bf16 = reinterpret_cast<scalar_t*>(bump(sizeof(scalar_t) * BLOCK_M * N_pad));
     float* v_prime = reinterpret_cast<float*>(bump(sizeof(float) * BLOCK_M * K));
@@ -387,10 +387,7 @@ at::Tensor fused_grid_attention(
   auto t_attn = prof ? clock::now() : clock::time_point{};
 
   // ----- Stage C: final output projection -----
-  // Write back into `pair` in place (TPP trick).  The Python
-  // wrapper always feeds a fresh pair (post-LayerNorm), so clobbering it is
-  // safe.  Removes one 5.5 GB at::empty/munmap cycle per call.  Reuses
-  // `pair_2d` declared above for Stage A.
+  // Write back into `pair` in place. Reuses `pair_2d` declared above for Stage A.
   auto gated_attn_2d = gated_attn.view({static_cast<int64_t>(B) * N, D});
   auto t_out_alloc = prof ? clock::now() : clock::time_point{};
 
