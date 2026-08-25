@@ -432,6 +432,8 @@ class Envs:
     # precedence when both are set.
     SGLANG_GRAPH_BATCH_CAPTURE = EnvBool(False)
     SGLANG_TORCH_PROFILER_DIR = EnvStr("/tmp")
+    # Log the per-op key_averages() summary alongside the exported trace.
+    SGLANG_LOG_PROFILE_TABLE = EnvBool(False)
     # Allocator-history buffer for /start_profile activities=["MEM"]; the
     # default truncates long windows (each entry is one alloc/free event).
     SGLANG_MEM_PROFILE_MAX_ENTRIES = EnvInt(100000)

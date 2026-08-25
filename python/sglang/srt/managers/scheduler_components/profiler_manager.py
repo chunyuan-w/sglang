@@ -310,6 +310,22 @@ class SchedulerProfilerManager:
         else:
             return merge_message
 
+    def _format_profile_summary(self) -> str:
+        """Render the per-op table torch.profiler builds from the same events."""
+        activities = self.profiler_activities or []
+        # Sorting on a device column the run never recorded raises inside
+        # key_averages(), so pick the column the enabled activities can fill.
+        if "GPU" in activities and torch.cuda.is_available():
+            sort_by = "self_cuda_time_total"
+        elif "XPU" in activities and hasattr(torch, "xpu"):
+            sort_by = "self_xpu_time_total"
+        else:
+            sort_by = "self_cpu_time_total"
+        # group_by_input_shape needs record_shapes; it is off unless requested.
+        return self.torch_profiler.key_averages(
+            group_by_input_shape=bool(self.torch_profiler_record_shapes)
+        ).table(sort_by=sort_by)
+
     def _stop_profile(
         self, stage: Optional[ForwardMode] = None
     ) -> ProfileReqOutput | None:
@@ -356,6 +372,13 @@ class SchedulerProfilerManager:
                 self.torch_profiler.export_chrome_trace(
                     os.path.join(self.torch_profiler_output_dir, filename)
                 )
+                if envs.SGLANG_LOG_PROFILE_TABLE.get():
+                    logger.info(
+                        "Profile summary%s (%s):\n%s",
+                        stage_suffix,
+                        filename,
+                        self._format_profile_summary(),
+                    )
             torch.distributed.barrier(self.dp_tp_cpu_group)
 
         if self.rpd_profiler is not None:
