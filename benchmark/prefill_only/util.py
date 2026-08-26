@@ -30,6 +30,10 @@ class BenchmarkConfig:
         self.num_unique_requests = 100
         self.distribution = "POISSON"  # Options: "CONSTANT", "POISSON"
         self.profile = False
+        # Profile only a window of forward passes. num_steps makes the server
+        # stop on its own, so the client must not also send STOP_PROFILE.
+        self.profile_start_step = None
+        self.profile_num_steps = None
 
         # Garbage Collection Control
         self.freeze_gc = True  # Enable/disable garbage collection freezing
@@ -282,7 +286,10 @@ async def make_http_call(
 
 
 async def send_profile_request(
-    profile_text: str, http_url: str, session: Optional[aiohttp.ClientSession] = None
+    profile_text: str,
+    http_url: str,
+    session: Optional[aiohttp.ClientSession] = None,
+    payload: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     Send a profile request (START_PROFILE or STOP_PROFILE) and wait for completion.
@@ -291,6 +298,7 @@ async def send_profile_request(
         profile_text: "START_PROFILE" or "STOP_PROFILE"
         http_url: Base HTTP URL (will derive profile endpoints from this)
         session: Optional aiohttp session to use
+        payload: Optional ProfileReq fields to send as the request body
     """
     try:
         if session:
@@ -312,7 +320,9 @@ async def send_profile_request(
 
             headers = {"Content-Type": "application/json"}
 
-            async with session.post(endpoint_url, headers=headers) as resp:
+            async with session.post(
+                endpoint_url, headers=headers, json=payload
+            ) as resp:
                 resp_text = await resp.text()
                 if resp.status == 200:
                     print(f"{profile_text} request completed")
@@ -748,7 +758,14 @@ async def run_generic_benchmark(
 
         # Send START_PROFILE if profiling is enabled
         if config.profile:
-            await send_profile_request("START_PROFILE", http_url, session=session)
+            start_payload = {}
+            if config.profile_start_step is not None:
+                start_payload["start_step"] = config.profile_start_step
+            if config.profile_num_steps is not None:
+                start_payload["num_steps"] = config.profile_num_steps
+            await send_profile_request(
+                "START_PROFILE", http_url, session=session, payload=start_payload or None
+            )
 
         # Add progress bar for sending requests
         with tqdm(
@@ -793,8 +810,9 @@ async def run_generic_benchmark(
                 completed_tasks.append(task)
                 completion_pbar.update(1)
 
-        # Send STOP_PROFILE if profiling is enabled
-        if config.profile:
+        # Send STOP_PROFILE if profiling is enabled. num_steps already stopped
+        # the server-side profiler, and a second stop would error out.
+        if config.profile and config.profile_num_steps is None:
             await send_profile_request("STOP_PROFILE", http_url, session=session)
 
     completion_end_time = asyncio.get_running_loop().time()
