@@ -83,7 +83,10 @@ def init_torch_distributed(
     if not is_draft_worker:
         if device == "cpu":
             _init_cpu_threads_env(
-                tp_size=ps.tp_size, tp_rank=ps.tp_rank, local_omp_cpuid=local_omp_cpuid
+                tp_size=ps.tp_size,
+                tp_rank=ps.tp_rank,
+                local_omp_cpuid=local_omp_cpuid,
+                dist_init_method=dist_init_method,
             )
 
         # Only initialize the distributed environment on the target model worker.
@@ -192,7 +195,11 @@ def _set_all_reduce_flags(*, server_args: ServerArgs) -> None:
 
 
 def _init_cpu_threads_env(
-    *, tp_size: int, tp_rank: int, local_omp_cpuid: Optional[List[int]]
+    *,
+    tp_size: int,
+    tp_rank: int,
+    local_omp_cpuid: Optional[List[int]],
+    dist_init_method: Optional[str] = None,
 ) -> None:
     if _is_cpu_amx_available or _is_cpu_arm64:
         # Bind OpenMP threads to CPU cores
@@ -200,6 +207,29 @@ def _init_cpu_threads_env(
 
         # Set local size to hint SGLang to use shared memory based AllReduce
         os.environ["LOCAL_SIZE"] = str(tp_size)
+
+        # shm.cpp derives its /dev/shm segment names from MASTER_ADDR /
+        # MASTER_PORT + rank. When several sglang engines run on one host
+        # (e.g. sglang_router.launch_server --dp-size N, or two manual
+        # instances behind an external router), those env vars are usually
+        # unset or identical, and every engine's rank 0 ends up mapping the
+        # same segment. Four+ TP ranks then share two shm buffers, the
+        # internal collective sequence counter desyncs, and decode hangs
+        # a few seconds into steady state (detokenizer heartbeat times out,
+        # then the 300s watchdog kills the replica).
+        #
+        # dist_init_method (tcp://host:port) is unique per engine — its port
+        # is the one this engine's TP group actually rendezvous'd on — so
+        # exporting it into MASTER_ADDR / MASTER_PORT before calling into
+        # shm_initialize gives every engine an independent shm segment
+        # namespace without needing any user env fiddling.
+        if dist_init_method and dist_init_method.startswith("tcp://"):
+            hostport = dist_init_method[len("tcp://") :]
+            if ":" in hostport:
+                host, port = hostport.rsplit(":", 1)
+                os.environ.setdefault("MASTER_ADDR", host)
+                os.environ.setdefault("MASTER_PORT", port)
+
         torch.ops.sgl_kernel.initialize(tp_size, tp_rank)
 
     else:
